@@ -2615,6 +2615,7 @@ enum mnt_tree_flags_t {
 	MNT_TREE_MOVE = BIT(0),
 	MNT_TREE_BENEATH = BIT(1),
 	MNT_TREE_PROPAGATION = BIT(2),
+	MNT_TREE_CONTAINER	= BIT(3),
 };
 
 /**
@@ -3660,8 +3661,11 @@ static int do_move_mount(struct path *old_path,
 	if (!is_mounted(&old->mnt))
 		goto out;
 
-	if (check_mnt(old)) {
-		/* if the source is in our namespace... */
+	if (flags & MNT_TREE_CONTAINER) {
+		if (!is_anon_ns(ns) || mnt_has_parent(old))
+			goto out;
+	} else if (old->mnt_ns == p->mnt_ns) {
+		/* if the source is in the same namespace as the mountpoint... */
 		/* ... it should be detachable from parent */
 		if (!mnt_has_parent(old) || IS_MNT_LOCKED(old))
 			goto out;
@@ -4566,7 +4570,7 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 	 */
 	vfs_clean_context(fc);
 
-	ns = alloc_mnt_ns(current->nsproxy->mnt_ns->user_ns, true);
+	ns = alloc_mnt_ns(fc->user_ns, true);
 	if (IS_ERR(ns)) {
 		ret = PTR_ERR(ns);
 		goto err_path;
@@ -4726,18 +4730,38 @@ SYSCALL_DEFINE5(move_mount,
 		return PTR_ERR(from_name);
 
 	if (unlikely(flags & MOVE_MOUNT_T_CONTAINER_ROOT)) {
-		if (flags & (MOVE_MOUNT_T_SYMLINKS |
-			     MOVE_MOUNT_T_AUTOMOUNTS |
-			     MOVE_MOUNT_T_EMPTY_PATH))
+		if (flags & MOVE_MOUNT_T_EMPTY_PATH)
 			return -EINVAL;
-		if (strncpy_from_user(buf, to_pathname, 2) < 0)
+		size_t nlen = strncpy_from_user(buf, to_pathname, 2);
+		if (nlen < 0)
 			return -EFAULT;
-		if (buf[0] != '/' || buf[1] != '\0')
+		if (nlen < 1)
 			return -EINVAL;
-		ret = filename_lookup(from_dfd, from_name, lflags, &from_path, NULL);
-		if (ret)
-			return ret;
-		return set_container_root(&from_path, to_dfd);
+		if (buf[0] == '/' && buf[1] == '\0') {
+			/* Set the root.  This might be better done by
+			 * requiring to_pathname to be NULL.
+			 */
+			ret = filename_lookup(from_dfd, from_name, lflags, &from_path, NULL);
+			if (ret)
+				return ret;
+			return set_container_root(&from_path, to_dfd);
+		}
+
+		/* Check the fd is a container handle.  This isn't a perfect
+		 * check as another thread can jump in and change the fd
+		 * between now and when pathwalk looks it up.
+		 */
+		if (buf[0] == '/')
+			return -EINVAL;
+		struct fd f = fdget(to_dfd);
+		if (fd_empty(f))
+			return -EBADF;
+		if (!is_container_file(fd_file(f))) {
+			fdput(f);
+			return -EINVAL;
+		}
+		fdput(f);
+		mflags |= MNT_TREE_CONTAINER;
 	}
 
 	lflags = 0;
