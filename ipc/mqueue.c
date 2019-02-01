@@ -33,6 +33,7 @@
 #include <linux/mutex.h>
 #include <linux/nsproxy.h>
 #include <linux/pid.h>
+#include <linux/container.h>
 #include <linux/ipc_namespace.h>
 #include <linux/user_namespace.h>
 #include <linux/slab.h>
@@ -399,6 +400,14 @@ out_inode:
 	iput(inode);
 err:
 	return ERR_PTR(ret);
+}
+
+static void mqueue_set_container(struct fs_context *fc)
+{
+	struct mqueue_fs_context *ctx = fc->fs_private;
+
+	put_ipc_ns(ctx->ipc_ns);
+	ctx->ipc_ns = get_ipc_ns(fc->container->ns->ipc_ns);
 }
 
 static int mqueue_fill_super(struct super_block *sb, struct fs_context *fc)
@@ -1631,6 +1640,7 @@ static const struct super_operations mqueue_super_ops = {
 
 static const struct fs_context_operations mqueue_fs_context_ops = {
 	.free		= mqueue_fs_context_free,
+	.set_container	= mqueue_set_container,
 	.get_tree	= mqueue_get_tree,
 };
 

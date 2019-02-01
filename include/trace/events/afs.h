@@ -175,12 +175,14 @@ enum yfs_cm_operation {
 	EM(afs_cell_trace_free,			"FREE      ") \
 	EM(afs_cell_trace_get_atcell,		"GET atcell") \
 	EM(afs_cell_trace_get_server,		"GET server") \
+	EM(afs_cell_trace_get_set_container,	"GET s-cont") \
 	EM(afs_cell_trace_get_vol,		"GET vol   ") \
 	EM(afs_cell_trace_purge,		"PURGE     ") \
 	EM(afs_cell_trace_put_atcell,		"PUT atcell") \
 	EM(afs_cell_trace_put_candidate,	"PUT candid") \
 	EM(afs_cell_trace_put_final,		"PUT final ") \
 	EM(afs_cell_trace_put_server,		"PUT server") \
+	EM(afs_cell_trace_put_set_container,	"PUT s-cont") \
 	EM(afs_cell_trace_put_vol,		"PUT vol   ") \
 	EM(afs_cell_trace_queue_again,		"QUE again ") \
 	EM(afs_cell_trace_queue_dns,		"QUE dns   ") \

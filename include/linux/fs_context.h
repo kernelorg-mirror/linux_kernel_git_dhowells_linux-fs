@@ -119,6 +119,7 @@ struct fs_context_operations {
 	int (*dup)(struct fs_context *fc, struct fs_context *src_fc);
 	int (*parse_param)(struct fs_context *fc, struct fs_parameter *param);
 	int (*parse_monolithic)(struct fs_context *fc, void *data);
+	void (*set_container)(struct fs_context *fc);
 	int (*get_tree)(struct fs_context *fc);
 	int (*reconfigure)(struct fs_context *fc);
 };
@@ -141,6 +142,7 @@ extern int vfs_parse_fs_string(struct fs_context *fc, const char *key,
 int vfs_parse_monolithic_sep(struct fs_context *fc, void *data,
 			     char *(*sep)(char **));
 extern int generic_parse_monolithic(struct fs_context *fc, void *data);
+extern void do_set_container(struct fs_context *fc);
 extern void vfs_set_container(struct fs_context *fc, struct container *container);
 extern int vfs_get_tree(struct fs_context *fc);
 extern void put_fs_context(struct fs_context *fc);
