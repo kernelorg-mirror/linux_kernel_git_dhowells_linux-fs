@@ -2597,24 +2597,47 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		if (fd_empty(f))
 			return ERR_PTR(-EBADF);
 
-		if (flags & LOOKUP_LINKAT_EMPTY) {
-			if (fd_file(f)->f_cred != current_cred() &&
-			    !ns_capable(fd_file(f)->f_cred->user_ns, CAP_DAC_READ_SEARCH))
-				return ERR_PTR(-ENOENT);
-		}
+		if (!is_container_file(fd_file(f))) {
+			if (flags & LOOKUP_LINKAT_EMPTY) {
+				if (fd_file(f)->f_cred != current_cred() &&
+				    !ns_capable(fd_file(f)->f_cred->user_ns, CAP_DAC_READ_SEARCH))
+					return ERR_PTR(-ENOENT);
+			}
 
-		dentry = fd_file(f)->f_path.dentry;
+			dentry = fd_file(f)->f_path.dentry;
 
-		if (*s && unlikely(!d_can_lookup(dentry)))
-			return ERR_PTR(-ENOTDIR);
+			if (*s && unlikely(!d_can_lookup(dentry)))
+				return ERR_PTR(-ENOTDIR);
 
-		nd->path = fd_file(f)->f_path;
-		if (flags & LOOKUP_RCU) {
-			nd->inode = nd->path.dentry->d_inode;
-			nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+			nd->path = fd_file(f)->f_path;
+			if (flags & LOOKUP_RCU) {
+				nd->inode = nd->path.dentry->d_inode;
+				nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+			} else {
+				path_get(&nd->path);
+				nd->inode = nd->path.dentry->d_inode;
+			}
 		} else {
-			path_get(&nd->path);
-			nd->inode = nd->path.dentry->d_inode;
+			struct container *c = fd_file(f)->private_data;
+			unsigned seq;
+
+			if (!*s)
+				return ERR_PTR(-EINVAL);
+
+			if (flags & LOOKUP_RCU) {
+				do {
+					seq = read_seqcount_begin(&c->seq);
+					nd->path = c->root;
+					nd->inode = nd->path.dentry->d_inode;
+					nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
+				} while (read_seqcount_retry(&c->seq, seq));
+			} else {
+				spin_lock(&c->lock);
+				nd->path = c->root;
+				path_get(&nd->path);
+				spin_unlock(&c->lock);
+				nd->inode = nd->path.dentry->d_inode;
+			}
 		}
 	}
 
