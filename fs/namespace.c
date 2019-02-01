@@ -1000,9 +1000,16 @@ static void put_mountpoint(struct mountpoint *mp)
 	__put_mountpoint(mp, &ex_mountpoints);
 }
 
+static inline int __check_mnt(struct mount *mnt, struct mnt_namespace *mnt_ns)
+{
+	if (!mnt_ns)
+		mnt_ns = current->nsproxy->mnt_ns;
+	return mnt->mnt_ns == mnt_ns;
+}
+
 static inline int check_mnt(struct mount *mnt)
 {
-	return mnt->mnt_ns == current->nsproxy->mnt_ns;
+	return __check_mnt(mnt, NULL);
 }
 
 static inline bool check_anonymous_mnt(struct mount *mnt)
@@ -3763,13 +3770,14 @@ static int do_move_mount_old(struct path *path, const char *old_name)
  * add a mount into a namespace's mount tree
  */
 static int do_add_mount(struct mount *newmnt, struct mountpoint *mp,
-			const struct path *path, int mnt_flags)
+			const struct path *path, int mnt_flags,
+			struct mnt_namespace *mnt_ns)
 {
 	struct mount *parent = real_mount(path->mnt);
 
 	mnt_flags &= ~MNT_INTERNAL_FLAGS;
 
-	if (unlikely(!check_mnt(parent))) {
+	if (unlikely(!__check_mnt(parent, mnt_ns))) {
 		/* that's acceptable only for automounts done in private ns */
 		if (!(mnt_flags & MNT_SHRINKABLE))
 			return -EINVAL;
@@ -3825,7 +3833,8 @@ static int do_new_mount_fc(struct fs_context *fc, struct path *mountpoint,
 		mntput(mnt);
 		return PTR_ERR(mp);
 	}
-	error = do_add_mount(real_mount(mnt), mp, mountpoint, mnt_flags);
+	error = do_add_mount(real_mount(mnt), mp, mountpoint, mnt_flags,
+			     fc->container ? fc->container->ns->mnt_ns : NULL);
 	unlock_mount(mp);
 	if (error < 0)
 		mntput(mnt);
@@ -3932,7 +3941,7 @@ int finish_automount(struct vfsmount *m, const struct path *path)
 		goto discard_locked;
 	}
 
-	err = do_add_mount(mnt, mp, path, path->mnt->mnt_flags | MNT_SHRINKABLE);
+	err = do_add_mount(mnt, mp, path, path->mnt->mnt_flags | MNT_SHRINKABLE, NULL);
 	unlock_mount(mp);
 	if (unlikely(err))
 		goto discard;

@@ -15,6 +15,7 @@
 #include <linux/sched/stat.h>
 #include <linux/module.h>
 #include <linux/bitops.h>
+#include <linux/container.h>
 #include <linux/user_namespace.h>
 #include <linux/fs_context.h>
 #include <linux/mount.h>
@@ -249,7 +250,11 @@ static int proc_init_fs_context(struct fs_context *fc)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->pid_ns = get_pid_ns(task_active_pid_ns(current));
+	if (fc->container)
+		ctx->pid_ns = get_pid_ns(fc->container->pid_ns);
+	else
+		ctx->pid_ns = get_pid_ns(task_active_pid_ns(current));
+
 	put_user_ns(fc->user_ns);
 	fc->user_ns = get_user_ns(ctx->pid_ns->user_ns);
 	fc->fs_private = ctx;
