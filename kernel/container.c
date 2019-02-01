@@ -20,6 +20,7 @@
 #include <linux/syscalls.h>
 #include <linux/printk.h>
 #include <linux/security.h>
+#include <linux/proc_fs.h>
 #include "namespaces.h"
 
 struct container init_container = {
@@ -68,6 +69,88 @@ void put_container(struct container *c)
 		c = parent;
 	}
 }
+
+static void *container_proc_start(struct seq_file *m, loff_t *_pos)
+{
+	struct container *c = current->container;
+	struct list_head *p;
+	loff_t pos = *_pos;
+
+	spin_lock(&c->lock);
+
+	if (pos <= 1) {
+		*_pos = 1;
+		return (void *)1UL; /* Banner on first line */
+	}
+
+	if (pos == 2)
+		return c; /* Current container on second line */
+
+	/* Subordinate containers thereafter */
+	p = c->children.next;
+	pos--;
+	for (pos--; pos > 0 && p != &c->children; pos--)
+		p = p->next;
+
+	if (p == &c->children)
+		return NULL;
+	return container_of(p, struct container, child_link);
+}
+
+static void *container_proc_next(struct seq_file *m, void *v, loff_t *_pos)
+{
+	struct container *c = current->container, *vc = v;
+	struct list_head *p;
+	loff_t pos = *_pos;
+
+	pos++;
+	*_pos = pos;
+	if (pos == 2)
+		return c; /* Current container on second line */
+
+	if (pos == 3)
+		p = &c->children;
+	else
+		p = &vc->child_link;
+	p = p->next;
+	if (p == &c->children)
+		return NULL;
+	return container_of(p, struct container, child_link);
+}
+
+static void container_proc_stop(struct seq_file *m, void *v)
+{
+	struct container *c = current->container;
+
+	spin_unlock(&c->lock);
+}
+
+static int container_proc_show(struct seq_file *m, void *v)
+{
+	struct user_namespace *uns = current_user_ns();
+	struct container *c = v;
+	const char *name;
+
+	if (v == (void *)1UL) {
+		seq_puts(m, "NAME                               ID USE FL OWNER GROUP\n");
+		return 0;
+	}
+
+	name = (c == m->private) ? "<current>" : c->name;
+	seq_printf(m, "%-24s %12llu %3u %02lx %5d %5d\n",
+		   name, c->id, refcount_read(&c->usage), c->flags,
+		   from_kuid_munged(uns, c->cred->uid),
+		   from_kgid_munged(uns, c->cred->gid));
+
+	return 0;
+}
+
+static const struct seq_operations container_proc_ops = {
+	.start	= container_proc_start,
+	.next	= container_proc_next,
+	.stop	= container_proc_stop,
+	.show	= container_proc_show,
+};
 
 /*
  * Allow the user to poll for the container dying.
@@ -344,5 +427,12 @@ SYSCALL_DEFINE5(container_create,
 		put_container(c);
 	return fd;
 }
+
+static int __init init_container_fs(void)
+{
+	proc_create_seq("containers", 0, NULL, &container_proc_ops);
+	return 0;
+}
+fs_initcall(init_container_fs);
 
 #endif /* CONFIG_CONTAINERS */
