@@ -2773,7 +2773,10 @@ SYSCALL_DEFINE1(fork_into_container, int, containerfd)
 		struct container *dest_container = fd_file(f)->private_data;
 
 		args.dest_container = dest_container;
-		ret = kernel_clone(&args);
+		if (!dest_container->ns->mnt_ns)
+			ret = -ENOENT;
+		else
+			ret = kernel_clone(&args);
 	}
 
 	fdput(f);

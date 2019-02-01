@@ -4617,6 +4617,71 @@ static inline int vfs_move_mount(struct path *from_path, struct path *to_path,
 }
 
 /*
+ * Create a mount namespace for a container and set the root mount in it.
+ */
+static int set_container_root(struct path *path, int fd)
+{
+	struct mnt_namespace *mnt_ns;
+	struct container *container;
+	struct mount *mnt = real_mount(path->mnt);
+	struct fd f;
+	LIST_HEAD(tmp);
+	int ret;
+
+	f = fdget(fd);
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (!is_container_file(fd_file(f)))
+		goto out_fd;
+
+	ret = -EBUSY;
+	container = fd_file(f)->private_data;
+	if (container->ns->mnt_ns)
+		goto out_fd;
+
+	mnt_ns = alloc_mnt_ns(container->cred->user_ns, false);
+	if (IS_ERR(mnt_ns)) {
+		ret = PTR_ERR(mnt_ns);
+		goto out_fd;
+	}
+
+	ret = -EBUSY;
+	namespace_lock();
+	lock_mount_hash();
+	spin_lock(&container->lock);
+
+	if (!container->ns->mnt_ns) {
+		move_from_ns(mnt, &tmp); /* Obtain the namespace's ref */
+		list_del(&mnt->mnt_list);
+
+		mnt_ns->root = mnt;
+		mnt_ns->nr_mounts = 1;
+		mnt_add_to_ns(mnt_ns, mnt); /* Give ref to namespace */
+
+		container->ns->mnt_ns = mnt_ns;
+
+		path_get(path);
+		write_seqcount_begin(&container->seq);
+		container->root = *path;
+		write_seqcount_end(&container->seq);
+
+		mnt_ns = NULL;
+		ret = 0;
+	}
+
+	spin_unlock(&container->lock);
+	unlock_mount_hash();
+	namespace_unlock();
+
+	if (ret < 0)
+		put_mnt_ns(mnt_ns);
+out_fd:
+	fdput(f);
+	return ret;
+}
+
+/*
  * Move a mount from one place to another.  In combination with
  * fsopen()/fsmount() this is used to install a new mount and in combination
  * with open_tree(OPEN_TREE_CLONE [| AT_RECURSIVE]) it can be used to copy
@@ -4635,6 +4700,7 @@ SYSCALL_DEFINE5(move_mount,
 	struct filename *from_name __free(putname) = NULL;
 	unsigned int lflags, uflags;
 	enum mnt_tree_flags_t mflags = 0;
+	char buf[2];
 	int ret = 0;
 
 	if (!may_mount())
@@ -4658,6 +4724,21 @@ SYSCALL_DEFINE5(move_mount,
 	from_name = getname_maybe_null(from_pathname, uflags);
 	if (IS_ERR(from_name))
 		return PTR_ERR(from_name);
+
+	if (unlikely(flags & MOVE_MOUNT_T_CONTAINER_ROOT)) {
+		if (flags & (MOVE_MOUNT_T_SYMLINKS |
+			     MOVE_MOUNT_T_AUTOMOUNTS |
+			     MOVE_MOUNT_T_EMPTY_PATH))
+			return -EINVAL;
+		if (strncpy_from_user(buf, to_pathname, 2) < 0)
+			return -EFAULT;
+		if (buf[0] != '/' || buf[1] != '\0')
+			return -EINVAL;
+		ret = filename_lookup(from_dfd, from_name, lflags, &from_path, NULL);
+		if (ret)
+			return ret;
+		return set_container_root(&from_path, to_dfd);
+	}
 
 	lflags = 0;
 	if (flags & MOVE_MOUNT_T_SYMLINKS)	lflags |= LOOKUP_FOLLOW;
@@ -6274,7 +6355,7 @@ void __init mnt_init(void)
 
 void put_mnt_ns(struct mnt_namespace *ns)
 {
-	if (!refcount_dec_and_test(&ns->ns.count))
+	if (!ns || !refcount_dec_and_test(&ns->ns.count))
 		return;
 	drop_collected_mounts(&ns->root->mnt);
 	free_mnt_ns(ns);
