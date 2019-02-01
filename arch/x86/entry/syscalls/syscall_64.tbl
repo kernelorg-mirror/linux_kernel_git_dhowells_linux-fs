@@ -393,6 +393,7 @@
 467	common	open_tree_attr		sys_open_tree_attr
 468	common	container_create	sys_container_create
 469	common	fork_into_container	sys_fork_into_container
+470	common	container_socket	sys_container_socket
 
 #
 # Due to a historical design error, certain syscalls are numbered differently

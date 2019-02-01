@@ -76,6 +76,8 @@
 #include <linux/highmem.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+//#include <linux/fs_context.h>
+#include <linux/container.h>
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/compat.h>
@@ -1618,7 +1620,7 @@ int sock_create_kern(struct net *net, int family, int type, int protocol, struct
 }
 EXPORT_SYMBOL(sock_create_kern);
 
-static struct socket *__sys_socket_create(int family, int type, int protocol)
+static struct socket *__sys_socket_create(struct net *net, int family, int type, int protocol)
 {
 	struct socket *sock;
 	int retval;
@@ -1645,7 +1647,7 @@ struct file *__sys_socket_file(int family, int type, int protocol)
 	struct socket *sock;
 	int flags;
 
-	sock = __sys_socket_create(family, type, protocol);
+	sock = __sys_socket_create(current->nsproxy->net_ns, family, type, protocol);
 	if (IS_ERR(sock))
 		return ERR_CAST(sock);
 
@@ -1675,12 +1677,12 @@ __weak noinline int update_socket_protocol(int family, int type, int protocol)
 
 __bpf_hook_end();
 
-int __sys_socket(int family, int type, int protocol)
+int __sys_socket(struct net *net, int family, int type, int protocol)
 {
 	struct socket *sock;
 	int flags;
 
-	sock = __sys_socket_create(family, type,
+	sock = __sys_socket_create(net, family, type,
 				   update_socket_protocol(family, type, protocol));
 	if (IS_ERR(sock))
 		return PTR_ERR(sock);
@@ -1694,8 +1696,31 @@ int __sys_socket(int family, int type, int protocol)
 
 SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol)
 {
-	return __sys_socket(family, type, protocol);
+	return __sys_socket(current->nsproxy->net_ns, family, type, protocol);
 }
+
+/*
+ * Create a socket inside a container.
+ */
+#ifdef CONFIG_CONTAINERS
+SYSCALL_DEFINE4(container_socket,
+		int, containerfd, int, family, int, type, int, protocol)
+{
+	struct fd f = fdget(containerfd);
+	long ret;
+
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (is_container_file(fd_file(f))) {
+		struct container *c = fd_file(f)->private_data;
+
+		ret = __sys_socket(c->ns->net_ns, family, type, protocol);
+	}
+	fdput(f);
+	return ret;
+}
+#endif
 
 /*
  *	Create a pair of connected sockets.
@@ -3080,7 +3105,7 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 
 	switch (call) {
 	case SYS_SOCKET:
-		err = __sys_socket(a0, a1, a[2]);
+		err = __sys_socket(current->nsproxy->net_ns, a0, a1, a[2]);
 		break;
 	case SYS_BIND:
 		err = __sys_bind(a0, (struct sockaddr __user *)a1, a[2]);

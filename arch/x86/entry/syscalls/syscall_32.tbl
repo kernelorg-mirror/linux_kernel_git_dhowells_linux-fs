@@ -475,3 +475,4 @@
 467	i386	open_tree_attr		sys_open_tree_attr
 468	i386	container_create	sys_container_create
 469	i386	fork_into_container	sys_fork_into_container
+470	i386	container_socket	sys_container_socket
