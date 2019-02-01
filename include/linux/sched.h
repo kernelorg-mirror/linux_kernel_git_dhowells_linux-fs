@@ -57,6 +57,7 @@ struct bpf_run_ctx;
 struct bpf_net_context;
 struct capture_control;
 struct cfs_rq;
+struct container;
 struct fs_struct;
 struct futex_pi_state;
 struct io_context;
@@ -1192,6 +1193,8 @@ struct task_struct {
 
 	/* Namespaces: */
 	struct nsproxy			*nsproxy;
+	struct container		*container;
+	struct list_head		container_link;
 
 	/* Signal handlers: */
 	struct signal_struct		*signal;

@@ -464,3 +464,8 @@ LSM_HOOK(int, 0, bdev_alloc_security, struct block_device *bdev)
 LSM_HOOK(void, LSM_RET_VOID, bdev_free_security, struct block_device *bdev)
 LSM_HOOK(int, 0, bdev_setintegrity, struct block_device *bdev,
 	 enum lsm_integrity_type type, const void *value, size_t size)
+
+#ifdef CONFIG_CONTAINERS
+LSM_HOOK(int, 0, container_alloc, struct container *container, unsigned int flags)
+LSM_HOOK(void, LSM_RET_VOID, container_free, struct container *container)
+#endif /* CONFIG_CONTAINERS */

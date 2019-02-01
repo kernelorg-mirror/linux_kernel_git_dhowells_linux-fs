@@ -392,3 +392,6 @@ COND_SYSCALL(setuid16);
 COND_SYSCALL(rseq);
 
 COND_SYSCALL(uretprobe);
+
+/* kernel/container.c */
+COND_SYSCALL(container_create);

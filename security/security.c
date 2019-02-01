@@ -29,6 +29,7 @@
 #include <linux/overflow.h>
 #include <linux/perf_event.h>
 #include <linux/fs.h>
+#include <linux/container.h>
 #include <net/flow.h>
 #include <net/sock.h>
 
@@ -6024,3 +6025,29 @@ void security_initramfs_populated(void)
 {
 	call_void_hook(initramfs_populated);
 }
+
+#ifdef CONFIG_CONTAINERS
+/**
+ * security_container_alloc - Check creation of a new container
+ * @container: The new container
+ * @flags: Creation flags
+ *
+ * Check if a new container may be created and, if so, assign security data.
+ *
+ * Return: Returns 0 on success, error on failure.
+ **/
+int security_container_alloc(struct container *container, unsigned int flags)
+{
+	return call_int_hook(container_alloc, container, flags);
+}
+
+/**
+ * security_container_free - Free security data attached to a container.
+ * @container: The container.
+ */
+void security_container_free(struct container *container)
+{
+	call_void_hook(container_free, container);
+}
+
+#endif /* CONFIG_CONTAINERS */

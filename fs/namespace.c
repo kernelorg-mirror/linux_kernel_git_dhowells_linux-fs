@@ -33,6 +33,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/mnt_idmapping.h>
 #include <linux/pidfs.h>
+#include <linux/container.h>
 
 #include "pnode.h"
 #include "internal.h"
@@ -6219,6 +6220,10 @@ static void __init init_mount_tree(void)
 
 	set_fs_pwd(current->fs, &root);
 	set_fs_root(current->fs, &root);
+#ifdef CONFIG_CONTAINERS
+	path_get(&root);
+	init_container.root = root;
+#endif
 
 	mnt_ns_tree_add(ns);
 }
