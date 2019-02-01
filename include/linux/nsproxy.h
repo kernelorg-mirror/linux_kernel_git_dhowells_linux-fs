@@ -12,6 +12,7 @@ struct ipc_namespace;
 struct pid_namespace;
 struct cgroup_namespace;
 struct fs_struct;
+struct container;
 
 /*
  * A structure to contain pointers to all per-process
@@ -101,9 +102,13 @@ static inline struct cred *nsset_cred(struct nsset *set)
  *         * /
  *     task_unlock(task);
  *
+ *  4. Container namespaces are set at container creation and cannot be
+ *     changed.
+ *
  */
 
-int copy_namespaces(unsigned long flags, struct task_struct *tsk);
+int copy_namespaces(unsigned long flags, struct task_struct *tsk,
+		    struct container *dest_container);
 void exit_task_namespaces(struct task_struct *tsk);
 void switch_task_namespaces(struct task_struct *tsk, struct nsproxy *new);
 int exec_task_namespaces(void);

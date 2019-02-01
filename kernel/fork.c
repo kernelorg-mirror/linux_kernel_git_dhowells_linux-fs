@@ -1537,9 +1537,33 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 	return 0;
 }
 
-static int copy_fs(unsigned long clone_flags, struct task_struct *tsk)
+static int copy_fs(unsigned long clone_flags, struct task_struct *tsk,
+		   struct container *dest_container)
 {
 	struct fs_struct *fs = current->fs;
+
+#ifdef CONFIG_CONTAINERS
+	if (dest_container) {
+		fs = kmem_cache_alloc(fs_cachep, GFP_KERNEL);
+		if (!fs)
+			return -ENOMEM;
+
+		fs->users = 1;
+		fs->in_exec = 0;
+		spin_lock_init(&fs->lock);
+		seqcount_spinlock_init(&fs->seq, &fs->lock);
+		fs->umask = 0022;
+
+		spin_lock(&dest_container->lock);
+		fs->pwd = fs->root = dest_container->root;
+		path_get(&fs->root);
+		path_get(&fs->pwd);
+		spin_unlock(&dest_container->lock);
+		tsk->fs = fs;
+		return 0;
+	}
+#endif
+
 	if (clone_flags & CLONE_FS) {
 		/* tsk->fs is already what we want */
 		spin_lock(&fs->lock);
@@ -2030,7 +2054,7 @@ __latent_entropy struct task_struct *copy_process(
 #ifdef CONFIG_PROVE_LOCKING
 	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
 #endif
-	retval = copy_creds(p, clone_flags);
+	retval = copy_creds(p, clone_flags, args->dest_container);
 	if (retval < 0)
 		goto bad_fork_free;
 
@@ -2157,7 +2181,7 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_files(clone_flags, p, args->no_files);
 	if (retval)
 		goto bad_fork_cleanup_semundo;
-	retval = copy_fs(clone_flags, p);
+	retval = copy_fs(clone_flags, p, args->dest_container);
 	if (retval)
 		goto bad_fork_cleanup_files;
 	retval = copy_sighand(clone_flags, p);
@@ -2169,15 +2193,15 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_mm(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_signal;
-	retval = copy_namespaces(clone_flags, p);
+	retval = copy_container(clone_flags, p, args->dest_container);
 	if (retval)
 		goto bad_fork_cleanup_mm;
-	retval = copy_container(clone_flags, p, NULL);
+	retval = copy_namespaces(clone_flags, p, args->dest_container);
+	if (retval)
+		goto bad_fork_cleanup_container;
+	retval = copy_io(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_namespaces;
-	retval = copy_io(clone_flags, p);
- 	if (retval)
- 		goto bad_fork_cleanup_container;
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
@@ -2443,10 +2467,10 @@ bad_fork_cleanup_thread:
 bad_fork_cleanup_io:
 	if (p->io_context)
 		exit_io_context(p);
-bad_fork_cleanup_container:
-	exit_container(p);
 bad_fork_cleanup_namespaces:
 	exit_task_namespaces(p);
+bad_fork_cleanup_container:
+	exit_container(p);
 bad_fork_cleanup_mm:
 	if (p->mm) {
 		mm_clear_owner(p->mm, p);
@@ -2601,6 +2625,29 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 			trace = 0;
 	}
 
+	if (args->dest_container) {
+		/* A process spawned into a container doesn't share anything
+		 * with the parent other than namespaces.
+		 */
+		if (clone_flags & (CLONE_CHILD_CLEARTID |
+				   CLONE_CHILD_SETTID |
+				   CLONE_FILES |
+				   CLONE_FS |
+				   CLONE_IO |
+				   CLONE_PARENT |
+				   CLONE_PARENT_SETTID |
+				   CLONE_PTRACE |
+				   CLONE_SETTLS |
+				   CLONE_SIGHAND |
+				   CLONE_SYSVSEM |
+				   CLONE_THREAD))
+			return -EINVAL;
+
+		/* However, we do have to let kernel threads borrow a VM. */
+		if ((clone_flags & CLONE_VM) && current->mm)
+			return -EINVAL;
+	}
+
 	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
 	add_latent_entropy();
 
@@ -2707,6 +2754,30 @@ SYSCALL_DEFINE0(vfork)
 	};
 
 	return kernel_clone(&args);
+}
+#endif
+
+#ifdef CONFIG_CONTAINERS
+SYSCALL_DEFINE1(fork_into_container, int, containerfd)
+{
+	struct kernel_clone_args args = {
+		.exit_signal = SIGCHLD,
+	};
+	struct fd f = fdget(containerfd);
+	int ret;
+
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (is_container_file(fd_file(f))) {
+		struct container *dest_container = fd_file(f)->private_data;
+
+		args.dest_container = dest_container;
+		ret = kernel_clone(&args);
+	}
+
+	fdput(f);
+	return ret;
 }
 #endif
 

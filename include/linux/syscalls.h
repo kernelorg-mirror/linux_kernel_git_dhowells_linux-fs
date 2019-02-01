@@ -991,6 +991,7 @@ asmlinkage long sys_lsm_list_modules(u64 __user *ids, u32 __user *size, u32 flag
 asmlinkage long sys_container_create(const char __user *name, unsigned int flags,
 				     unsigned long spare3, unsigned long spare4,
 				     unsigned long spare5);
+asmlinkage long sys_fork_into_container(int containerfd);
 
 /*
  * Architecture-specific system calls

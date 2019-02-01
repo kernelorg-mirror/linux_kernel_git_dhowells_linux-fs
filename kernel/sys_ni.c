@@ -393,5 +393,6 @@ COND_SYSCALL(rseq);
 
 COND_SYSCALL(uretprobe);
 
-/* kernel/container.c */
+/* Containers */
 COND_SYSCALL(container_create);
+COND_SYSCALL(fork_into_container);
