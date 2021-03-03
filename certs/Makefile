@@ -22,6 +22,16 @@ $(obj)/blacklist_hash_list: $(CONFIG_SYSTEM_BLACKLIST_HASH_LIST) FORCE
 
 targets += blacklist_hash_list
 
+ifdef CONFIG_PGP_PRELOAD_PUBLIC_KEYS
+ifeq ($(shell ls $(srctree)/certs/pubring.gpg 2> /dev/null), $(srctree)/certs/pubring.gpg)
+AFLAGS_system_certificates.o += -DHAVE_PUBRING_GPG
+$(obj)/system_certificates.o: $(srctree)/certs/pubring.gpg
+endif
+endif
+
+quiet_cmd_extract_certs  = EXTRACT_CERTS   $(patsubst "%",%,$(2))
+      cmd_extract_certs  = scripts/extract-cert $(2) $@
+
 quiet_cmd_extract_certs  = CERT    $@
       cmd_extract_certs  = $(obj)/extract-cert "$(extract-cert-in)" $@
 extract-cert-in = $(filter-out $(obj)/extract-cert, $(real-prereqs))

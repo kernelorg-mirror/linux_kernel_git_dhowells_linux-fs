@@ -154,4 +154,15 @@ config SYSTEM_BLACKLIST_AUTH_UPDATE
 	  keyring.  The PKCS#7 signature of the description is set in the key
 	  payload.  Blacklist keys cannot be removed.
 
+config PGP_PRELOAD_PUBLIC_KEYS
+	bool "Preload PGP public keys"
+	depends on SYSTEM_TRUSTED_KEYRING
+	select PGP_PRELOAD
+	default n
+	help
+	  Load at boot time the PGP public keys from a reserved area (populated
+	  with the content of 'certs/pubring.gpg' provided at kernel build
+	  time), and add them to the built-in keyring. Invalid keys are ignored
+	  and the loading continues.
+
 endmenu
