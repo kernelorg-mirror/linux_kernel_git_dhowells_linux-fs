@@ -389,7 +389,9 @@ reassess_streams:
 		wreq->cleaned_to = wreq->collected_to;
 	}
 
-	// TODO: Discard encryption buffers
+	/* Discard any bounce/encryption buffers that we've now finished with. */
+	if (test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags))
+		netfs_clean_up_bounce(wreq);
 
 	if (notes & NEED_RETRY)
 		goto need_retry;

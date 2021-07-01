@@ -141,6 +141,8 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 	ictx = netfs_inode(wreq->inode);
 	if (is_cacheable && netfs_is_cache_enabled(ictx))
 		fscache_begin_write_operation(&wreq->cache_resources, netfs_i_cookie(ictx));
+	if (test_bit(NETFS_ICTX_ENCRYPTED, &ictx->flags))
+		__set_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags);
 
 	wreq->cleaned_to = wreq->start;
 	if (wreq->cache_resources.dio_size > 1)
@@ -223,7 +225,6 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 {
 	struct netfs_io_request *wreq = subreq->rreq;
 	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
-	ssize_t got;
 	size_t len, bsize = 1;
 
 	_enter("%zx,{,%u,%u},%u",
@@ -231,6 +232,8 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
 
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags))
+		bsize = wreq->crypto_bsize;
 	if (subreq->source == NETFS_WRITE_TO_CACHE) {
 		bsize = umax(bsize, wreq->cache_resources.dio_size);
 		copy = true;
@@ -243,6 +246,7 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 	if (copy) {
 		struct bio_vec *bv;
 		struct bvecq *bq;
+		ssize_t got;
 		size_t disp, dlen;
 
 		got = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
@@ -287,6 +291,11 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 		}
 	} else {
 		bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
+
+		if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags)))
+			/* Round the length down to the crypto block size. */
+			subreq->len = round_up(subreq->len, wreq->crypto_bsize);
+
 		len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
 				  &subreq->nr_segs);
 
@@ -624,6 +633,12 @@ static int netfs_queue_wb_folio(struct netfs_io_request *wreq,
 	} else if (flen == i_size - fpos) {
 		params->notes |= NOTE_TO_EOF;
 	}
+
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags))) {
+		/* Round out to the crypto block size. */
+		foff = round_down(foff, wreq->crypto_bsize);
+		flen = round_up(flen, wreq->crypto_bsize);
+	}
 	flen -= foff;
 
 	params->folio_start	= fpos;
@@ -706,6 +721,36 @@ static int netfs_queue_wb_folio(struct netfs_io_request *wreq,
 	wreq->load_cursor.offset = 0;
 	trace_netfs_wback(wreq, folio, params->notes);
 
+	/* If we're doing content encryption, we insert space into the bounce
+	 * buffer and encrypt the data into it.
+	 */
+	if (unlikely(test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags))) {
+		unsigned long long need;
+		if (wreq->bounce_alloc_to == 0)
+			wreq->bounce_alloc_to = folio_pos(folio);
+
+		need = params->folio_start + params->dirty_offset + params->dirty_len;
+		ret = bvecq_buffer_add_space(&wreq->bounce_alloc,
+					     &wreq->bounce_alloc_to,
+					     need, need,
+					     params->notes & NOTE_DISCONTIG_BEFORE,
+					     GFP_NOFS);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags))) {
+		ret = netfs_encrypt_folio(wreq, folio,
+					  params->folio_start + params->dirty_offset,
+					  params->dirty_len,
+					  GFP_NOFS | __GFP_NOFAIL);
+		if (ret < 0)
+			return ret;
+	} else {
+		/* Pretend we did content encryption. */
+		atomic64_set(&wreq->encrypted_to, params->folio_start + params->folio_len);
+	}
+
 out:
 	_leave(" = %x", params->notes);
 	return 0;
@@ -728,6 +773,36 @@ cancel_folio:
 		folio_end_writeback(folio);
 	params->notes |= NOTE_DISCONTIG_BEFORE;
 	goto out;
+}
+
+/*
+ * Set up the buffering for a buffered write.
+ *
+ * If we are using a bounce buffer, we set up two parallel buffers: one
+ * contains the original folios (load_cursor => collect_cursor), the
+ * other contains a bounce buffer with the data copied into it
+ * (bounce_cursor => encrypt_cursor => dispatch_cursor => bounce_collect).
+ *
+ * If we aren't using a bounce buffer, everything is done in the one
+ * buffer (load->cursor => dispatch_cursor => collect_cursor).
+ */
+static int netfs_set_wb_buffers(struct netfs_io_request *wreq,
+				struct netfs_wb_params *params)
+{
+	if (bvecq_buffer_init(&wreq->load_cursor, GFP_NOFS) < 0)
+		return -ENOMEM;
+	bvecq_pos_set(&wreq->collect_cursor, &wreq->load_cursor);
+
+	if (test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags)) {
+		if (bvecq_buffer_init(&wreq->bounce_alloc, GFP_NOFS) < 0)
+			return -ENOMEM;
+		bvecq_pos_set(&wreq->encrypt_cursor, &wreq->bounce_alloc);
+		bvecq_pos_set(&params->dispatch_cursor, &wreq->bounce_alloc);
+		bvecq_pos_set(&wreq->bounce_collect, &wreq->bounce_alloc);
+	} else {
+		bvecq_pos_set(&params->dispatch_cursor, &wreq->load_cursor);
+	}
+	return 0;
 }
 
 /*
@@ -762,10 +837,9 @@ int netfs_writepages(struct address_space *mapping,
 		goto couldnt_start;
 	}
 
-	if (bvecq_buffer_init(&wreq->load_cursor, GFP_NOFS) < 0)
+	error = netfs_set_wb_buffers(wreq, &params);
+	if (error < 0)
 		goto nomem;
-	bvecq_pos_set(&params.dispatch_cursor, &wreq->load_cursor);
-	bvecq_pos_set(&wreq->collect_cursor, &wreq->load_cursor);
 
 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &wreq->flags);
 	trace_netfs_write(wreq, netfs_write_trace_writeback);
@@ -792,6 +866,7 @@ int netfs_writepages(struct address_space *mapping,
 		error = netfs_queue_wb_folio(wreq, wbc, folio, &params);
 		if (error < 0)
 			break;
+
 		error = netfs_issue_streams(wreq, &params);
 		if (error < 0)
 			break;
@@ -832,6 +907,7 @@ struct netfs_writethrough *netfs_begin_writethrough(struct kiocb *iocb, size_t l
 	struct netfs_writethrough *wthru = NULL;
 	struct netfs_io_request *wreq = NULL;
 	struct netfs_inode *ictx = netfs_inode(file_inode(iocb->ki_filp));
+	int error;
 
 	wthru = kzalloc_obj(struct netfs_writethrough);
 	if (!wthru)
@@ -854,6 +930,14 @@ struct netfs_writethrough *netfs_begin_writethrough(struct kiocb *iocb, size_t l
 
 	if (bvecq_buffer_init(&wreq->load_cursor, GFP_NOFS) < 0)
 		goto nomem_unlock;
+
+	error = netfs_set_wb_buffers(wreq, &wthru->params);
+	if (error < 0) {
+		netfs_put_failed_request(wreq);
+		mutex_unlock(&ictx->wb_lock);
+		kfree(wthru);
+		return ERR_PTR(-ENOMEM);
+	}
 
 	bvecq_pos_set(&wthru->params.dispatch_cursor, &wreq->load_cursor);
 	bvecq_pos_set(&wreq->collect_cursor, &wreq->load_cursor);

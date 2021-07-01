@@ -25,6 +25,9 @@ static struct folio *netfs_grab_folio_for_write(struct address_space *mapping,
 	if (mapping_large_folio_support(mapping))
 		fgp_flags |= fgf_set_order(pos % PAGE_SIZE + part);
 
+	// TODO: If the encryption block size > PAGE_SIZE we need to force the
+	// VM to give us a minimum-sized folio.
+
 	return __filemap_get_folio(mapping, index, fgp_flags,
 				   mapping_gfp_mask(mapping));
 }
@@ -272,7 +275,8 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		 * caching service temporarily because the backing store got
 		 * culled.
 		 */
-		if (netfs_is_cache_enabled(ctx)) {
+		if (netfs_is_cache_enabled(ctx) ||
+		    test_bit(NETFS_ICTX_ENCRYPTED, &ctx->flags)) {
 			if (finfo) {
 				netfs_stat(&netfs_n_wh_wstream_conflict);
 				goto flush_content;
