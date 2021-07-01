@@ -398,8 +398,6 @@ reassess_streams:
 		wreq->cleaned_to = wreq->collected_to;
 	}
 
-	// TODO: Discard encryption buffers
-
 	if (notes & NEED_RETRY)
 		goto need_retry;
 

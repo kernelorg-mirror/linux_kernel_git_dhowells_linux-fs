@@ -65,6 +65,11 @@ struct netfs_wb_params {
 	unsigned int		outer_off;	/* Start of outer data window */
 	unsigned int		outer_end;	/* End of outer data window */
 
+	/* Bounce buffer page currently being divided up. */
+	unsigned int		bounce_usage;	/* Amount of bounce page used */
+	unsigned int		bounce_size;	/* Size of bounce page */
+	struct page		*bounce_page;	/* Bounce page */
+
 	struct netfs_write_estimate estimates[NR_IO_STREAMS];
 };
 
@@ -142,6 +147,8 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 	ictx = netfs_inode(wreq->inode);
 	if (is_cacheable)
 		fscache_begin_write_operation(&wreq->cache_resources, netfs_i_cookie(ictx));
+	if (test_bit(NETFS_ICTX_ENCRYPTED, &ictx->flags))
+		__set_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags);
 
 	wreq->cleaned_to = wreq->start;
 	if (wreq->cache_resources.dio_size > 1)
@@ -256,6 +263,10 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
 	bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
+
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags)))
+		/* Round the length down to the crypto block size. */
+		subreq->len = round_down(subreq->len, wreq->crypto_bsize);
 
 	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs, &subreq->nr_segs);
 	if (len < subreq->len) {
@@ -493,6 +504,126 @@ static void netfs_writeback_add_folio_to_stream(struct netfs_io_request *wreq,
 }
 
 /*
+ * Process bounce buffering, including content encryption.
+ */
+static void netfs_writeback_fill_bounce(struct netfs_io_request *wreq,
+					struct netfs_wb_params *params,
+					struct folio *folio, size_t foff,
+					struct page *page, size_t poff,
+					size_t len)
+{
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags)) {
+		netfs_encrypt_folio(wreq, folio, foff, page, poff, len);
+	} else {
+		struct iov_iter iov;
+		struct bio_vec bv;
+		size_t res;
+
+		bvec_set_folio(&bv, folio, len, foff);
+		iov_iter_bvec(&iov, ITER_SOURCE, &bv, 1, len);
+		res = copy_page_from_iter(page, poff, len, &iov);
+		WARN_ON_ONCE(res != len);
+	}
+}
+
+/*
+ * Add bounce bufferage to a stream.
+ */
+static void netfs_writeback_bounce_folio(struct netfs_io_request *wreq,
+					 struct netfs_wb_params *params,
+					 struct folio *folio)
+{
+	size_t foff = params->outer_off, fsize = folio_size(folio);
+
+	while (foff < params->outer_end) {
+		struct page *page;
+		size_t poff, part;
+
+		/* Allocate a bounce page if we don't have one.
+		 * TODO: Consider allocating higher-order pages if crypto
+		 * offload gets used.
+		 */
+		if (!params->bounce_page) {
+			params->bounce_page = mempool_alloc(&netfs_page_pool,
+							    wreq->gfp | __GFP_COMP);
+			params->bounce_usage = 0;
+			params->bounce_size = PAGE_SIZE;
+
+			/* For the moment crypto_bsize _must_ be no larger than
+			 * PAGE_SIZE.  If it is, we need to be able to allocate
+			 * higher-order pages from the emergency pool, but
+			 * that's for future consideration.
+			 */
+			BUG_ON(params->bounce_size < wreq->crypto_bsize);
+		}
+
+		page = params->bounce_page;
+		poff = params->bounce_usage;
+		part = min(params->bounce_size - poff, params->outer_end - foff);
+		WARN_ON_ONCE((part & (wreq->crypto_bsize - 1)) != 0);
+
+		bvecq_append_page(&wreq->load_cursor, params->bounce_page,
+				  params->bounce_usage, part, GFP_NOFS, true);
+		wreq->load_cursor.slot--;
+
+		trace_netfs_bounce(wreq, params->fpos + foff,
+				   &wreq->load_cursor.bvecq->bv[wreq->load_cursor.slot - 1],
+				   netfs_folio_trace_encrypt);
+
+		params->bounce_usage += part;
+		if (params->bounce_usage >= params->bounce_size) {
+			params->bounce_page = NULL;
+			params->bounce_size = 0;
+		} else {
+			get_page(params->bounce_page);
+		}
+
+		netfs_writeback_fill_bounce(wreq, params, folio, foff, page, poff, part);
+
+		for (int s = 0; s < NR_IO_STREAMS; s++) {
+			struct netfs_io_stream *stream = &wreq->io_streams[s];
+			size_t off, end, pend = foff + part, post_gap = 0;
+
+			/* Select the appropriately sized chunk. */
+			if (stream->source == NETFS_WRITE_TO_CACHE) {
+				off = foff;
+				end = pend;
+			} else {
+				off = params->inner_off;
+				end = params->inner_end;
+				if (pend <= foff || off >= pend)
+					continue;
+				if (off < foff)
+					off = foff;
+				if (pend > end)
+					pend = end;
+				if (off >= pend)
+					continue;
+			}
+
+			if (pend >= end && end < fsize)
+				post_gap = fsize - end;
+
+			/* Pass the bounce pages along as soon as available
+			 * without waiting for the full folio lest the folio is
+			 * so large that the emergency pools can't supply us
+			 * with sufficient bounce pages.
+			 */
+			netfs_writeback_add_seg_to_stream(wreq, stream, params,
+							  params->fpos + off, pend - off,
+							  post_gap);
+
+		}
+
+		foff += part;
+
+		/* Advance the load cursor after copying to the dispatch cursor. */
+		wreq->load_cursor.slot++;
+		wreq->load_cursor.offset = 0;
+	}
+}
+
+/*
  * Queue a folio for writeback.
  */
 static void netfs_writeback_folio(struct netfs_io_request *wreq,
@@ -638,8 +769,10 @@ static void netfs_writeback_folio(struct netfs_io_request *wreq,
 	 * point we may need to copy the data to a bounce buffer and push the
 	 * bounce bits instead.
 	 */
-	// TODO: Do bouncing if selected.
-	netfs_writeback_add_folio_to_stream(wreq, params, folio);
+	if (unlikely(test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &wreq->flags)))
+		netfs_writeback_bounce_folio(wreq, params, folio);
+	else
+		netfs_writeback_add_folio_to_stream(wreq, params, folio);
 
 out:
 	_leave(" = %x", params->notes);
@@ -698,7 +831,10 @@ int netfs_writepages(struct address_space *mapping,
 		params.notes |= NOTE_CACHE_AVAIL;
 		params.outer_align = wreq->cache_resources.dio_size;
 	}
-	// TODO: Adjust alignments for crypto
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags))) {
+		params.inner_align = wreq->crypto_bsize;
+		params.outer_align = max(params.outer_align, wreq->crypto_bsize);
+	}
 
 	do {
 		_debug("wbiter %lx", folio->index);
