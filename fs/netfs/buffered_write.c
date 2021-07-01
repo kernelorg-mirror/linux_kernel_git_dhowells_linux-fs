@@ -79,9 +79,9 @@ static enum netfs_how_to_modify netfs_how_to_modify(struct netfs_inode *ctx,
 	if (!maybe_trouble && offset == 0 && len >= flen)
 		return NETFS_WHOLE_FOLIO_MODIFY;
 
-	if (file->f_mode & FMODE_READ)
-		goto no_write_streaming;
-	if (test_bit(NETFS_ICTX_NO_WRITE_STREAMING, &ctx->flags))
+	if (file->f_mode & FMODE_READ ||
+	    test_bit(NETFS_ICTX_ENCRYPTED, &ctx->flags) ||
+	    test_bit(NETFS_ICTX_NO_WRITE_STREAMING, &ctx->flags))
 		goto no_write_streaming;
 
 	if (netfs_is_cache_enabled(ctx) ||

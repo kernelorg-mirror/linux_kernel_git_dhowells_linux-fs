@@ -27,6 +27,11 @@ int netfs_prefetch_for_write(struct file *file, struct folio *folio,
 			     size_t offset, size_t len);
 
 /*
+ * crypto.c
+ */
+bool netfs_encrypt(struct netfs_io_request *wreq);
+
+/*
  * io.c
  */
 int netfs_begin_read(struct netfs_io_request *rreq, bool sync);
