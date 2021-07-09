@@ -721,8 +721,11 @@ int netfs_begin_read(struct netfs_io_request *rreq, bool sync)
 	if (rreq->origin == NETFS_DIO_READ)
 		inode_dio_begin(rreq->inode);
 
-	// TODO: Use bounce buffer if requested
-	rreq->io_iter = rreq->iter;
+	if (test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags))
+		iov_iter_xarray(&rreq->io_iter, ITER_DEST, &rreq->bounce,
+				rreq->start, rreq->len);
+	else
+		rreq->io_iter = rreq->iter;
 
 	INIT_WORK(&rreq->work, netfs_rreq_work);
 
