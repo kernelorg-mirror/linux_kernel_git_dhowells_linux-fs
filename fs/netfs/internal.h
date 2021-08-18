@@ -45,6 +45,8 @@ void netfs_encrypt_folio(struct netfs_io_request *wreq,
 			 struct page *page, size_t poff,
 			 size_t len);
 int netfs_encrypt(struct netfs_io_request *wreq, uoff_t to, gfp_t gfp);
+void netfs_decrypt_folio(struct netfs_io_request *rreq, struct folio *folio);
+void netfs_decrypt_dio(struct netfs_io_request *rreq);
 
 /*
  * direct_read.c
