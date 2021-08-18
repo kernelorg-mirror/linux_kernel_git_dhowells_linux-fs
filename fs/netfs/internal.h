@@ -43,6 +43,8 @@ void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
 int netfs_encrypt_folio(struct netfs_io_request *wreq, struct folio *folio,
 			unsigned long long start, size_t len, gfp_t gfp);
 int netfs_encrypt(struct netfs_io_request *wreq, unsigned long long to, gfp_t gfp);
+void netfs_decrypt_folio(struct netfs_io_request *rreq, struct folio *folio);
+void netfs_decrypt_dio(struct netfs_io_request *rreq);
 
 /*
  * direct_read.c

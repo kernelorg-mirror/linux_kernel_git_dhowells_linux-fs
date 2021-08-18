@@ -316,6 +316,7 @@ struct netfs_io_request {
 #define NETFS_RREQ_NEED_PUT_RA_REFS	17	/* Need to put the folio refs RA gave us */
 #define NETFS_RREQ_USE_BOUNCE_BUFFER	18	/* Use bounce buffer */
 #define NETFS_RREQ_CONTENT_ENCRYPTION	19	/* Content encryption is in use */
+#define NETFS_RREQ_CRYPT_IN_PLACE	20	/* Do decryption in place */
 #ifdef CONFIG_NETFS_PGPRIV2
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */
@@ -360,6 +361,10 @@ struct netfs_request_ops {
 			     struct scatterlist *src_sg,
 			     struct scatterlist *dst_sg,
 			     gfp_t gfp);
+	int (*decrypt_block)(struct netfs_io_request *rreq,
+			     unsigned long long start, size_t len,
+			     struct scatterlist *src_sg, unsigned int n_src,
+			     struct scatterlist *dst_sg, unsigned int n_dst);
 };
 
 /*

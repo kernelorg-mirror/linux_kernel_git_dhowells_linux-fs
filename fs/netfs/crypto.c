@@ -130,3 +130,109 @@ error:
 	wreq->error = ret;
 	return false;
 }
+
+/*
+ * Decrypt a folio in the pagecache.  We arrange the minimum folio size such
+ * that the crypto block size will never be larger than the size of the folios
+ * we are using.
+ */
+void netfs_decrypt_folio(struct netfs_io_request *rreq, struct folio *folio)
+{
+	struct netfs_inode *ictx = netfs_inode(rreq->inode);
+	struct scatterlist sg;
+	unsigned long long start = folio_pos(folio);
+	size_t len = folio_size(folio);
+	size_t bsize = rreq->crypto_bsize, off = 0;
+	int ret;
+
+	if (start >= rreq->i_size)
+		return;
+	trace_netfs_folio(folio, netfs_folio_trace_decrypt);
+
+	len = umin(len, rreq->i_size - start);
+
+	_debug("DECRYPT %llx-%llx", start, start + len - 1);
+
+	do {
+		sg_init_table(&sg, 1);
+		sg_set_folio(&sg, folio, bsize, off);
+
+		ret = ictx->ops->decrypt_block(rreq, start + off, bsize, &sg, 1, &sg, 1);
+		if (ret < 0)
+			goto error_failed;
+		off += bsize;
+	} while (off < len);
+
+	return;
+
+error_failed:
+	trace_netfs_failure(rreq, NULL, ret, netfs_fail_decryption);
+	rreq->error = ret;
+	set_bit(NETFS_RREQ_FAILED, &rreq->flags);
+	return;
+}
+
+/*
+ * Decrypt the result of a DIO read request.
+ */
+void netfs_decrypt_dio(struct netfs_io_request *rreq)
+{
+	struct netfs_inode *ictx = netfs_inode(rreq->inode);
+	unsigned long long start = atomic64_read(&rreq->encrypted_to);
+	size_t processed = 0, bsize = rreq->crypto_bsize;
+	size_t len = rreq->collected_to - start;
+	int ret;
+
+	trace_netfs_rreq(rreq, netfs_rreq_trace_decrypt);
+	if (rreq->start >= rreq->i_size)
+		return;
+
+	len = round_down(len, bsize);
+
+	_debug("DECRYPT %llx-%llx f=%lx", start, start + len - 1, rreq->flags);
+
+	do {
+		struct scatterlist source_sg[1], dest_sg[1];
+		struct sg_table source = { .sgl = source_sg, };
+		struct sg_table dest   = { .sgl = dest_sg, };
+
+		sg_init_table(source_sg, 1);
+		sg_init_table(dest_sg, 1);
+
+		ret = bvecq_extract_to_sg(&rreq->bounce_collect, bsize,
+					  &source, ARRAY_SIZE(source_sg));
+		if (ret != bsize) {
+			pr_err("Failed to extract buffer in netfs_decrypt_dio()\n");
+			ret = -EIO;
+			goto error;
+		}
+
+		ret = bvecq_extract_to_sg(&rreq->encrypt_cursor, bsize,
+					  &dest, ARRAY_SIZE(dest_sg));
+		if (ret != bsize) {
+			pr_err("Failed to extract buffer in netfs_decrypt_dio()\n");
+			ret = -EIO;
+			goto error;
+		}
+
+		ret = ictx->ops->decrypt_block(rreq, start, bsize,
+					       source_sg, source.nents,
+					       dest_sg, dest.nents);
+		if (ret < 0)
+			goto error_failed;
+		processed += bsize;
+		start += bsize;
+	} while (processed < len);
+
+	atomic64_set(&rreq->encrypted_to, start);
+
+	rreq->transferred = processed;
+	return;
+
+error_failed:
+	trace_netfs_failure(rreq, NULL, ret, netfs_fail_decryption);
+error:
+	rreq->error = ret;
+	__set_bit(NETFS_RREQ_FAILED, &rreq->flags);
+	return;
+}
