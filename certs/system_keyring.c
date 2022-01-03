@@ -16,6 +16,7 @@
 #include <keys/asymmetric-type.h>
 #include <keys/system_keyring.h>
 #include <crypto/pkcs7.h>
+#include <crypto/pgp.h>
 
 static struct key *builtin_trusted_keys;
 #ifdef CONFIG_SECONDARY_TRUSTED_KEYRING
@@ -418,6 +419,75 @@ int verify_pkcs7_signature(const void *data, size_t len,
 }
 EXPORT_SYMBOL_GPL(verify_pkcs7_signature);
 
+#ifdef CONFIG_PGP_KEY_PARSER
+/**
+ * verify_pgp_signature - Verify a PGP-based signature on system data.
+ * @data: The data to be verified (must be provided).
+ * @len: Size of @data.
+ * @raw_pgp: The PGP message that is the signature.
+ * @pgp_len: The size of @raw_pgp.
+ * @trusted_keys: Trusted keys to use (NULL for builtin trusted keys only,
+ *					(void *)1UL for all trusted keys).
+ * @usage: The use to which the key is being put.
+ * @view_content: Callback to gain access to content.
+ * @ctx: Context for callback.
+ */
+int verify_pgp_signature(const void *data, size_t len,
+			 const void *raw_pgp, size_t pgp_len,
+			 struct key *trusted_keys,
+			 enum key_being_used_for usage,
+			 int (*view_content)(void *ctx,
+					     const void *data, size_t len,
+					     size_t asn1hdrlen),
+			 void *ctx)
+{
+	struct pgp_sig_verify *pgp_ctx;
+	int ret;
+
+	if (!data || !len)
+		return -EINVAL;
+
+	pgp_ctx = pgp_sig_parse(raw_pgp, pgp_len);
+	if (IS_ERR(pgp_ctx))
+		return PTR_ERR(pgp_ctx);
+
+	if (!trusted_keys) {
+		trusted_keys = builtin_trusted_keys;
+	} else if (trusted_keys == VERIFY_USE_SECONDARY_KEYRING) {
+#ifdef CONFIG_SECONDARY_TRUSTED_KEYRING
+		trusted_keys = secondary_trusted_keys;
+#else
+		trusted_keys = builtin_trusted_keys;
+#endif
+	} else if (trusted_keys == VERIFY_USE_PLATFORM_KEYRING) {
+#ifdef CONFIG_INTEGRITY_PLATFORM_KEYRING
+		trusted_keys = platform_trusted_keys;
+#else
+		trusted_keys = NULL;
+#endif
+		if (!trusted_keys) {
+			ret = -ENOKEY;
+			pr_devel("PGP platform keyring is not available\n");
+			goto error;
+		}
+	}
+
+	/* The data should be detached - so we need to supply it. */
+	if (pgp_sig_add_data(pgp_ctx, data, len)) {
+		pr_err("Failed to supply data for PGP signature\n");
+		ret = -EBADMSG;
+		goto error;
+	}
+
+	ret = pgp_sig_verify(pgp_ctx, trusted_keys);
+error:
+	pgp_sig_verify_cancel(pgp_ctx, false);
+	pr_devel("<==%s() = %d\n", __func__, ret);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(verify_pgp_signature);
+
+#endif /* CONFIG_PGP_KEY_PARSER */
 #endif /* CONFIG_SYSTEM_DATA_VERIFICATION */
 
 #ifdef CONFIG_INTEGRITY_PLATFORM_KEYRING

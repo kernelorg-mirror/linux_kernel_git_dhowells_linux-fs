@@ -63,6 +63,29 @@ extern int verify_pkcs7_message_sig(const void *data, size_t len,
 							size_t asn1hdrlen),
 				    void *ctx);
 
+#ifdef CONFIG_PGP_KEY_PARSER
+extern int verify_pgp_signature(const void *data, size_t len,
+				const void *raw_pgp, size_t pgp_len,
+				struct key *trusted_keys,
+				enum key_being_used_for usage,
+				int (*view_content)(void *ctx,
+						const void *data, size_t len,
+						size_t asn1hdrlen),
+				void *ctx);
+#else
+static inline int verify_pgp_signature(const void *data, size_t len,
+				const void *raw_pgp, size_t pgp_len,
+				struct key *trusted_keys,
+				enum key_being_used_for usage,
+				int (*view_content)(void *ctx,
+						const void *data, size_t len,
+						size_t asn1hdrlen),
+				void *ctx)
+{
+	return -EOPNOTSUPP;
+}
+#endif /* CONFIG_PGP_KEY_PARSER */
+
 #ifdef CONFIG_SIGNED_PE_FILE_VERIFICATION
 extern int verify_pefile_signature(const void *pebuf, unsigned pelen,
 				   struct key *trusted_keys,
