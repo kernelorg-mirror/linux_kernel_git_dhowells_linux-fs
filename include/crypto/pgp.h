@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
-/* PGP signature processing
+/* PGP key and signature processing
  *
  * Copyright (C) 2014 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
@@ -25,5 +25,11 @@ extern int pgp_sig_verify(struct pgp_sig_verify *ctx, struct key *keyring);
 extern void pgp_sig_verify_cancel(struct pgp_sig_verify *ctx, bool keep_sig);
 extern struct public_key_signature *pgp_sig_get_sig(struct pgp_sig_verify *ctx);
 extern u8 pgp_sig_get_version(struct pgp_sig_verify *ctx);
+
+/*
+ * pgp_preload.c
+ */
+extern int __init preload_pgp_keys(const u8 *pgpdata, size_t pgpdatalen,
+				   struct key *keyring);
 
 #endif /* _CRYPTO_PGP_H */
