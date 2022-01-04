@@ -3401,6 +3401,7 @@ L:	keyrings@vger.kernel.org
 S:	Maintained
 F:	Documentation/crypto/asymmetric-keys.rst
 F:	crypto/asymmetric_keys/
+F:	include/crypto/pgp.h
 F:	include/crypto/pkcs7.h
 F:	include/crypto/public_key.h
 F:	include/linux/verification.h
