@@ -59,6 +59,8 @@ struct pgp_key_data_parse_context {
 	struct public_key *pub;
 	u8 raw_fingerprint[HASH_MAX_DIGESTSIZE];
 	size_t raw_fingerprint_len;
+	const char *user_id;
+	size_t user_id_len;
 };
 
 /*
@@ -210,6 +212,15 @@ static int pgp_process_public_key(struct pgp_parse_context *context,
 
 	kenter(",%u,%u,,%zu", type, headerlen, datalen);
 
+	if (type == PGP_PKT_USER_ID) {
+		if (!ctx->user_id_len) {
+			ctx->user_id = data;
+			ctx->user_id_len = datalen;
+		}
+		kleave(" = 0 [user ID]");
+		return 0;
+	}
+
 	if (ctx->raw_fingerprint_len) {
 		kleave(" = -ENOKEY [already]");
 		return -EBADMSG;
@@ -315,12 +326,46 @@ static int pgp_key_parse(struct key_preparsed_payload *prep)
 	kenter("");
 
 	memset(&ctx, 0, sizeof(ctx));
-	ctx.pgp.types_of_interest = (1 << PGP_PKT_PUBLIC_KEY);
+	ctx.pgp.types_of_interest = (1 << PGP_PKT_PUBLIC_KEY) |
+				    (1 << PGP_PKT_USER_ID);
 	ctx.pgp.process_packet = pgp_process_public_key;
 
 	ret = pgp_parse_packets(prep->data, prep->datalen, &ctx.pgp);
 	if (ret < 0)
 		goto error;
+
+	if (ctx.user_id && ctx.user_id_len > 0) {
+		/*
+		 * Propose a description for the key (user ID without the
+		 * comment).
+		 */
+		size_t ulen = ctx.user_id_len;
+		const char *p;
+
+		p = memchr(ctx.user_id, '(', ulen);
+		if (p) {
+			/* Remove the comment */
+			do {
+				p--;
+			} while (*p == ' ' && p > ctx.user_id);
+			if (*p != ' ')
+				p++;
+			ulen = p - ctx.user_id;
+		}
+
+		if (ulen > 255 - 9)
+			ulen = 255 - 9;
+		prep->description = kmalloc(ulen + 1 + 8 + 1, GFP_KERNEL);
+		ret = -ENOMEM;
+		if (!prep->description)
+			goto error;
+		memcpy(prep->description, ctx.user_id, ulen);
+		prep->description[ulen] = ' ';
+		bin2hex(prep->description + ulen + 1,
+			ctx.raw_fingerprint + ctx.raw_fingerprint_len - 4, 4);
+		prep->description[ulen + 9] = 0;
+		pr_debug("desc '%s'\n", prep->description);
+	}
 
 	/* We're pinning the module by being linked against it */
 	__module_get(public_key_subtype.owner);
