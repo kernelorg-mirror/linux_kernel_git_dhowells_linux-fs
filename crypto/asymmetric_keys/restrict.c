@@ -97,8 +97,14 @@ int restrict_link_by_signature(struct key *dest_keyring,
 	key = find_asymmetric_key(trust_keyring,
 				  sig->auth_ids[0], sig->auth_ids[1],
 				  sig->auth_ids[2], false);
-	if (IS_ERR(key))
-		return -ENOKEY;
+	if (IS_ERR(key)) {
+		/* Retry with a partial ID. */
+		key = find_asymmetric_key(trust_keyring,
+					  sig->auth_ids[0], sig->auth_ids[1],
+					  sig->auth_ids[2], true);
+		if (IS_ERR(key))
+			return -ENOKEY;
+	}
 
 	if (use_builtin_keys && !test_bit(KEY_FLAG_BUILTIN, &key->flags))
 		ret = -ENOKEY;
