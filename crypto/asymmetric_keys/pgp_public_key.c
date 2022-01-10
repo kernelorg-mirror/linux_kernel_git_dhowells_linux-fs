@@ -14,6 +14,7 @@
 #include <keys/asymmetric-parser.h>
 #include <crypto/hash.h>
 #include <crypto/public_key.h>
+#include <crypto/pgp.h>
 
 #include "pgp_parser.h"
 
@@ -61,6 +62,8 @@ struct pgp_key_data_parse_context {
 	size_t raw_fingerprint_len;
 	const char *user_id;
 	size_t user_id_len;
+	const char *key_pkt;
+	size_t key_pkt_len;
 };
 
 /*
@@ -226,6 +229,12 @@ static int pgp_process_public_key(struct pgp_parse_context *context,
 		return -EBADMSG;
 	}
 
+	/* Pointer refers to data being processed. */
+	if (type == PGP_PKT_PUBLIC_KEY) {
+		ctx->key_pkt = data;
+		ctx->key_pkt_len = datalen;
+	}
+
 	pub = kzalloc(sizeof(struct public_key), GFP_KERNEL);
 	if (!pub)
 		return -ENOMEM;
@@ -315,6 +324,77 @@ error:
 }
 
 /*
+ * Calculate the digest of the signature according to the RFC4880, section
+ * 5.2.4 (packet type 0x13).
+ */
+static int pgp_key_add_sig_data(struct pgp_key_data_parse_context *ctx,
+				struct pgp_sig_verify *sig_ctx)
+{
+	loff_t offset = 0;
+	u8 *data;
+
+	if (!ctx->key_pkt_len || !ctx->user_id_len)
+		return 0;
+
+	/* 0x99 + key pkt len + key pkt + 0xb4 + user ID len + user ID */
+	data = kmalloc(1 + sizeof(u16) + ctx->key_pkt_len +
+		       1 + sizeof(u32) + ctx->user_id_len, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	data[offset++] = 0x99;
+	data[offset++] = ctx->key_pkt_len >> 8;
+	data[offset++] = ctx->key_pkt_len;
+
+	memcpy(data + offset, ctx->key_pkt, ctx->key_pkt_len);
+	offset += ctx->key_pkt_len;
+
+	if (pgp_sig_get_version(sig_ctx) == PGP_SIG_VERSION_4) {
+		data[offset++] = 0xb4;
+		data[offset++] = ctx->user_id_len >> 24;
+		data[offset++] = ctx->user_id_len >> 16;
+		data[offset++] = ctx->user_id_len >> 8;
+		data[offset++] = ctx->user_id_len;
+	}
+
+	memcpy(data + offset, ctx->user_id, ctx->user_id_len);
+	offset += ctx->user_id_len;
+
+	pgp_sig_add_data(sig_ctx, data, offset);
+	kfree(data);
+	return 0;
+}
+
+static struct public_key_signature *pgp_key_get_sig(
+					struct key_preparsed_payload *prep,
+					struct pgp_key_data_parse_context *ctx)
+{
+	struct public_key_signature *sig = NULL;
+	struct pgp_sig_verify *sig_ctx;
+	bool keep_sig = false;
+	int ret;
+
+	sig_ctx = pgp_sig_parse(prep->data, prep->datalen);
+	if (IS_ERR(sig_ctx))
+		return NULL;
+
+	ret = pgp_key_add_sig_data(ctx, sig_ctx);
+	if (ret < 0)
+		goto out;
+
+	sig = pgp_sig_get_sig(sig_ctx);
+	if (IS_ERR(sig)) {
+		sig = NULL;
+		goto out;
+	}
+
+	keep_sig = true;
+out:
+	pgp_sig_verify_cancel(sig_ctx, keep_sig);
+	return sig;
+}
+
+/*
  * Attempt to parse the instantiation data blob for a key as a PGP packet
  * message holding a key.
  */
@@ -372,6 +452,7 @@ static int pgp_key_parse(struct key_preparsed_payload *prep)
 	prep->payload.data[asym_subtype] = &public_key_subtype;
 	prep->payload.data[asym_key_ids] = pgp_key_generate_id(&ctx);
 	prep->payload.data[asym_crypto] = ctx.pub;
+	prep->payload.data[asym_auth] = pgp_key_get_sig(prep, &ctx);
 	prep->quotalen = 100;
 	return 0;
 
