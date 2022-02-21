@@ -33,9 +33,17 @@ bool netfs_encrypt(struct netfs_io_request *wreq);
 void netfs_decrypt(struct netfs_io_request *rreq);
 
 /*
+ * direct_read.c
+ */
+int netfs_dio_copy_bounce_to_dest(struct netfs_io_request *rreq);
+
+/*
  * io.c
  */
 int netfs_begin_read(struct netfs_io_request *rreq, bool sync);
+ssize_t netfs_rmw_read(struct netfs_io_request *wreq, struct file *file,
+		       unsigned long long start1, size_t len1,
+		       unsigned long long start2, size_t len2);
 
 /*
  * main.c

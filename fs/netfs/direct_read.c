@@ -88,7 +88,7 @@ out:
  * If we did a direct read to a bounce buffer (say we needed to decrypt it),
  * copy the data obtained to the destination iterator.
  */
-static int netfs_dio_copy_bounce_to_dest(struct netfs_io_request *rreq)
+int netfs_dio_copy_bounce_to_dest(struct netfs_io_request *rreq)
 {
 	struct iov_iter *dest_iter = &rreq->iter;
 	struct kiocb *iocb = rreq->iocb;

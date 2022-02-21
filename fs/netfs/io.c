@@ -790,3 +790,120 @@ int netfs_begin_read(struct netfs_io_request *rreq, bool sync)
 out:
 	return ret;
 }
+
+static bool netfs_rmw_read_one(struct netfs_io_request *rreq,
+			       unsigned long long start, size_t len)
+{
+	struct netfs_inode *ctx = netfs_inode(rreq->inode);
+	struct iov_iter io_iter;
+	unsigned long long pstart, end = start + len;
+	pgoff_t first, last;
+	ssize_t ret;
+	size_t min_bsize = 1UL << ctx->min_bshift;
+
+	/* Determine the block we need to load. */
+	end = round_up(end, min_bsize);
+	start = round_down(start, min_bsize);
+
+	/* Determine the folios we need to insert. */
+	pstart = round_down(start, PAGE_SIZE);
+	first = pstart / PAGE_SIZE;
+	last = DIV_ROUND_UP(end, PAGE_SIZE);
+
+	ret = netfs_add_folios_to_buffer(&rreq->bounce, rreq->mapping,
+					 first, last, GFP_NOFS);
+	if (ret < 0) {
+		rreq->error = ret;
+		return false;
+	}
+
+	rreq->start = start;
+	rreq->len = len;
+	rreq->submitted = 0;
+	iov_iter_xarray(&rreq->io_iter, ITER_DEST, &rreq->bounce, start, len);
+
+	io_iter = rreq->io_iter;
+	do {
+		_debug("submit %llx + %zx >= %llx",
+		       rreq->start, rreq->submitted, rreq->i_size);
+		if (rreq->start + rreq->submitted >= rreq->i_size)
+			break;
+		if (!netfs_rreq_submit_slice(rreq, &io_iter, &rreq->subreq_counter))
+			break;
+	} while (rreq->submitted < rreq->len);
+
+	if (rreq->submitted < rreq->len) {
+		netfs_put_request(rreq, false, netfs_rreq_trace_put_no_submit);
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Begin the process of reading in one or two chunks of data for use by
+ * unbuffered write to perform an RMW cycle.  We don't read directly into the
+ * write buffer as this may get called to redo the read in the case that a
+ * conditional write fails due to conflicting 3rd-party modifications.
+ */
+ssize_t netfs_rmw_read(struct netfs_io_request *wreq, struct file *file,
+		       unsigned long long start1, size_t len1,
+		       unsigned long long start2, size_t len2)
+{
+	struct netfs_io_request *rreq;
+	ssize_t ret;
+
+	_enter("RMW:R=%x %llx-%llx %llx-%llx",
+	       rreq->debug_id, start1, start1 + len1 - 1, start2, start2 + len2 - 1);
+
+	rreq = netfs_alloc_request(wreq->mapping, file,
+				   start1, start2 - start1 + len2, NETFS_RMW_READ);
+	if (IS_ERR(rreq))
+		return PTR_ERR(rreq);
+
+	INIT_WORK(&rreq->work, netfs_rreq_work);
+
+	rreq->iter = wreq->io_iter;
+	__set_bit(NETFS_RREQ_CRYPT_IN_PLACE, &rreq->flags);
+	__set_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags);
+
+	/* Chop the reads into slices according to what the netfs wants and
+	 * submit each one.
+	 */
+	netfs_get_request(rreq, netfs_rreq_trace_get_for_outstanding);
+	atomic_set(&rreq->nr_outstanding, 1);
+	if (len1 && !netfs_rmw_read_one(rreq, start1, len1))
+		goto wait;
+	if (len2)
+		netfs_rmw_read_one(rreq, start2, len2);
+
+wait:
+	/* Keep nr_outstanding incremented so that the ref always belongs to us
+	 * and the service code isn't punted off to a random thread pool to
+	 * process.
+	 */
+	for (;;) {
+		wait_var_event(&rreq->nr_outstanding,
+			       atomic_read(&rreq->nr_outstanding) == 1);
+		netfs_rreq_assess(rreq, false);
+		if (atomic_read(&rreq->nr_outstanding) == 1)
+			break;
+		cond_resched();
+	}
+
+	trace_netfs_rreq(wreq, netfs_rreq_trace_wait_ip);
+	wait_on_bit(&wreq->flags, NETFS_RREQ_IN_PROGRESS,
+		    TASK_UNINTERRUPTIBLE);
+
+	ret = rreq->error;
+	if (ret == 0 && rreq->submitted < rreq->len) {
+		trace_netfs_failure(rreq, NULL, ret, netfs_fail_short_read);
+		ret = -EIO;
+	}
+
+	if (ret == 0)
+		ret = netfs_dio_copy_bounce_to_dest(rreq);
+
+	netfs_put_request(rreq, false, netfs_rreq_trace_put_return);
+	return ret;
+}
