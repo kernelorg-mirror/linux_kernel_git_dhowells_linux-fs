@@ -147,6 +147,7 @@ struct netfs_inode {
 #define NETFS_ICTX_ENCRYPTED	4		/* The file contents are encrypted */
 	unsigned char		min_bshift;	/* log2 min block size for bounding box or 0 */
 	unsigned char		crypto_bshift;	/* log2 of crypto block size */
+	unsigned char		crypto_trailer;	/* Size of crypto trailer */
 };
 
 /*
@@ -237,6 +238,7 @@ enum netfs_io_origin {
 	NETFS_WRITEBACK,		/* This write was triggered by writepages */
 	NETFS_WRITETHROUGH,		/* This write was made by netfs_perform_write() */
 	NETFS_LAUNDER_WRITE,		/* This is triggered by ->launder_folio() */
+	NETFS_RMW_READ,			/* This is an unbuffered read for RMW */
 	NETFS_UNBUFFERED_WRITE,		/* This is an unbuffered write */
 	NETFS_DIO_READ,			/* This is a direct I/O read */
 	NETFS_DIO_WRITE,		/* This is a direct I/O write */
@@ -295,6 +297,7 @@ struct netfs_io_request {
 #define NETFS_RREQ_BLOCKED		10	/* We blocked */
 #define NETFS_RREQ_CONTENT_ENCRYPTION	11	/* Content encryption is in use */
 #define NETFS_RREQ_CRYPT_IN_PLACE	12	/* Enc/dec in place in ->io_iter */
+#define NETFS_RREQ_REPEAT_RMW		13	/* Need to repeat RMW cycle */
 	const struct netfs_request_ops *netfs_ops;
 	void (*cleanup)(struct netfs_io_request *req);
 };
@@ -487,6 +490,7 @@ static inline void netfs_inode_init(struct netfs_inode *ctx,
 	ctx->flags = 0;
 	ctx->min_bshift = 0;
 	ctx->crypto_bshift = 0;
+	ctx->crypto_trailer = 0;
 #if IS_ENABLED(CONFIG_FSCACHE)
 	ctx->cache = NULL;
 #endif
