@@ -262,6 +262,7 @@ int v9fs_init_inode(struct v9fs_session_info *v9ses,
 	inode->i_rdev = rdev;
 	simple_inode_init_ts(inode);
 	inode->i_mapping->a_ops = &v9fs_addr_operations;
+	mapping_set_large_folios(inode->i_mapping);
 	inode->i_private = NULL;
 
 	switch (mode & S_IFMT) {
