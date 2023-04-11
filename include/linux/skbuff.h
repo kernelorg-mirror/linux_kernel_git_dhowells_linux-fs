@@ -5037,6 +5037,8 @@ static inline void skb_mark_for_recycle(struct sk_buff *skb)
 #endif
 }
 
+void *alloc_skb_frag(size_t fragsz, gfp_t gfp);
+void *copy_skb_frag(const void *s, size_t len, gfp_t gfp);
 ssize_t skb_splice_from_iter(struct sk_buff *skb, struct iov_iter *iter,
 			     ssize_t maxsize, gfp_t gfp);
 
