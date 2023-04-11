@@ -6755,6 +6755,136 @@ nodefer:	__kfree_skb(skb);
 		smp_call_function_single_async(cpu, &sd->defer_csd);
 }
 
+struct skb_splice_frag_cache {
+	struct folio	*folio;
+	void		*virt;
+	unsigned int	offset;
+	/* we maintain a pagecount bias, so that we dont dirty cache line
+	 * containing page->_refcount every time we allocate a fragment.
+	 */
+	unsigned int	pagecnt_bias;
+	bool		pfmemalloc;
+};
+
+static DEFINE_PER_CPU(struct skb_splice_frag_cache, skb_splice_frag_cache);
+
+static void *skb_splice_frag_alloc(size_t fragsz, gfp_t gfp)
+{
+	struct skb_splice_frag_cache *cache;
+	struct folio *folio, *spare = NULL;
+	size_t offset, fsize;
+	void *p;
+
+	if (WARN_ON_ONCE(fragsz == 0))
+		fragsz = 1;
+
+	cache = get_cpu_ptr(&skb_splice_frag_cache);
+reload:
+	folio = cache->folio;
+	offset = cache->offset;
+try_again:
+	if (fragsz > offset)
+		goto insufficient_space;
+
+	/* Make the allocation. */
+	cache->pagecnt_bias--;
+	offset = ALIGN_DOWN(offset - fragsz, SMP_CACHE_BYTES);
+	cache->offset = offset;
+	p = cache->virt + offset;
+	put_cpu_ptr(skb_splice_frag_cache);
+	if (spare)
+		folio_put(spare);
+	return p;
+
+insufficient_space:
+	/* See if we can refurbish the current folio. */
+	if (!folio || !folio_ref_sub_and_test(folio, cache->pagecnt_bias))
+		goto get_new_folio;
+	if (unlikely(cache->pfmemalloc)) {
+		__folio_put(folio);
+		goto get_new_folio;
+	}
+
+	fsize = folio_size(folio);
+	if (unlikely(fragsz > fsize))
+		goto frag_too_big;
+
+	/* OK, page count is 0, we can safely set it */
+	folio_set_count(folio, PAGE_FRAG_CACHE_MAX_SIZE + 1);
+
+	/* Reset page count bias and offset to start of new frag */
+	cache->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+	offset = fsize;
+	goto try_again;
+
+get_new_folio:
+	if (!spare) {
+		cache->folio = NULL;
+		put_cpu_ptr(&skb_splice_frag_cache);
+
+#if PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE
+		spare = folio_alloc(gfp | __GFP_NOWARN | __GFP_NORETRY |
+				    __GFP_NOMEMALLOC,
+				    PAGE_FRAG_CACHE_MAX_ORDER);
+		if (!spare)
+#endif
+			spare = folio_alloc(gfp, 0);
+		if (!spare)
+			return NULL;
+
+		cache = get_cpu_ptr(&skb_splice_frag_cache);
+		/* We may now be on a different cpu and/or someone else may
+		 * have refilled it
+		 */
+		cache->pfmemalloc = folio_is_pfmemalloc(spare);
+		if (cache->folio)
+			goto reload;
+	}
+
+	cache->folio = spare;
+	cache->virt  = folio_address(spare);
+	folio = spare;
+	spare = NULL;
+
+	/* Even if we own the page, we do not use atomic_set().  This would
+	 * break get_page_unless_zero() users.
+	 */
+	folio_ref_add(folio, PAGE_FRAG_CACHE_MAX_SIZE);
+
+	/* Reset page count bias and offset to start of new frag */
+	cache->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+	offset = folio_size(folio);
+	goto try_again;
+
+frag_too_big:
+	/*
+	 * The caller is trying to allocate a fragment with fragsz > PAGE_SIZE
+	 * but the cache isn't big enough to satisfy the request, this may
+	 * happen in low memory conditions.  We don't release the cache page
+	 * because it could make memory pressure worse so we simply return NULL
+	 * here.
+	 */
+	cache->offset = offset;
+	put_cpu_ptr(&skb_splice_frag_cache);
+	if (spare)
+		folio_put(spare);
+	return NULL;
+}
+
+/*
+ * Duplicate a piece of memory into a page fragment.
+ */
+static void *skb_splice_memdup(const void *s, size_t len, gfp_t gfp)
+{
+	void *p;
+
+	p = skb_splice_frag_alloc(len, gfp);
+	if (!p)
+		return NULL;
+
+	return memcpy(p, s, len);
+}
+
 static void skb_splice_csum_page(struct sk_buff *skb, struct page *page,
 				 size_t offset, size_t len)
 {
@@ -6808,17 +6938,43 @@ ssize_t skb_splice_from_iter(struct sk_buff *skb, struct iov_iter *iter,
 			break;
 		}
 
+		if (space == 0 &&
+		    !skb_can_coalesce(skb, skb_shinfo(skb)->nr_frags,
+				      pages[0], off)) {
+			iov_iter_revert(iter, len);
+			break;
+		}
+
 		i = 0;
 		do {
 			struct page *page = pages[i++];
 			size_t part = min_t(size_t, PAGE_SIZE - off, len);
+			bool put = false;
 
-			ret = -EIO;
-			if (WARN_ON_ONCE(!sendpage_ok(page)))
+			if (PageSlab(page)) {
+				const void *p;
+				void *q;
+
+				p = kmap_local_page(page);
+				q = skb_splice_memdup(p + off, part, gfp);
+				kunmap_local(p);
+				if (!q) {
+					iov_iter_revert(iter, len);
+					ret = -ENOMEM;
+					goto out;
+				}
+				page = virt_to_page(q);
+				off = offset_in_page(q);
+				put = true;
+			} else if (WARN_ON_ONCE(!sendpage_ok(page))) {
+				ret = -EIO;
 				goto out;
+			}
 
 			ret = skb_append_pagefrags(skb, page, off, part,
 						   frag_limit);
+			if (put)
+				put_page(page);
 			if (ret < 0) {
 				iov_iter_revert(iter, len);
 				goto out;
