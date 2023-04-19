@@ -348,7 +348,8 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 {
 	int get_info_op_buf_size;
 	int name_len = strlen(lock_name);
-	struct page *get_info_op_page, *reply_page;
+	struct bvecq *reply;
+	struct page *get_info_op_page;
 	size_t reply_len = PAGE_SIZE;
 	void *p, *end;
 	int ret;
@@ -362,8 +363,8 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 	if (!get_info_op_page)
 		return -ENOMEM;
 
-	reply_page = alloc_page(GFP_NOIO);
-	if (!reply_page) {
+	reply = bvecq_alloc_buffer(reply_len, GFP_NOIO, false);
+	if (!reply) {
 		__free_page(get_info_op_page);
 		return -ENOMEM;
 	}
@@ -379,18 +380,19 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 	dout("%s lock_name %s\n", __func__, lock_name);
 	ret = ceph_osdc_call(osdc, oid, oloc, "lock", "get_info",
 			     CEPH_OSD_FLAG_READ, get_info_op_page,
-			     get_info_op_buf_size, &reply_page, &reply_len);
+			     get_info_op_buf_size, reply, &reply_len);
 
 	dout("%s: status %d\n", __func__, ret);
 	if (ret >= 0) {
-		p = page_address(reply_page);
+		p = kmap_local_bvecq(reply, 0);
 		end = p + reply_len;
 
 		ret = decode_lockers(&p, end, type, tag, lockers, num_lockers);
+		kunmap_local(p);
 	}
 
 	__free_page(get_info_op_page);
-	__free_page(reply_page);
+	bvecq_put(reply);
 	return ret;
 }
 EXPORT_SYMBOL(ceph_cls_lock_info);
@@ -398,11 +400,11 @@ EXPORT_SYMBOL(ceph_cls_lock_info);
 int ceph_cls_assert_locked(struct ceph_osd_request *req, int which,
 			   char *lock_name, u8 type, char *cookie, char *tag)
 {
+	struct bvecq *dbuf;
 	int assert_op_buf_size;
 	int name_len = strlen(lock_name);
 	int cookie_len = strlen(cookie);
 	int tag_len = strlen(tag);
-	struct page **pages;
 	void *p, *end;
 	int ret;
 
@@ -417,11 +419,11 @@ int ceph_cls_assert_locked(struct ceph_osd_request *req, int which,
 	if (ret)
 		return ret;
 
-	pages = ceph_alloc_page_vector(1, GFP_NOIO);
-	if (IS_ERR(pages))
-		return PTR_ERR(pages);
+	dbuf = bvecq_alloc_buffer(assert_op_buf_size, GFP_NOIO, false);
+	if (!dbuf)
+		return -ENOMEM;
 
-	p = page_address(pages[0]);
+	p = kmap_local_bvecq(dbuf, 0);
 	end = p + assert_op_buf_size;
 
 	/* encode cls_lock_assert_op struct */
@@ -431,10 +433,11 @@ int ceph_cls_assert_locked(struct ceph_osd_request *req, int which,
 	ceph_encode_8(&p, type);
 	ceph_encode_string(&p, end, cookie, cookie_len);
 	ceph_encode_string(&p, end, tag, tag_len);
+	kunmap(p);
 	WARN_ON(p != end);
 
-	osd_req_op_cls_request_data_pages(req, which, pages, assert_op_buf_size,
-					  0, false, true);
+	osd_req_op_cls_request_bvecq(req, which, dbuf, assert_op_buf_size);
 	return 0;
 }
 EXPORT_SYMBOL(ceph_cls_assert_locked);
+

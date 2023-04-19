@@ -1819,9 +1819,9 @@ static int __rbd_object_map_load(struct rbd_device *rbd_dev)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
 	CEPH_DEFINE_OID_ONSTACK(oid);
-	struct page **pages;
-	void *p, *end;
+	struct bvecq *reply;
 	size_t reply_len;
+	void *hdr, *p, *end;
 	u64 num_objects;
 	u64 object_map_bytes;
 	u64 object_map_size;
@@ -1835,48 +1835,55 @@ static int __rbd_object_map_load(struct rbd_device *rbd_dev)
 	object_map_bytes = DIV_ROUND_UP_ULL(num_objects * BITS_PER_OBJ,
 					    BITS_PER_BYTE);
 	num_pages = calc_pages_for(0, object_map_bytes) + 1;
-	pages = ceph_alloc_page_vector(num_pages, GFP_KERNEL);
-	if (IS_ERR(pages))
-		return PTR_ERR(pages);
 
 	reply_len = num_pages * PAGE_SIZE;
+	reply = bvecq_alloc_buffer(reply_len, GFP_KERNEL, false);
+	if (!reply)
+		return -ENOMEM;
+
 	rbd_object_map_name(rbd_dev, rbd_dev->spec->snap_id, &oid);
 	ret = ceph_osdc_call(osdc, &oid, &rbd_dev->header_oloc,
 			     "rbd", "object_map_load", CEPH_OSD_FLAG_READ,
-			     NULL, 0, pages, &reply_len);
+			     NULL, 0, reply, &reply_len);
 	if (ret)
 		goto out;
 
-	p = page_address(pages[0]);
-	end = p + min(reply_len, (size_t)PAGE_SIZE);
+	hdr = kmap_local_bvecq(reply, 0);
+	end = hdr + umin(reply_len, PAGE_SIZE);
+	p = hdr;
 	ret = decode_object_map_header(&p, end, &object_map_size);
 	if (ret)
-		goto out;
+		goto out_unmap;
 
 	if (object_map_size != num_objects) {
 		rbd_warn(rbd_dev, "object map size mismatch: %llu vs %llu",
 			 object_map_size, num_objects);
 		ret = -EINVAL;
-		goto out;
+		goto out_unmap;
 	}
 
-	if (offset_in_page(p) + object_map_bytes > reply_len) {
+	if (object_map_bytes > reply_len - (p - hdr)) {
 		ret = -EINVAL;
-		goto out;
+		goto out_unmap;
 	}
 
 	rbd_dev->object_map = kvmalloc(object_map_bytes, GFP_KERNEL);
 	if (!rbd_dev->object_map) {
 		ret = -ENOMEM;
-		goto out;
+		goto out_unmap;
 	}
 
 	rbd_dev->object_map_size = object_map_size;
-	ceph_copy_from_page_vector(pages, rbd_dev->object_map,
-				   offset_in_page(p), object_map_bytes);
 
+	ret = bvecq_copy_to_buf(reply, reply_len, p - hdr,
+				rbd_dev->object_map, object_map_bytes);
+	if (ret < 0)
+		goto out_unmap;
+	ret = 0;
+out_unmap:
+	kunmap_local(hdr);
 out:
-	ceph_release_page_vector(pages, num_pages);
+	bvecq_put(reply);
 	return ret;
 }
 
@@ -1945,6 +1952,7 @@ static int rbd_object_map_update_finish(struct rbd_obj_request *obj_req,
 {
 	struct rbd_device *rbd_dev = obj_req->img_request->rbd_dev;
 	struct ceph_osd_data *osd_data;
+	struct bvecq *dbuf;
 	u64 objno;
 	u8 state, new_state, current_state;
 	bool has_current_state;
@@ -1969,9 +1977,10 @@ static int rbd_object_map_update_finish(struct rbd_obj_request *obj_req,
 	 */
 	rbd_assert(osd_req->r_num_ops == 2);
 	osd_data = osd_req_op_data(osd_req, 1, cls, request_data);
-	rbd_assert(osd_data->type == CEPH_OSD_DATA_TYPE_PAGES);
+	rbd_assert(osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ);
+	dbuf = osd_data->bvecq;
 
-	p = page_address(osd_data->pages[0]);
+	p = kmap_local_bvecq(dbuf, 0);
 	objno = ceph_decode_64(&p);
 	rbd_assert(objno == obj_req->ex.oe_objno);
 	rbd_assert(ceph_decode_64(&p) == objno + 1);
@@ -1979,6 +1988,7 @@ static int rbd_object_map_update_finish(struct rbd_obj_request *obj_req,
 	has_current_state = ceph_decode_8(&p);
 	if (has_current_state)
 		current_state = ceph_decode_8(&p);
+	kunmap_local(p);
 
 	spin_lock(&rbd_dev->object_map_lock);
 	state = __rbd_object_map_get(rbd_dev, objno);
@@ -2018,7 +2028,7 @@ static int rbd_cls_object_map_update(struct ceph_osd_request *req,
 				     int which, u64 objno, u8 new_state,
 				     const u8 *current_state)
 {
-	struct page **pages;
+	struct ceph_encode enc;
 	void *p, *start;
 	int ret;
 
@@ -2026,11 +2036,11 @@ static int rbd_cls_object_map_update(struct ceph_osd_request *req,
 	if (ret)
 		return ret;
 
-	pages = ceph_alloc_page_vector(1, GFP_NOIO);
-	if (IS_ERR(pages))
-		return PTR_ERR(pages);
+	ret = ceph_start_encode(&enc, PAGE_SIZE, GFP_NOIO);
+	if (ret < 0)
+		return ret;
 
-	p = start = page_address(pages[0]);
+	p = start = kmap_local_bvecq(enc.dbuf, 0);
 	ceph_encode_64(&p, objno);
 	ceph_encode_64(&p, objno + 1);
 	ceph_encode_8(&p, new_state);
@@ -2040,9 +2050,10 @@ static int rbd_cls_object_map_update(struct ceph_osd_request *req,
 	} else {
 		ceph_encode_8(&p, 0);
 	}
+	ceph_enc_added_data(&enc, p - start);
+	kunmap_local(p);
 
-	osd_req_op_cls_request_data_pages(req, which, pages, p - start, 0,
-					  false, true);
+	osd_req_op_cls_request_bvecq(req, which, enc.dbuf, enc.len);
 	return 0;
 }
 
@@ -4677,8 +4688,9 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 			     size_t inbound_size)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
+	struct bvecq *reply;
 	struct page *req_page = NULL;
-	struct page *reply_page;
+	size_t reply_len = inbound_size;
 	int ret;
 
 	/*
@@ -4699,8 +4711,8 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 		memcpy(page_address(req_page), outbound, outbound_size);
 	}
 
-	reply_page = alloc_page(GFP_KERNEL);
-	if (!reply_page) {
+	reply = bvecq_alloc_buffer(inbound_size, GFP_KERNEL, false);
+	if (!reply) {
 		if (req_page)
 			__free_page(req_page);
 		return -ENOMEM;
@@ -4708,15 +4720,13 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, oid, oloc, RBD_DRV_NAME, method_name,
 			     CEPH_OSD_FLAG_READ, req_page, outbound_size,
-			     &reply_page, &inbound_size);
-	if (!ret) {
-		memcpy(inbound, page_address(reply_page), inbound_size);
-		ret = inbound_size;
-	}
+			     reply, &reply_len);
+	if (!ret)
+		ret = bvecq_copy_to_buf(reply, reply_len, 0, inbound, reply_len);
 
 	if (req_page)
 		__free_page(req_page);
-	__free_page(reply_page);
+	bvecq_put(reply);
 	return ret;
 }
 
@@ -5627,7 +5637,7 @@ e_inval:
 
 static int __get_parent_info(struct rbd_device *rbd_dev,
 			     struct page *req_page,
-			     struct page *reply_page,
+			     struct bvecq *reply,
 			     struct parent_image_info *pii)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
@@ -5637,27 +5647,29 @@ static int __get_parent_info(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "parent_get", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), &reply_page, &reply_len);
+			     req_page, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret == -EOPNOTSUPP ? 1 : ret;
 
-	p = page_address(reply_page);
+	p = kmap_local_bvecq(reply, 0);
 	end = p + reply_len;
 	ret = decode_parent_image_spec(&p, end, pii);
+	kunmap_local(p);
 	if (ret)
 		return ret;
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "parent_overlap_get", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), &reply_page, &reply_len);
+			     req_page, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret;
 
-	p = page_address(reply_page);
+	p = kmap_local_bvecq(reply, 0);
 	end = p + reply_len;
 	ceph_decode_8_safe(&p, end, pii->has_overlap, e_inval);
 	if (pii->has_overlap)
 		ceph_decode_64_safe(&p, end, pii->overlap, e_inval);
+	kunmap_local(p);
 
 	dout("%s pool_id %llu pool_ns %s image_id %s snap_id %llu has_overlap %d overlap %llu\n",
 	     __func__, pii->pool_id, pii->pool_ns, pii->image_id, pii->snap_id,
@@ -5673,7 +5685,7 @@ e_inval:
  */
 static int __get_parent_info_legacy(struct rbd_device *rbd_dev,
 				    struct page *req_page,
-				    struct page *reply_page,
+				    struct bvecq *reply,
 				    struct parent_image_info *pii)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
@@ -5683,15 +5695,16 @@ static int __get_parent_info_legacy(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "get_parent", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), &reply_page, &reply_len);
+			     req_page, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret;
 
-	p = page_address(reply_page);
+	p = kmap_local_bvecq(reply, 0);
 	end = p + reply_len;
 	ceph_decode_64_safe(&p, end, pii->pool_id, e_inval);
 	pii->image_id = ceph_extract_encoded_string(&p, end, NULL, GFP_KERNEL);
 	if (IS_ERR(pii->image_id)) {
+		kunmap_local(p);
 		ret = PTR_ERR(pii->image_id);
 		pii->image_id = NULL;
 		return ret;
@@ -5699,6 +5712,7 @@ static int __get_parent_info_legacy(struct rbd_device *rbd_dev,
 	ceph_decode_64_safe(&p, end, pii->snap_id, e_inval);
 	pii->has_overlap = true;
 	ceph_decode_64_safe(&p, end, pii->overlap, e_inval);
+	kunmap_local(p);
 
 	dout("%s pool_id %llu pool_ns %s image_id %s snap_id %llu has_overlap %d overlap %llu\n",
 	     __func__, pii->pool_id, pii->pool_ns, pii->image_id, pii->snap_id,
@@ -5712,29 +5726,30 @@ e_inval:
 static int rbd_dev_v2_parent_info(struct rbd_device *rbd_dev,
 				  struct parent_image_info *pii)
 {
-	struct page *req_page, *reply_page;
+	struct bvecq *reply;
+	struct page *req_page;
 	void *p;
-	int ret;
+	int ret = -ENOMEM;
 
 	req_page = alloc_page(GFP_KERNEL);
 	if (!req_page)
-		return -ENOMEM;
+		goto out;
 
-	reply_page = alloc_page(GFP_KERNEL);
-	if (!reply_page) {
-		__free_page(req_page);
-		return -ENOMEM;
-	}
+	reply = bvecq_alloc_buffer(PAGE_SIZE, GFP_KERNEL, false);
+	if (!reply)
+		goto out_free;
 
-	p = page_address(req_page);
+	p = kmap_local_page(req_page);
 	ceph_encode_64(&p, rbd_dev->spec->snap_id);
-	ret = __get_parent_info(rbd_dev, req_page, reply_page, pii);
+	kunmap_local(p);
+	ret = __get_parent_info(rbd_dev, req_page, reply, pii);
 	if (ret > 0)
-		ret = __get_parent_info_legacy(rbd_dev, req_page, reply_page,
-					       pii);
+		ret = __get_parent_info_legacy(rbd_dev, req_page, reply, pii);
 
+	bvecq_put(reply);
+out_free:
 	__free_page(req_page);
-	__free_page(reply_page);
+out:
 	return ret;
 }
 

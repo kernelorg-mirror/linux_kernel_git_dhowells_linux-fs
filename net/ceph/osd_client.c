@@ -5182,7 +5182,10 @@ EXPORT_SYMBOL(ceph_osdc_maybe_request_map);
  * Execute an OSD class method on an object.
  *
  * @flags: CEPH_OSD_FLAG_*
- * @resp_len: in/out param for reply length
+ * @response: Pointer to the storage descriptor for the reply or NULL.
+ *
+ * The size of the response buffer is passed by the caller in @req_len and
+ * the size of the response obtained is passed back in @resp_len.
  */
 int ceph_osdc_call(struct ceph_osd_client *osdc,
 		   struct ceph_object_id *oid,
@@ -5190,7 +5193,7 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 		   const char *class, const char *method,
 		   unsigned int flags,
 		   struct page *req_page, size_t req_len,
-		   struct page **resp_pages, size_t *resp_len)
+		   struct bvecq *response, size_t *resp_len)
 {
 	struct ceph_osd_request *req;
 	int ret;
@@ -5213,9 +5216,8 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 	if (req_page)
 		osd_req_op_cls_request_data_pages(req, 0, &req_page, req_len,
 						  0, false, false);
-	if (resp_pages)
-		osd_req_op_cls_response_data_pages(req, 0, resp_pages,
-						   *resp_len, 0, false, false);
+	if (response)
+		osd_req_op_cls_response_bvecq(req, 0, response, *resp_len);
 
 	ret = ceph_osdc_alloc_messages(req, GFP_NOIO);
 	if (ret)
@@ -5225,7 +5227,7 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 	ret = ceph_osdc_wait_request(osdc, req);
 	if (ret >= 0) {
 		ret = req->r_ops[0].rval;
-		if (resp_pages)
+		if (response)
 			*resp_len = req->r_ops[0].outdata_len;
 	}
 

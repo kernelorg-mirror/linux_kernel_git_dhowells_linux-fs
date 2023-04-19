@@ -607,7 +607,7 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 		   const char *class, const char *method,
 		   unsigned int flags,
 		   struct page *req_page, size_t req_len,
-		   struct page **resp_pages, size_t *resp_len);
+		   struct bvecq *response, size_t *resp_len);
 
 /* watch/notify */
 struct ceph_osd_linger_request *
