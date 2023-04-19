@@ -4817,13 +4817,10 @@ static void rbd_free_disk(struct rbd_device *rbd_dev)
 static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 			     struct ceph_object_id *oid,
 			     struct ceph_object_locator *oloc,
-			     void *buf, int buf_len)
-
+			     struct bvecq *dbuf, int len)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
 	struct ceph_osd_request *req;
-	struct page **pages;
-	int num_pages = calc_pages_for(0, buf_len);
 	int ret;
 
 	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_KERNEL);
@@ -4834,15 +4831,8 @@ static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 	ceph_oloc_copy(&req->r_base_oloc, oloc);
 	req->r_flags = CEPH_OSD_FLAG_READ;
 
-	pages = ceph_alloc_page_vector(num_pages, GFP_KERNEL);
-	if (IS_ERR(pages)) {
-		ret = PTR_ERR(pages);
-		goto out_req;
-	}
-
-	osd_req_op_extent_init(req, 0, CEPH_OSD_OP_READ, 0, buf_len, 0, 0);
-	osd_req_op_extent_osd_data_pages(req, 0, pages, buf_len, 0, false,
-					 true);
+	osd_req_op_extent_init(req, 0, CEPH_OSD_OP_READ, 0, len, 0, 0);
+	osd_req_op_extent_osd_bvecq(req, 0, dbuf, len);
 
 	ret = ceph_osdc_alloc_messages(req, GFP_KERNEL);
 	if (ret)
@@ -4850,9 +4840,6 @@ static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 
 	ceph_osdc_start_request(osdc, req);
 	ret = ceph_osdc_wait_request(osdc, req);
-	if (ret >= 0)
-		ceph_copy_from_page_vector(pages, buf, 0, ret);
-
 out_req:
 	ceph_osdc_put_request(req);
 	return ret;
@@ -4867,11 +4854,17 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 				  struct rbd_image_header *header,
 				  bool first_time)
 {
-	struct rbd_image_header_ondisk *ondisk = NULL;
+	struct rbd_image_header_ondisk *ondisk;
+	struct ceph_encode enc;
 	u32 snap_count = 0;
 	u64 names_size = 0;
 	u32 want_count;
 	int ret;
+
+	ret = ceph_start_encode(&enc, sizeof(*ondisk), GFP_KERNEL);
+	if (ret < 0)
+		return -ENOMEM;
+	ondisk = kmap_local_bvecq(enc.dbuf, 0);
 
 	/*
 	 * The complete header will include an array of its 64-bit
@@ -4883,17 +4876,17 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 	do {
 		size_t size;
 
-		kfree(ondisk);
-
 		size = sizeof (*ondisk);
 		size += snap_count * sizeof (struct rbd_image_snap_ondisk);
 		size += names_size;
-		ondisk = kmalloc(size, GFP_KERNEL);
-		if (!ondisk)
-			return -ENOMEM;
+
+		ret = -ENOMEM;
+		if (size > enc.capacity &&
+		    ceph_bvecq_reserve(&enc, size - enc.capacity) < 0)
+			goto out;
 
 		ret = rbd_obj_read_sync(rbd_dev, &rbd_dev->header_oid,
-					&rbd_dev->header_oloc, ondisk, size);
+					&rbd_dev->header_oloc, enc.dbuf, size);
 		if (ret < 0)
 			goto out;
 		if ((size_t)ret < size) {
@@ -4902,6 +4895,7 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 				size, ret);
 			goto out;
 		}
+
 		if (!rbd_dev_ondisk_valid(ondisk)) {
 			ret = -ENXIO;
 			rbd_warn(rbd_dev, "invalid header");
@@ -4915,8 +4909,8 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 
 	ret = rbd_header_from_disk(header, ondisk, first_time);
 out:
-	kfree(ondisk);
-
+	kunmap_local(ondisk);
+	ceph_end_encode(&enc);
 	return ret;
 }
 
