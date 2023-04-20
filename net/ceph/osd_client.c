@@ -130,13 +130,13 @@ static void ceph_osd_data_init(struct ceph_osd_data *osd_data)
  * Consumes @pages if @own_pages is true.
  */
 static void ceph_osd_data_pages_init(struct ceph_osd_data *osd_data,
-			struct page **pages, u64 length, u32 alignment,
+			struct page **pages, u64 length, u32 offset,
 			bool pages_from_pool, bool own_pages)
 {
 	osd_data->type = CEPH_OSD_DATA_TYPE_PAGES;
 	osd_data->pages = pages;
 	osd_data->length = length;
-	osd_data->alignment = alignment;
+	osd_data->offset = offset;
 	osd_data->pages_from_pool = pages_from_pool;
 	osd_data->own_pages = own_pages;
 }
@@ -196,26 +196,26 @@ EXPORT_SYMBOL(osd_req_op_extent_osd_data);
 
 void osd_req_op_raw_data_in_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages,
-			u64 length, u32 alignment,
+			u64 length, u32 offset,
 			bool pages_from_pool, bool own_pages)
 {
 	struct ceph_osd_data *osd_data;
 
 	osd_data = osd_req_op_raw_data_in(osd_req, which);
-	ceph_osd_data_pages_init(osd_data, pages, length, alignment,
+	ceph_osd_data_pages_init(osd_data, pages, length, offset,
 				pages_from_pool, own_pages);
 }
 EXPORT_SYMBOL(osd_req_op_raw_data_in_pages);
 
 void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages,
-			u64 length, u32 alignment,
+			u64 length, u32 offset,
 			bool pages_from_pool, bool own_pages)
 {
 	struct ceph_osd_data *osd_data;
 
 	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_data_pages_init(osd_data, pages, length, alignment,
+	ceph_osd_data_pages_init(osd_data, pages, length, offset,
 				pages_from_pool, own_pages);
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_data_pages);
@@ -289,12 +289,12 @@ static void osd_req_op_cls_request_info_pagelist(
 
 void osd_req_op_cls_request_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages, u64 length,
-			u32 alignment, bool pages_from_pool, bool own_pages)
+			u32 offset, bool pages_from_pool, bool own_pages)
 {
 	struct ceph_osd_data *osd_data;
 
 	osd_data = osd_req_op_data(osd_req, which, cls, request_data);
-	ceph_osd_data_pages_init(osd_data, pages, length, alignment,
+	ceph_osd_data_pages_init(osd_data, pages, length, offset,
 				pages_from_pool, own_pages);
 	osd_req->r_ops[which].cls.indata_len += length;
 	osd_req->r_ops[which].indata_len += length;
@@ -321,12 +321,12 @@ EXPORT_SYMBOL(osd_req_op_cls_request_data_bvecs);
 
 void osd_req_op_cls_response_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages, u64 length,
-			u32 alignment, bool pages_from_pool, bool own_pages)
+			u32 offset, bool pages_from_pool, bool own_pages)
 {
 	struct ceph_osd_data *osd_data;
 
 	osd_data = osd_req_op_data(osd_req, which, cls, response_data);
-	ceph_osd_data_pages_init(osd_data, pages, length, alignment,
+	ceph_osd_data_pages_init(osd_data, pages, length, offset,
 				pages_from_pool, own_pages);
 }
 EXPORT_SYMBOL(osd_req_op_cls_response_data_pages);
@@ -359,7 +359,7 @@ static void ceph_osd_data_release(struct ceph_osd_data *osd_data)
 	if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGES && osd_data->own_pages) {
 		int num_pages;
 
-		num_pages = calc_pages_for((u64)osd_data->alignment,
+		num_pages = calc_pages_for((u64)osd_data->offset,
 						(u64)osd_data->length);
 		ceph_release_page_vector(osd_data->pages, num_pages);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGELIST) {
@@ -946,7 +946,7 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 		BUG_ON(length > (u64) SIZE_MAX);
 		if (length)
 			ceph_msg_data_add_pages(msg, osd_data->pages,
-					length, osd_data->alignment, false);
+					length, osd_data->offset, false);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGELIST) {
 		BUG_ON(!length);
 		ceph_msg_data_add_pagelist(msg, osd_data->pagelist);

@@ -118,7 +118,7 @@ struct ceph_osd_data {
 		struct {
 			struct page	**pages;
 			u64		length;
-			u32		alignment;
+			u32		offset;
 			bool		pages_from_pool;
 			bool		own_pages;
 		};
@@ -469,7 +469,7 @@ struct ceph_osd_req_op *osd_req_op_init(struct ceph_osd_request *osd_req,
 extern void osd_req_op_raw_data_in_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
-					u32 alignment, bool pages_from_pool,
+					u32 offset, bool pages_from_pool,
 					bool own_pages);
 
 extern void osd_req_op_extent_init(struct ceph_osd_request *osd_req,
@@ -488,7 +488,7 @@ extern struct ceph_osd_data *osd_req_op_extent_osd_data(
 extern void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
-					u32 alignment, bool pages_from_pool,
+					u32 offset, bool pages_from_pool,
 					bool own_pages);
 #ifdef CONFIG_BLOCK
 void osd_req_op_extent_osd_data_bio(struct ceph_osd_request *osd_req,
@@ -509,7 +509,7 @@ void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
 extern void osd_req_op_cls_request_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
-					u32 alignment, bool pages_from_pool,
+					u32 offset, bool pages_from_pool,
 					bool own_pages);
 void osd_req_op_cls_request_data_bvecs(struct ceph_osd_request *osd_req,
 				       unsigned int which,
@@ -518,7 +518,7 @@ void osd_req_op_cls_request_data_bvecs(struct ceph_osd_request *osd_req,
 extern void osd_req_op_cls_response_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
-					u32 alignment, bool pages_from_pool,
+					u32 offset, bool pages_from_pool,
 					bool own_pages);
 int osd_req_op_cls_init(struct ceph_osd_request *osd_req, unsigned int which,
 			const char *class, const char *method);

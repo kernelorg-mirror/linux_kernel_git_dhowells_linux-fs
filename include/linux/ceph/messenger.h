@@ -222,7 +222,7 @@ struct ceph_msg_data {
 		struct {
 			struct page	**pages;
 			size_t		length;		/* total # bytes */
-			unsigned int	alignment;	/* first page */
+			unsigned int	offset;		/* first page */
 			bool		own_pages;
 		};
 		struct ceph_pagelist	*pagelist;
@@ -604,7 +604,7 @@ extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 				       unsigned long interval);
 
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
-			     size_t length, size_t alignment, bool own_pages);
+			     size_t length, size_t offset, bool own_pages);
 extern void ceph_msg_data_add_pagelist(struct ceph_msg *msg,
 				struct ceph_pagelist *pagelist);
 #ifdef CONFIG_BLOCK

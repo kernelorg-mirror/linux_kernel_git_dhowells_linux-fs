@@ -841,8 +841,8 @@ static void ceph_msg_data_pages_cursor_init(struct ceph_msg_data_cursor *cursor,
 	BUG_ON(!data->length);
 
 	cursor->resid = min(length, data->length);
-	page_count = calc_pages_for(data->alignment, (u64)data->length);
-	cursor->page_offset = data->alignment & ~PAGE_MASK;
+	page_count = calc_pages_for(data->offset, (u64)data->length);
+	cursor->page_offset = data->offset & ~PAGE_MASK;
 	cursor->page_index = 0;
 	BUG_ON(page_count > (int)USHRT_MAX);
 	cursor->page_count = (unsigned short)page_count;
@@ -1875,7 +1875,7 @@ static struct ceph_msg_data *ceph_msg_data_add(struct ceph_msg *msg)
 static void ceph_msg_data_destroy(struct ceph_msg_data *data)
 {
 	if (data->type == CEPH_MSG_DATA_PAGES && data->own_pages) {
-		int num_pages = calc_pages_for(data->alignment, data->length);
+		int num_pages = calc_pages_for(data->offset, data->length);
 		ceph_release_page_vector(data->pages, num_pages);
 	} else if (data->type == CEPH_MSG_DATA_PAGELIST) {
 		ceph_pagelist_release(data->pagelist);
@@ -1883,7 +1883,7 @@ static void ceph_msg_data_destroy(struct ceph_msg_data *data)
 }
 
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
-			     size_t length, size_t alignment, bool own_pages)
+			     size_t length, size_t offset, bool own_pages)
 {
 	struct ceph_msg_data *data;
 
@@ -1894,7 +1894,7 @@ void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 	data->type = CEPH_MSG_DATA_PAGES;
 	data->pages = pages;
 	data->length = length;
-	data->alignment = alignment & ~PAGE_MASK;
+	data->offset = offset & ~PAGE_MASK;
 	data->own_pages = own_pages;
 
 	msg->data_length += length;

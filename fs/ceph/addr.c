@@ -256,7 +256,7 @@ static void finish_netfs_read(struct ceph_osd_request *req)
 
 	if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGES) {
 		ceph_put_page_vector(osd_data->pages,
-				     calc_pages_for(osd_data->alignment,
+				     calc_pages_for(osd_data->offset,
 					osd_data->length), false);
 	}
 	if (err > 0) {
@@ -956,7 +956,7 @@ static void writepages_finish(struct ceph_osd_request *req)
 		osd_data = osd_req_op_extent_osd_data(req, i);
 		BUG_ON(osd_data->type != CEPH_OSD_DATA_TYPE_PAGES);
 		len += osd_data->length;
-		num_pages = calc_pages_for((u64)osd_data->alignment,
+		num_pages = calc_pages_for((u64)osd_data->offset,
 					   (u64)osd_data->length);
 		total_pages += num_pages;
 		for (j = 0; j < num_pages; j++) {
