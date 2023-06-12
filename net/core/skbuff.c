@@ -83,6 +83,7 @@
 #include <linux/user_namespace.h>
 #include <linux/indirect_call_wrapper.h>
 #include <linux/textsearch.h>
+#include <linux/proc_fs.h>
 
 #include "dev.h"
 #include "sock_destructor.h"
@@ -6758,6 +6759,7 @@ nodefer:	__kfree_skb(skb);
 struct skb_splice_frag_cache {
 	struct folio	*folio;
 	void		*virt;
+	unsigned int	fsize;
 	unsigned int	offset;
 	/* we maintain a pagecount bias, so that we dont dirty cache line
 	 * containing page->_refcount every time we allocate a fragment.
@@ -6767,6 +6769,26 @@ struct skb_splice_frag_cache {
 };
 
 static DEFINE_PER_CPU(struct skb_splice_frag_cache, skb_splice_frag_cache);
+static atomic_t skb_splice_frag_replaced, skb_splice_frag_refurbished;
+
+static int skb_splice_show(struct seq_file *m, void *data)
+{
+	int cpu;
+
+	seq_printf(m, "refurb=%u repl=%u\n",
+		   atomic_read(&skb_splice_frag_refurbished),
+		   atomic_read(&skb_splice_frag_replaced));
+
+	for_each_possible_cpu(cpu) {
+		const struct skb_splice_frag_cache *cache =
+			per_cpu_ptr(&skb_splice_frag_cache, cpu);
+
+		seq_printf(m, "[%u] %lx %u/%u\n",
+			   cpu, folio_pfn(cache->folio),
+			   cache->offset, cache->fsize);
+	}
+	return 0;
+}
 
 /**
  * alloc_skb_frag - Allocate a page fragment for using in a socket
@@ -6803,16 +6825,20 @@ try_again:
 
 insufficient_space:
 	/* See if we can refurbish the current folio. */
-	if (!folio || !folio_ref_sub_and_test(folio, cache->pagecnt_bias))
+	if (!folio)
 		goto get_new_folio;
+	if (!folio_ref_sub_and_test(folio, cache->pagecnt_bias))
+		goto replace_folio;
 	if (unlikely(cache->pfmemalloc)) {
 		__folio_put(folio);
-		goto get_new_folio;
+		goto replace_folio;
 	}
 
 	fsize = folio_size(folio);
 	if (unlikely(fragsz > fsize))
 		goto frag_too_big;
+
+	atomic_inc(&skb_splice_frag_refurbished);
 
 	/* OK, page count is 0, we can safely set it */
 	folio_set_count(folio, PAGE_FRAG_CACHE_MAX_SIZE + 1);
@@ -6822,6 +6848,8 @@ insufficient_space:
 	offset = fsize;
 	goto try_again;
 
+replace_folio:
+	atomic_inc(&skb_splice_frag_replaced);
 get_new_folio:
 	if (!spare) {
 		cache->folio = NULL;
@@ -6848,6 +6876,7 @@ get_new_folio:
 
 	cache->folio = spare;
 	cache->virt  = folio_address(spare);
+	cache->fsize = folio_size(spare);
 	folio = spare;
 	spare = NULL;
 
@@ -6858,7 +6887,7 @@ get_new_folio:
 
 	/* Reset page count bias and offset to start of new frag */
 	cache->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-	offset = folio_size(folio);
+	offset = cache->fsize;
 	goto try_again;
 
 frag_too_big:
@@ -7007,3 +7036,10 @@ out:
 	return spliced ?: ret;
 }
 EXPORT_SYMBOL(skb_splice_from_iter);
+
+static int skb_splice_init(void)
+{
+	proc_create_single("pagefrags", S_IFREG | 0444, NULL, &skb_splice_show);
+	return 0;
+}
+late_initcall(skb_splice_init);
