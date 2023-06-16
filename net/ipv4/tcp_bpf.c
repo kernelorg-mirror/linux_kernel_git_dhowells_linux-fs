@@ -111,9 +111,6 @@ retry:
 		if (has_tx_ulp)
 			msghdr.msg_flags |= MSG_SENDPAGE_NOPOLICY;
 
-		if (flags & MSG_SENDPAGE_NOTLAST)
-			msghdr.msg_flags |= MSG_MORE;
-
 		bvec_set_page(&bvec, page, size, off);
 		iov_iter_bvec(&msghdr.msg_iter, ITER_SOURCE, &bvec, 1, size);
 		ret = tcp_sendmsg_locked(sk, &msghdr, size);
