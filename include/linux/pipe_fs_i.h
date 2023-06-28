@@ -6,7 +6,6 @@
 
 #define PIPE_BUF_FLAG_LRU	0x01	/* page is on the LRU */
 #define PIPE_BUF_FLAG_ATOMIC	0x02	/* was atomically mapped */
-#define PIPE_BUF_FLAG_GIFT	0x04	/* page is a gift */
 #define PIPE_BUF_FLAG_PACKET	0x08	/* read() as a packet */
 #define PIPE_BUF_FLAG_CAN_MERGE	0x10	/* can merge buffers */
 #define PIPE_BUF_FLAG_WHOLE	0x20	/* read() must return entire buffer or error */
@@ -201,19 +200,6 @@ static inline void pipe_buf_release(struct pipe_inode_info *pipe,
 
 	buf->ops = NULL;
 	ops->release(pipe, buf);
-}
-
-/**
- * pipe_buf_confirm - verify contents of the pipe buffer
- * @pipe:	the pipe that the buffer belongs to
- * @buf:	the buffer to confirm
- */
-static inline int pipe_buf_confirm(struct pipe_inode_info *pipe,
-				   struct pipe_buffer *buf)
-{
-	if (!buf->ops->confirm)
-		return 0;
-	return buf->ops->confirm(pipe, buf);
 }
 
 /**

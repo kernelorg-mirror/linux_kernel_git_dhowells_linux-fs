@@ -97,6 +97,5 @@ extern ssize_t splice_to_socket(struct pipe_inode_info *pipe, struct file *out,
 extern int splice_grow_spd(const struct pipe_inode_info *, struct splice_pipe_desc *);
 extern void splice_shrink_spd(struct splice_pipe_desc *);
 
-extern const struct pipe_buf_operations page_cache_pipe_buf_ops;
 extern const struct pipe_buf_operations default_pipe_buf_ops;
 #endif

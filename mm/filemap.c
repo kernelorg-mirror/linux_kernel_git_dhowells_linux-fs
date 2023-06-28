@@ -2929,7 +2929,7 @@ add_to_pipe:
 		size_t part = min_t(size_t, PAGE_SIZE - offset, size - spliced);
 
 		*buf = (struct pipe_buffer) {
-			.ops	= &page_cache_pipe_buf_ops,
+			.ops	= &default_pipe_buf_ops,
 			.page	= page,
 			.offset	= offset,
 			.len	= part,

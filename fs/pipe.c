@@ -286,7 +286,6 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 			struct pipe_buffer *buf = &pipe->bufs[tail & mask];
 			size_t chars = buf->len;
 			size_t written;
-			int error;
 
 			if (chars > total_len) {
 				if (buf->flags & PIPE_BUF_FLAG_WHOLE) {
@@ -295,13 +294,6 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 					break;
 				}
 				chars = total_len;
-			}
-
-			error = pipe_buf_confirm(pipe, buf);
-			if (error) {
-				if (!ret)
-					ret = error;
-				break;
 			}
 
 			written = copy_page_to_iter(buf->page, buf->offset, chars, to);
@@ -462,10 +454,6 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 
 		if ((buf->flags & PIPE_BUF_FLAG_CAN_MERGE) &&
 		    offset + chars <= PAGE_SIZE) {
-			ret = pipe_buf_confirm(pipe, buf);
-			if (ret)
-				goto out;
-
 			ret = copy_page_from_iter(buf->page, offset, chars, from);
 			if (unlikely(ret < chars)) {
 				ret = -EFAULT;
