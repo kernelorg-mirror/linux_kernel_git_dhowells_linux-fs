@@ -37,6 +37,7 @@
 #include <linux/socket.h>
 #include <linux/sched/signal.h>
 
+#include "../mm/internal.h"
 #include "internal.h"
 
 /*
@@ -1382,14 +1383,117 @@ static long __do_splice(struct file *in, loff_t __user *off_in,
 	return ret;
 }
 
+static void copy_folio_to_folio(struct folio *src, size_t src_offset,
+				struct folio *dst, size_t dst_offset,
+				size_t size)
+{
+	void *p, *q;
+
+	while (size > 0) {
+		size_t part = min3(PAGE_SIZE - src_offset % PAGE_SIZE,
+				   PAGE_SIZE - dst_offset % PAGE_SIZE,
+				   size);
+
+		p = kmap_local_folio(src, src_offset);
+		q = kmap_local_folio(dst, dst_offset);
+		memcpy(q, p, part);
+		kunmap_local(p);
+		kunmap_local(q);
+		src_offset += part;
+		dst_offset += part;
+		size -= part;
+	}
+}
+
+static int splice_try_to_steal_page(struct pipe_inode_info *pipe,
+				    struct page *page, size_t offset,
+				    size_t size, unsigned int splice_flags)
+{
+	struct folio *folio = page_folio(page), *copy;
+	unsigned int flags = 0;
+	size_t fsize = folio_size(folio), spliced = 0;
+
+	if (!(splice_flags & SPLICE_F_GIFT) ||
+	    fsize != PAGE_SIZE || offset != 0 || size != fsize)
+		goto need_copy;
+
+	/*
+	 * For a folio to be stealable, the caller holds a ref, the mapping
+	 * holds a ref and the page tables hold a ref; it may or may not also
+	 * be on the LRU.  Anything else and someone else has access to it.
+	 */
+	if (folio_ref_count(folio) > 4 || folio_mapcount(folio) != 1 ||
+	    folio_maybe_dma_pinned(folio))
+		goto need_copy;
+
+	/* Try to steal. */
+	folio_lock(folio);
+
+	if (folio_ref_count(folio) > 4 || folio_mapcount(folio) != 1 ||
+	    folio_maybe_dma_pinned(folio))
+		goto need_copy_unlock;
+	if (!folio->mapping)
+		goto need_copy_unlock; /* vmsplice race? */
+
+	/*
+	 * Remove the folio from the process VM and then try to remove
+	 * it from the mapping.  It we can't remove it, we'll have to
+	 * copy it instead.
+	 */
+	unmap_mapping_folio(folio);
+	if (remove_mapping(folio->mapping, folio)) {
+		folio_clear_mappedtodisk(folio);
+		flags |= PIPE_BUF_FLAG_LRU;
+		goto add_to_pipe;
+	}
+
+need_copy_unlock:
+	folio_unlock(folio);
+need_copy:
+
+	copy = folio_alloc(GFP_KERNEL, 0);
+	if (!copy)
+		return -ENOMEM;
+
+	size = min(size, PAGE_SIZE - offset % PAGE_SIZE);
+	copy_folio_to_folio(folio, offset, copy, 0, size);
+	folio_mark_uptodate(copy);
+	folio_put(folio);
+	folio = copy;
+	offset = 0;
+
+add_to_pipe:
+	page = folio_page(folio, offset / PAGE_SIZE);
+	size = min(size, folio_size(folio) - offset);
+	offset %= PAGE_SIZE;
+
+	while (spliced < size &&
+	       !pipe_full(pipe->head, pipe->tail, pipe->max_usage)) {
+		struct pipe_buffer *buf = pipe_head_buf(pipe);
+		size_t part = min_t(size_t, PAGE_SIZE - offset, size - spliced);
+
+		*buf = (struct pipe_buffer) {
+			.ops	= &default_pipe_buf_ops,
+			.page	= page,
+			.offset	= offset,
+			.len	= part,
+			.flags	= flags,
+		};
+		folio_get(folio);
+		pipe->head++;
+		page++;
+		spliced += part;
+		offset = 0;
+	}
+
+	folio_put(folio);
+	return spliced;
+}
+
 static int iter_to_pipe(struct iov_iter *from,
 			struct pipe_inode_info *pipe,
 			unsigned flags)
 {
-	struct pipe_buffer buf = {
-		.ops = &user_page_pipe_buf_ops,
-		.flags = flags
-	};
 	size_t total = 0;
 	int ret = 0;
 
@@ -1407,12 +1511,11 @@ static int iter_to_pipe(struct iov_iter *from,
 
 		n = DIV_ROUND_UP(left + start, PAGE_SIZE);
 		for (i = 0; i < n; i++) {
-			int size = min_t(int, left, PAGE_SIZE - start);
+			size_t part = min_t(size_t, left,
+					    PAGE_SIZE - start % PAGE_SIZE);
 
-			buf.page = pages[i];
-			buf.offset = start;
-			buf.len = size;
-			ret = add_to_pipe(pipe, &buf);
+			ret = splice_try_to_steal_page(pipe, pages[i], start,
+						       part, flags);
 			if (unlikely(ret < 0)) {
 				iov_iter_revert(from, left);
 				// this one got dropped by add_to_pipe()
@@ -1421,7 +1524,7 @@ static int iter_to_pipe(struct iov_iter *from,
 				goto out;
 			}
 			total += ret;
-			left -= size;
+			left -= part;
 			start = 0;
 		}
 	}
