@@ -2838,15 +2838,87 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 }
 EXPORT_SYMBOL(generic_file_read_iter);
 
-/*
- * Splice subpages from a folio into a pipe.
- */
-size_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
-			      struct folio *folio, loff_t fpos, size_t size)
+static inline void copy_folio_to_folio(struct folio *src, size_t src_offset,
+				       struct folio *dst, size_t dst_offset,
+				       size_t size)
 {
+	void *p, *q;
+
+	while (size > 0) {
+		size_t part = min3(PAGE_SIZE - src_offset % PAGE_SIZE,
+				   PAGE_SIZE - dst_offset % PAGE_SIZE,
+				   size);
+
+		p = kmap_local_folio(src, src_offset);
+		q = kmap_local_folio(dst, dst_offset);
+		memcpy(q, p, part);
+		kunmap_local(p);
+		kunmap_local(q);
+		src_offset += part;
+		dst_offset += part;
+		size -= part;
+	}
+}
+
+/*
+ * Splice data from a folio into a pipe.  The folio is stolen if no one else is
+ * using it and copied otherwise.  We can't put the folio into the pipe still
+ * attached to the pagecache as that allows someone to modify it after the
+ * splice.
+ */
+ssize_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
+			       struct folio *folio, loff_t fpos, size_t size)
+{
+	struct address_space *mapping;
+	struct folio *copy = NULL;
 	struct page *page;
+	unsigned int flags = 0;
+	ssize_t ret;
 	size_t spliced = 0, offset = offset_in_folio(folio, fpos);
 
+	folio_lock(folio);
+
+	mapping = folio_mapping(folio);
+	ret = -ENODATA;
+	if (!folio->mapping)
+		goto err_unlock; /* Truncated */
+	ret = -EIO;
+	if (!folio_test_uptodate(folio))
+		goto err_unlock;
+
+	/*
+	 * At least for ext2 with nobh option, we need to wait on writeback
+	 * completing on this folio, since we'll remove it from the pagecache.
+	 * Otherwise truncate wont wait on the folio, allowing the disk blocks
+	 * to be reused by someone else before we actually wrote our data to
+	 * them. fs corruption ensues.
+	 */
+	folio_wait_writeback(folio);
+
+	if (folio_has_private(folio) &&
+	    !filemap_release_folio(folio, GFP_KERNEL))
+		goto need_copy;
+
+	/* If we succeed in removing the mapping, set LRU flag and add it. */
+	if (remove_mapping(mapping, folio)) {
+		folio_unlock(folio);
+		flags = PIPE_BUF_FLAG_LRU;
+		goto add_to_pipe;
+	}
+
+need_copy:
+	folio_unlock(folio);
+
+	copy = folio_alloc(GFP_KERNEL, 0);
+	if (!copy)
+		return -ENOMEM;
+
+	size = min(size, PAGE_SIZE - offset % PAGE_SIZE);
+	copy_folio_to_folio(folio, offset, copy, 0, size);
+	folio = copy;
+	offset = 0;
+
+add_to_pipe:
 	page = folio_page(folio, offset / PAGE_SIZE);
 	size = min(size, folio_size(folio) - offset);
 	offset %= PAGE_SIZE;
@@ -2861,6 +2933,7 @@ size_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
 			.page	= page,
 			.offset	= offset,
 			.len	= part,
+			.flags	= flags,
 		};
 		folio_get(folio);
 		pipe->head++;
@@ -2869,7 +2942,13 @@ size_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
 		offset = 0;
 	}
 
+	if (copy)
+		folio_put(copy);
 	return spliced;
+
+err_unlock:
+	folio_unlock(folio);
+	return ret;
 }
 
 /**
@@ -2947,7 +3026,7 @@ ssize_t filemap_splice_read(struct file *in, loff_t *ppos,
 
 		for (i = 0; i < folio_batch_count(&fbatch); i++) {
 			struct folio *folio = fbatch.folios[i];
-			size_t n;
+			ssize_t n;
 
 			if (folio_pos(folio) >= end_offset)
 				goto out;
@@ -2963,8 +3042,11 @@ ssize_t filemap_splice_read(struct file *in, loff_t *ppos,
 
 			n = min_t(loff_t, len, isize - *ppos);
 			n = splice_folio_into_pipe(pipe, folio, *ppos, n);
-			if (!n)
+			if (n <= 0) {
+				if (n < 0)
+					error = n;
 				goto out;
+			}
 			len -= n;
 			total_spliced += n;
 			*ppos += n;
