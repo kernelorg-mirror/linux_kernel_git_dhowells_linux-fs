@@ -98,4 +98,7 @@ extern int splice_grow_spd(const struct pipe_inode_info *, struct splice_pipe_de
 extern void splice_shrink_spd(struct splice_pipe_desc *);
 
 extern const struct pipe_buf_operations default_pipe_buf_ops;
+
+extern atomic_t splice_stat_filemap_copied, splice_stat_filemap_moved;
+
 #endif

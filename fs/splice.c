@@ -36,9 +36,14 @@
 #include <linux/net.h>
 #include <linux/socket.h>
 #include <linux/sched/signal.h>
+#include <linux/proc_fs.h>
 
 #include "../mm/internal.h"
 #include "internal.h"
+
+atomic_t splice_stat_filemap_copied, splice_stat_filemap_moved;
+static atomic_t splice_stat_directly_copied;
+static atomic_t vmsplice_stat_copied, vmsplice_stat_stole;
 
 /*
  * Splice doesn't support FMODE_NOWAIT. Since pipes may set this flag to
@@ -276,6 +281,7 @@ ssize_t copy_splice_read(struct file *in, loff_t *ppos,
 		remain -= chunk;
 	}
 
+	atomic_add(keep, &splice_stat_directly_copied);
 	kfree(bv);
 	return ret;
 }
@@ -1299,6 +1305,7 @@ static int splice_try_to_steal_page(struct pipe_inode_info *pipe,
 	unmap_mapping_folio(folio);
 	if (remove_mapping(folio->mapping, folio)) {
 		folio_clear_mappedtodisk(folio);
+		atomic_inc(&vmsplice_stat_stole);
 		flags |= PIPE_BUF_FLAG_LRU;
 		goto add_to_pipe;
 	}
@@ -1316,6 +1323,7 @@ need_copy:
 	folio_put(folio);
 	folio = copy;
 	offset = 0;
+	atomic_inc(&vmsplice_stat_copied);
 
 add_to_pipe:
 	page = folio_page(folio, offset / PAGE_SIZE);
@@ -1905,3 +1913,23 @@ SYSCALL_DEFINE4(tee, int, fdin, int, fdout, size_t, len, unsigned int, flags)
 
 	return error;
 }
+
+static int splice_stats_show(struct seq_file *m, void *data)
+{
+	seq_printf(m, "filemap: copied=%u moved=%u\n",
+		   atomic_read(&splice_stat_filemap_copied),
+		   atomic_read(&splice_stat_filemap_moved));
+	seq_printf(m, "direct : copied=%u\n",
+		   atomic_read(&splice_stat_directly_copied));
+	seq_printf(m, "vmsplice: copied=%u stole=%u\n",
+		   atomic_read(&vmsplice_stat_copied),
+		   atomic_read(&vmsplice_stat_stole));
+	return 0;
+}
+
+static int splice_stats_init(void)
+{
+	proc_create_single("fs/splice", S_IFREG | 0444, NULL, splice_stats_show);
+	return 0;
+}
+late_initcall(splice_stats_init);

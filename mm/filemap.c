@@ -2872,7 +2872,8 @@ ssize_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
 	struct address_space *mapping;
 	struct folio *copy = NULL;
 	struct page *page;
-	unsigned int flags = 0;
+	unsigned int flags = 0, count = 0;
+	atomic_t *stat = &splice_stat_filemap_copied;
 	ssize_t ret;
 	size_t spliced = 0, offset = offset_in_folio(folio, fpos);
 
@@ -2902,6 +2903,7 @@ ssize_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
 	/* If we succeed in removing the mapping, set LRU flag and add it. */
 	if (remove_mapping(mapping, folio)) {
 		folio_unlock(folio);
+		stat = &splice_stat_filemap_moved;
 		flags = PIPE_BUF_FLAG_LRU;
 		goto add_to_pipe;
 	}
@@ -2940,8 +2942,10 @@ add_to_pipe:
 		page++;
 		spliced += part;
 		offset = 0;
+		count++;
 	}
 
+	atomic_add(count, stat);
 	if (copy)
 		folio_put(copy);
 	return spliced;
