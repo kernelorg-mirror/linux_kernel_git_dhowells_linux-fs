@@ -1249,7 +1249,7 @@ enum {
 	/*
 	 * FOLL_LONGTERM indicates that the page will be held for an indefinite
 	 * time period _often_ under userspace control.  This is in contrast to
-	 * iov_iter_get_pages(), whose usages are transient.
+	 * iov_iter_get_pages2(), whose usages are transient.
 	 */
 	FOLL_LONGTERM = 1 << 8,
 	/* split huge pmd before returning */

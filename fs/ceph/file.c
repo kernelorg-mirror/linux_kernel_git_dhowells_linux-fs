@@ -75,7 +75,7 @@ static __le32 ceph_flags_sys2wire(u32 flags)
  */
 
 /*
- * How many pages to get in one call to iov_iter_get_pages().  This
+ * How many pages to get in one call to iov_iter_get_pages2().  This
  * determines the size of the on-stack array used as a buffer.
  */
 #define ITER_GET_BVECS_PAGES	64
@@ -115,7 +115,7 @@ static ssize_t __iter_get_bvecs(struct iov_iter *iter, size_t maxsize,
 }
 
 /*
- * iov_iter_get_pages() only considers one iov_iter segment, no matter
+ * iov_iter_get_pages2() only considers one iov_iter segment, no matter
  * what maxsize or maxpages are given.  For ITER_BVEC that is a single
  * page.
  *
