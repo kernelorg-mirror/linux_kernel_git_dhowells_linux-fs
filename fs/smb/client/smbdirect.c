@@ -1906,14 +1906,6 @@ int smbd_recv(struct smbd_connection *info, struct msghdr *msg)
 	unsigned int to_read, page_offset;
 	int rc;
 
-	if (iov_iter_rw(&msg->msg_iter) == WRITE) {
-		/* It's a bug in upper layer to get there */
-		cifs_dbg(VFS, "Invalid msg iter dir %u\n",
-			 iov_iter_rw(&msg->msg_iter));
-		rc = -EINVAL;
-		goto out;
-	}
-
 	switch (iov_iter_type(&msg->msg_iter)) {
 	case ITER_KVEC:
 		buf = msg->msg_iter.kvec->iov_base;
@@ -1935,7 +1927,6 @@ int smbd_recv(struct smbd_connection *info, struct msghdr *msg)
 		rc = -EINVAL;
 	}
 
-out:
 	/* SMBDirect will read it all or nothing */
 	if (rc > 0)
 		msg->msg_iter.count = 0;
