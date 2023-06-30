@@ -1326,8 +1326,10 @@ static ssize_t extract_xarray_to_sg(struct iov_iter *iter,
  *
  * No end mark is placed on the scatterlist; that's left to the caller.
  *
- * @extraction_flags can have ITER_ALLOW_P2PDMA set to request peer-to-peer DMA
- * be allowed on the pages extracted.
+ * @extraction_flags should have either WRITE_FROM_ITER or READ_INTO_ITER to
+ * indicate the direction the data is intended to flow to/from the buffer and
+ * can have ITER_ALLOW_P2PDMA set to request peer-to-peer DMA be allowed on the
+ * pages extracted.
  *
  * If successful, @sgtable->nents is updated to include the number of elements
  * added and the number of bytes added is returned.  @sgtable->orig_nents is
@@ -1340,6 +1342,12 @@ ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t maxsize,
 			   struct sg_table *sgtable, unsigned int sg_max,
 			   iov_iter_extraction_t extraction_flags)
 {
+	unsigned int dir = extraction_flags & (READ_INTO_ITER | WRITE_FROM_ITER);
+
+	if (WARN_ON_ONCE(dir != READ_INTO_ITER && dir != WRITE_FROM_ITER) ||
+	    WARN_ON_ONCE((dir & WRITE) != iter->data_source))
+		return -EFAULT;
+
 	if (maxsize == 0)
 		return 0;
 

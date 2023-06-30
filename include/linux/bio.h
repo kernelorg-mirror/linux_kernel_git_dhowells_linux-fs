@@ -42,11 +42,25 @@ static inline unsigned int bio_max_segs(unsigned int nr_segs)
 #define bio_sectors(bio)	bvec_iter_sectors((bio)->bi_iter)
 #define bio_end_sector(bio)	bvec_iter_end_sector((bio)->bi_iter)
 
+/**
+ * bio_is_write - Query if the I/O direction is towards the disk
+ * @bio: The bio to query
+ *
+ * Return true if this is some sort of write operation - ie. the data is going
+ * towards the disk.
+ */
+static inline bool bio_is_write(const struct bio *bio)
+{
+	return op_is_write(bio_op(bio));
+}
+
 /*
  * Return the data direction, READ or WRITE.
  */
-#define bio_data_dir(bio) \
-	(op_is_write(bio_op(bio)) ? WRITE : READ)
+static inline int bio_data_dir(const struct bio *bio)
+{
+	return bio_is_write(bio) ? WRITE : READ;
+}
 
 /*
  * Check whether this bio carries any data or not. A NULL bio is allowed.

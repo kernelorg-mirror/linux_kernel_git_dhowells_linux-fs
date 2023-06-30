@@ -1042,7 +1042,8 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			};
 
 			plen = extract_iter_to_sg(&msg->msg_iter, len, &sgtable,
-						  MAX_SGL_ENTS - sgl->cur, 0);
+						  MAX_SGL_ENTS - sgl->cur,
+						  WRITE_FROM_ITER);
 			if (plen < 0) {
 				err = plen;
 				goto unlock;
@@ -1247,7 +1248,7 @@ int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 
 		sg_init_table(rsgl->sgl.sgt.sgl, ALG_MAX_PAGES);
 		err = extract_iter_to_sg(&msg->msg_iter, seglen, &rsgl->sgl.sgt,
-					 ALG_MAX_PAGES, 0);
+					 ALG_MAX_PAGES, READ_INTO_ITER);
 		if (err < 0) {
 			rsgl->sg_num_bytes = 0;
 			return err;

@@ -115,7 +115,8 @@ static int hash_sendmsg(struct socket *sock, struct msghdr *msg,
 		ctx->sgl.need_unpin = iov_iter_extract_will_pin(&msg->msg_iter);
 
 		err = extract_iter_to_sg(&msg->msg_iter, LONG_MAX,
-					 &ctx->sgl.sgt, npages, 0);
+					 &ctx->sgl.sgt, npages,
+					 WRITE_FROM_ITER);
 		if (err < 0)
 			goto unlock_free;
 		len = err;

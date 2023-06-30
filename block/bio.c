@@ -1242,6 +1242,8 @@ static int bio_iov_add_zone_append_page(struct bio *bio, struct page *page,
  * will have to be cleaned up in the way indicated by the BIO_PAGE_PINNED flag.
  * For a multi-segment *iter, this function only adds pages from the next
  * non-empty segment of the iov iterator.
+ *
+ * The I/O direction is determined from the bio operation type.
  */
 static int __bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter)
 {
@@ -1262,6 +1264,8 @@ static int __bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter)
 	 */
 	BUILD_BUG_ON(PAGE_PTRS_PER_BVEC < 2);
 	pages += entries_left * (PAGE_PTRS_PER_BVEC - 1);
+
+	extraction_flags |= bio_is_write(bio) ? WRITE_FROM_ITER : READ_INTO_ITER;
 
 	if (bio->bi_bdev && blk_queue_pci_p2pdma(bio->bi_bdev->bd_disk->queue))
 		extraction_flags |= ITER_ALLOW_P2PDMA;
@@ -1332,6 +1336,8 @@ out:
  * fit into the bio, or are requested in @iter, whatever is smaller. If
  * MM encounters an error pinning the requested pages, it stops. Error
  * is returned only if 0 pages could be pinned.
+ *
+ * The bio operation indicates the data direction.
  */
 int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter)
 {

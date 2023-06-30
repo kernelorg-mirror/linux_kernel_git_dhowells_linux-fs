@@ -279,6 +279,9 @@ static int bio_map_user_iov(struct request *rq, struct iov_iter *iter,
 	if (bio == NULL)
 		return -ENOMEM;
 
+	extraction_flags |=
+		bio_is_write(bio) ? WRITE_FROM_ITER : READ_INTO_ITER;
+
 	if (blk_queue_pci_p2pdma(rq->q))
 		extraction_flags |= ITER_ALLOW_P2PDMA;
 	if (iov_iter_extract_will_pin(iter))

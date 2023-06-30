@@ -168,10 +168,14 @@ static inline int dio_refill_pages(struct dio *dio, struct dio_submit *sdio)
 {
 	struct page **pages = dio->pages;
 	const enum req_op dio_op = dio->opf & REQ_OP_MASK;
+	unsigned int extraction_flags;
 	ssize_t ret;
 
+	extraction_flags =
+		op_is_write(dio_op) ? WRITE_FROM_ITER : READ_INTO_ITER;
+
 	ret = iov_iter_extract_pages(sdio->iter, &pages, LONG_MAX,
-				     DIO_PAGES, 0, &sdio->from);
+				     DIO_PAGES, extraction_flags, &sdio->from);
 
 	if (ret < 0 && sdio->blocks_available && dio_op == REQ_OP_WRITE) {
 		/*
