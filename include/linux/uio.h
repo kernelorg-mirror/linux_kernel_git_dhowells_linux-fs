@@ -136,11 +136,6 @@ static inline bool iov_iter_is_xarray(const struct iov_iter *i)
 	return iov_iter_type(i) == ITER_XARRAY;
 }
 
-static inline unsigned char iov_iter_rw(const struct iov_iter *i)
-{
-	return i->data_source ? WRITE : READ;
-}
-
 static inline bool user_backed_iter(const struct iov_iter *i)
 {
 	return i->user_backed;

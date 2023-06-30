@@ -1097,7 +1097,7 @@ static ssize_t __iov_iter_get_pages_alloc(struct iov_iter *i,
 		unsigned long addr;
 		int res;
 
-		if (iov_iter_rw(i) != WRITE)
+		if (i->data_source == ITER_SOURCE)
 			gup_flags |= FOLL_WRITE;
 		if (i->nofault)
 			gup_flags |= FOLL_NOFAULT;
