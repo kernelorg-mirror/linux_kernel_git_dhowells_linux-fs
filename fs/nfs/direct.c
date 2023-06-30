@@ -133,7 +133,7 @@ int nfs_swap_rw(struct kiocb *iocb, struct iov_iter *iter)
 
 	VM_BUG_ON(iov_iter_count(iter) != PAGE_SIZE);
 
-	if (iov_iter_rw(iter) == READ)
+	if (iocb_is_read(iocb))
 		ret = nfs_file_direct_read(iocb, iter, true);
 	else
 		ret = nfs_file_direct_write(iocb, iter, true);

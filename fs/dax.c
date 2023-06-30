@@ -1573,7 +1573,7 @@ dax_iomap_rw(struct kiocb *iocb, struct iov_iter *iter,
 	if (!iomi.len)
 		return 0;
 
-	if (iov_iter_rw(iter) == WRITE) {
+	if (iocb_is_write(iocb)) {
 		lockdep_assert_held_write(&iomi.inode->i_rwsem);
 		iomi.flags |= IOMAP_WRITE;
 	} else {

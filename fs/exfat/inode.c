@@ -411,10 +411,10 @@ static ssize_t exfat_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	struct address_space *mapping = iocb->ki_filp->f_mapping;
 	struct inode *inode = mapping->host;
 	loff_t size = iocb->ki_pos + iov_iter_count(iter);
-	int rw = iov_iter_rw(iter);
+	bool writing = iocb_is_write(iocb);
 	ssize_t ret;
 
-	if (rw == WRITE) {
+	if (writing) {
 		/*
 		 * FIXME: blockdev_direct_IO() doesn't use ->write_begin(),
 		 * so we need to update the ->i_size_aligned to block boundary.
@@ -433,7 +433,7 @@ static ssize_t exfat_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	 * condition of exfat_get_block() and ->truncate().
 	 */
 	ret = blockdev_direct_IO(iocb, inode, iter, exfat_get_block);
-	if (ret < 0 && (rw & WRITE))
+	if (ret < 0 && writing)
 		exfat_write_failed(mapping, size);
 	return ret;
 }

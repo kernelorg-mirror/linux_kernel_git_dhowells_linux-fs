@@ -513,7 +513,7 @@ static ssize_t orangefs_direct_IO(struct kiocb *iocb,
 	 */
 	struct file *file = iocb->ki_filp;
 	loff_t pos = iocb->ki_pos;
-	enum ORANGEFS_io_type type = iov_iter_rw(iter) == WRITE ?
+	enum ORANGEFS_io_type type = iocb_is_write(iocb) ?
             ORANGEFS_IO_WRITE : ORANGEFS_IO_READ;
 	loff_t *offset = &pos;
 	struct inode *inode = file->f_mapping->host;

@@ -805,7 +805,7 @@ int f2fs_truncate(struct inode *inode)
 	return 0;
 }
 
-static bool f2fs_force_buffered_io(struct inode *inode, int rw)
+static bool f2fs_force_buffered_io(struct inode *inode, bool writing)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 
@@ -823,9 +823,9 @@ static bool f2fs_force_buffered_io(struct inode *inode, int rw)
 	 * for blkzoned device, fallback direct IO to buffered IO, so
 	 * all IOs can be serialized by log-structured write.
 	 */
-	if (f2fs_sb_has_blkzoned(sbi) && (rw == WRITE))
+	if (f2fs_sb_has_blkzoned(sbi) && writing)
 		return true;
-	if (f2fs_lfs_mode(sbi) && rw == WRITE && F2FS_IO_ALIGNED(sbi))
+	if (f2fs_lfs_mode(sbi) && writing && F2FS_IO_ALIGNED(sbi))
 		return true;
 	if (is_sbi_flag_set(sbi, SBI_CP_DISABLED))
 		return true;
@@ -861,7 +861,7 @@ int f2fs_getattr(struct mnt_idmap *idmap, const struct path *path,
 		unsigned int bsize = i_blocksize(inode);
 
 		stat->result_mask |= STATX_DIOALIGN;
-		if (!f2fs_force_buffered_io(inode, WRITE)) {
+		if (!f2fs_force_buffered_io(inode, true)) {
 			stat->dio_mem_align = bsize;
 			stat->dio_offset_align = bsize;
 		}
@@ -4280,7 +4280,7 @@ static bool f2fs_should_use_dio(struct inode *inode, struct kiocb *iocb,
 	if (!(iocb->ki_flags & IOCB_DIRECT))
 		return false;
 
-	if (f2fs_force_buffered_io(inode, iov_iter_rw(iter)))
+	if (f2fs_force_buffered_io(inode, iocb_is_write(iocb)))
 		return false;
 
 	/*

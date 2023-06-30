@@ -919,7 +919,7 @@ ext2_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t ret;
 
 	ret = blockdev_direct_IO(iocb, inode, iter, ext2_get_block);
-	if (ret < 0 && iov_iter_rw(iter) == WRITE)
+	if (ret < 0 && iocb_is_write(iocb))
 		ext2_write_failed(mapping, offset + count);
 	return ret;
 }

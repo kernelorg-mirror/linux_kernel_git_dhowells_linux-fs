@@ -2456,7 +2456,7 @@ static ssize_t ocfs2_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	    !ocfs2_supports_append_dio(osb))
 		return 0;
 
-	if (iov_iter_rw(iter) == READ)
+	if (iocb_is_read(iocb))
 		get_block = ocfs2_lock_get_block;
 	else
 		get_block = ocfs2_dio_wr_get_block;

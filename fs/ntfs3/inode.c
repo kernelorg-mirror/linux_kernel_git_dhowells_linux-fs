@@ -774,7 +774,7 @@ static ssize_t ntfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	struct ntfs_inode *ni = ntfs_i(inode);
 	loff_t vbo = iocb->ki_pos;
 	loff_t end;
-	int wr = iov_iter_rw(iter) & WRITE;
+	bool wr = iocb_is_write(iocb);
 	size_t iter_count = iov_iter_count(iter);
 	loff_t valid;
 	ssize_t ret;

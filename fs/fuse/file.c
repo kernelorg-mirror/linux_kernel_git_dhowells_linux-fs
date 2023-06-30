@@ -2911,7 +2911,7 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	inode = file->f_mapping->host;
 	i_size = i_size_read(inode);
 
-	if ((iov_iter_rw(iter) == READ) && (offset >= i_size))
+	if (iocb_is_read(iocb) && (offset >= i_size))
 		return 0;
 
 	io = kmalloc(sizeof(struct fuse_io_priv), GFP_KERNEL);
@@ -2923,7 +2923,7 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	io->bytes = -1;
 	io->size = 0;
 	io->offset = offset;
-	io->write = (iov_iter_rw(iter) == WRITE);
+	io->write = iocb_is_write(iocb);
 	io->err = 0;
 	/*
 	 * By default, we want to optimize all I/Os with async request
@@ -2956,7 +2956,7 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		io->done = &wait;
 	}
 
-	if (iov_iter_rw(iter) == WRITE) {
+	if (iocb_is_write(iocb)) {
 		ret = fuse_direct_io(io, iter, &pos, FUSE_DIO_WRITE);
 		fuse_invalidate_attr_mask(inode, FUSE_STATX_MODSIZE);
 	} else {
@@ -2979,7 +2979,7 @@ fuse_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 
 	kref_put(&io->refcnt, fuse_io_release);
 
-	if (iov_iter_rw(iter) == WRITE) {
+	if (iocb_is_write(iocb)) {
 		fuse_write_update_attr(inode, pos, ret);
 		/* For extending writes we already hold exclusive lock */
 		if (ret < 0 && offset + count > i_size)

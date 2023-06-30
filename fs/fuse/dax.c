@@ -720,7 +720,7 @@ static bool file_extending_write(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 
-	return (iov_iter_rw(from) == WRITE &&
+	return (iocb_is_write(iocb) &&
 		((iocb->ki_pos) >= i_size_read(inode) ||
 		  (iocb->ki_pos + iov_iter_count(from) > i_size_read(inode))));
 }

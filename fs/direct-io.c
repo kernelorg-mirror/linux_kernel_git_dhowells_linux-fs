@@ -1125,7 +1125,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	 */
 
 	/* watch out for a 0 len io from a tricksy fs */
-	if (iov_iter_rw(iter) == READ && !count)
+	if (iocb_is_read(iocb) && !count)
 		return 0;
 
 	dio = kmem_cache_alloc(dio_cache, GFP_KERNEL);
@@ -1139,7 +1139,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	memset(dio, 0, offsetof(struct dio, pages));
 
 	dio->flags = flags;
-	if (dio->flags & DIO_LOCKING && iov_iter_rw(iter) == READ) {
+	if (dio->flags & DIO_LOCKING && iocb_is_read(iocb)) {
 		/* will be released by direct_io_worker */
 		inode_lock(inode);
 	}
@@ -1147,7 +1147,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 
 	/* Once we sampled i_size check for reads beyond EOF */
 	dio->i_size = i_size_read(inode);
-	if (iov_iter_rw(iter) == READ && offset >= dio->i_size) {
+	if (iocb_is_read(iocb) && offset >= dio->i_size) {
 		retval = 0;
 		goto fail_dio;
 	}
@@ -1160,7 +1160,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 			goto fail_dio;
 	}
 
-	if (dio->flags & DIO_LOCKING && iov_iter_rw(iter) == READ) {
+	if (dio->flags & DIO_LOCKING && iocb_is_read(iocb)) {
 		struct address_space *mapping = iocb->ki_filp->f_mapping;
 
 		retval = filemap_write_and_wait_range(mapping, offset, end - 1);
@@ -1176,13 +1176,13 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	 */
 	if (is_sync_kiocb(iocb))
 		dio->is_async = false;
-	else if (iov_iter_rw(iter) == WRITE && end > i_size_read(inode))
+	else if (iocb_is_write(iocb) && end > i_size_read(inode))
 		dio->is_async = false;
 	else
 		dio->is_async = true;
 
 	dio->inode = inode;
-	if (iov_iter_rw(iter) == WRITE) {
+	if (iocb_is_write(iocb)) {
 		dio->opf = REQ_OP_WRITE | REQ_SYNC | REQ_IDLE;
 		if (iocb->ki_flags & IOCB_NOWAIT)
 			dio->opf |= REQ_NOWAIT;
@@ -1194,7 +1194,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	 * For AIO O_(D)SYNC writes we need to defer completions to a workqueue
 	 * so that we can call ->fsync.
 	 */
-	if (dio->is_async && iov_iter_rw(iter) == WRITE) {
+	if (dio->is_async && iocb_is_write(iocb)) {
 		retval = 0;
 		if (iocb_is_dsync(iocb))
 			retval = dio_set_defer_completion(dio);
@@ -1230,7 +1230,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	spin_lock_init(&dio->bio_lock);
 	dio->refcount = 1;
 
-	dio->should_dirty = user_backed_iter(iter) && iov_iter_rw(iter) == READ;
+	dio->should_dirty = user_backed_iter(iter) && iocb_is_read(iocb);
 	sdio.iter = iter;
 	sdio.final_block_in_request = end >> blkbits;
 
@@ -1287,7 +1287,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	 * we can let i_mutex go now that its achieved its purpose
 	 * of protecting us from looking up uninitialized blocks.
 	 */
-	if (iov_iter_rw(iter) == READ && (dio->flags & DIO_LOCKING))
+	if (iocb_is_read(iocb) && (dio->flags & DIO_LOCKING))
 		inode_unlock(dio->inode);
 
 	/*
@@ -1299,7 +1299,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	 */
 	BUG_ON(retval == -EIOCBQUEUED);
 	if (dio->is_async && retval == 0 && dio->result &&
-	    (iov_iter_rw(iter) == READ || dio->result == count))
+	    (iocb_is_read(iocb) || dio->result == count))
 		retval = -EIOCBQUEUED;
 	else
 		dio_await_completion(dio);
@@ -1312,7 +1312,7 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
 	return retval;
 
 fail_dio:
-	if (dio->flags & DIO_LOCKING && iov_iter_rw(iter) == READ)
+	if (dio->flags & DIO_LOCKING && iocb_is_read(iocb))
 		inode_unlock(inode);
 
 	kmem_cache_free(dio_cache, dio);

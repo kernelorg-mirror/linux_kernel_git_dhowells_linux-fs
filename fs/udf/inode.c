@@ -311,7 +311,7 @@ static ssize_t udf_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	if (UDF_I(inode)->i_alloc_type == ICBTAG_FLAG_AD_IN_ICB)
 		return 0;
 	ret = blockdev_direct_IO(iocb, inode, iter, udf_get_block);
-	if (unlikely(ret < 0 && iov_iter_rw(iter) == WRITE))
+	if (unlikely(ret < 0 && iocb_is_write(iocb)))
 		udf_write_failed(mapping, iocb->ki_pos + count);
 	return ret;
 }

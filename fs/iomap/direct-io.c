@@ -510,7 +510,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		iomi.flags |= IOMAP_NOWAIT;
 
-	if (iov_iter_rw(iter) == READ) {
+	if (iocb_is_read(iocb)) {
 		if (iomi.pos >= dio->i_size)
 			goto out_free_dio;
 

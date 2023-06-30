@@ -289,7 +289,7 @@ nilfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 
-	if (iov_iter_rw(iter) == WRITE)
+	if (iocb_is_write(iocb))
 		return 0;
 
 	/* Needs synchronization with the cleaner */

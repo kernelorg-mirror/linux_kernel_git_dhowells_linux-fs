@@ -368,6 +368,16 @@ static inline bool is_sync_kiocb(struct kiocb *kiocb)
 	return kiocb->ki_complete == NULL;
 }
 
+static inline bool iocb_is_write(const struct kiocb *kiocb)
+{
+	return kiocb->ki_flags & IOCB_WRITE;
+}
+
+static inline bool iocb_is_read(const struct kiocb *kiocb)
+{
+	return !iocb_is_write(kiocb);
+}
+
 struct address_space_operations {
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
 	int (*read_folio)(struct file *, struct folio *);
