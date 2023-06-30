@@ -310,71 +310,35 @@ static int p9_get_mapped_pages(struct virtio_chan *chan,
 			       struct iov_iter *data,
 			       int count,
 			       size_t *offs,
-			       int *need_drop)
+			       bool *need_unpin,
+			       iov_iter_extraction_t extraction_flags)
 {
 	int nr_pages;
 	int err;
+	int n;
 
 	if (!iov_iter_count(data))
 		return 0;
 
-	if (!iov_iter_is_kvec(data)) {
-		int n;
-		/*
-		 * We allow only p9_max_pages pinned. We wait for the
-		 * Other zc request to finish here
-		 */
-		if (atomic_read(&vp_pinned) >= chan->p9_max_pages) {
-			err = wait_event_killable(vp_wq,
-			      (atomic_read(&vp_pinned) < chan->p9_max_pages));
-			if (err == -ERESTARTSYS)
-				return err;
-		}
-		n = iov_iter_get_pages_alloc2(data, pages, count, offs);
-		if (n < 0)
-			return n;
-		*need_drop = 1;
-		nr_pages = DIV_ROUND_UP(n + *offs, PAGE_SIZE);
-		atomic_add(nr_pages, &vp_pinned);
-		return n;
-	} else {
-		/* kernel buffer, no need to pin pages */
-		int index;
-		size_t len;
-		void *p;
-
-		/* we'd already checked that it's non-empty */
-		while (1) {
-			len = iov_iter_single_seg_count(data);
-			if (likely(len)) {
-				p = data->kvec->iov_base + data->iov_offset;
-				break;
-			}
-			iov_iter_advance(data, 0);
-		}
-		if (len > count)
-			len = count;
-
-		nr_pages = DIV_ROUND_UP((unsigned long)p + len, PAGE_SIZE) -
-			   (unsigned long)p / PAGE_SIZE;
-
-		*pages = kmalloc_array(nr_pages, sizeof(struct page *),
-				       GFP_NOFS);
-		if (!*pages)
-			return -ENOMEM;
-
-		*need_drop = 0;
-		p -= (*offs = offset_in_page(p));
-		for (index = 0; index < nr_pages; index++) {
-			if (is_vmalloc_addr(p))
-				(*pages)[index] = vmalloc_to_page(p);
-			else
-				(*pages)[index] = kmap_to_page(p);
-			p += PAGE_SIZE;
-		}
-		iov_iter_advance(data, len);
-		return len;
+	/*
+	 * We allow only p9_max_pages pinned. We wait for the
+	 * Other zc request to finish here
+	 */
+	if (atomic_read(&vp_pinned) >= chan->p9_max_pages) {
+		err = wait_event_killable(vp_wq,
+					  (atomic_read(&vp_pinned) < chan->p9_max_pages));
+		if (err == -ERESTARTSYS)
+			return err;
 	}
+
+	n = iov_iter_extract_pages(data, pages, count, INT_MAX,
+				   extraction_flags, offs);
+	if (n < 0)
+		return n;
+	*need_unpin = iov_iter_extract_will_pin(data);
+	nr_pages = DIV_ROUND_UP(n + *offs, PAGE_SIZE);
+	atomic_add(nr_pages, &vp_pinned);
+	return n;
 }
 
 static void handle_rerror(struct p9_req_t *req, int in_hdr_len,
@@ -429,7 +393,7 @@ p9_virtio_zc_request(struct p9_client *client, struct p9_req_t *req,
 	struct virtio_chan *chan = client->trans;
 	struct scatterlist *sgs[4];
 	size_t offs;
-	int need_drop = 0;
+	bool need_unpin;
 	int kicked = 0;
 
 	p9_debug(P9_DEBUG_TRANS, "virtio request\n");
@@ -437,7 +401,8 @@ p9_virtio_zc_request(struct p9_client *client, struct p9_req_t *req,
 	if (uodata) {
 		__le32 sz;
 		int n = p9_get_mapped_pages(chan, &out_pages, uodata,
-					    outlen, &offs, &need_drop);
+					    outlen, &offs, &need_unpin,
+					    WRITE_FROM_ITER);
 		if (n < 0) {
 			err = n;
 			goto err_out;
@@ -456,7 +421,8 @@ p9_virtio_zc_request(struct p9_client *client, struct p9_req_t *req,
 		memcpy(&req->tc.sdata[0], &sz, sizeof(sz));
 	} else if (uidata) {
 		int n = p9_get_mapped_pages(chan, &in_pages, uidata,
-					    inlen, &offs, &need_drop);
+					    inlen, &offs, &need_unpin,
+					    READ_INTO_ITER);
 		if (n < 0) {
 			err = n;
 			goto err_out;
@@ -542,13 +508,13 @@ req_retry_pinned:
 	 * Non kernel buffers are pinned, unpin them
 	 */
 err_out:
-	if (need_drop) {
+	if (need_unpin) {
 		if (in_pages) {
-			p9_release_pages(in_pages, in_nr_pages);
+			p9_unpin_pages(in_pages, in_nr_pages);
 			atomic_sub(in_nr_pages, &vp_pinned);
 		}
 		if (out_pages) {
-			p9_release_pages(out_pages, out_nr_pages);
+			p9_unpin_pages(out_pages, out_nr_pages);
 			atomic_sub(out_nr_pages, &vp_pinned);
 		}
 		/* wakeup anybody waiting for slots to pin pages */

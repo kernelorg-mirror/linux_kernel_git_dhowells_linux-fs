@@ -4,4 +4,4 @@
  * Author Venkateswararao Jujjuri <jvrao@linux.vnet.ibm.com>
  */
 
-void p9_release_pages(struct page **pages, int nr_pages);
+void p9_unpin_pages(struct page **pages, int nr_pages);
