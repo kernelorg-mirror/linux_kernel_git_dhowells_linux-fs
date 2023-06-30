@@ -312,7 +312,7 @@ static void swap_writepage_fs(struct page *page, struct writeback_control *wbc)
 	}
 	if (!sio) {
 		sio = mempool_alloc(sio_pool, GFP_NOIO);
-		init_sync_kiocb(&sio->iocb, swap_file);
+		init_kiocb(&sio->iocb, swap_file, WRITE);
 		sio->iocb.ki_complete = sio_write_complete;
 		sio->iocb.ki_pos = pos;
 		sio->pages = 0;
@@ -443,7 +443,7 @@ static void swap_readpage_fs(struct page *page,
 	}
 	if (!sio) {
 		sio = mempool_alloc(sio_pool, GFP_KERNEL);
-		init_sync_kiocb(&sio->iocb, sis->swap_file);
+		init_kiocb(&sio->iocb, sis->swap_file, READ);
 		sio->iocb.ki_pos = pos;
 		sio->iocb.ki_complete = sio_read_complete;
 		sio->pages = 0;

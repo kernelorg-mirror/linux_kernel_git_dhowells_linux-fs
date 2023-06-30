@@ -382,7 +382,7 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 	struct iov_iter iter;
 	ssize_t ret;
 
-	init_sync_kiocb(&kiocb, filp);
+	init_kiocb(&kiocb, filp, READ);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 	iov_iter_ubuf(&iter, ITER_DEST, buf, len);
 
@@ -422,7 +422,7 @@ ssize_t __kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
 	if (unlikely(!file->f_op->read_iter || file->f_op->read))
 		return warn_unsupported(file, "read");
 
-	init_sync_kiocb(&kiocb, file);
+	init_kiocb(&kiocb, file, READ);
 	kiocb.ki_pos = pos ? *pos : 0;
 	iov_iter_kvec(&iter, ITER_DEST, &iov, 1, iov.iov_len);
 	ret = file->f_op->read_iter(&kiocb, &iter);
@@ -484,7 +484,7 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 	struct iov_iter iter;
 	ssize_t ret;
 
-	init_sync_kiocb(&kiocb, filp);
+	init_kiocb(&kiocb, filp, WRITE);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
 	iov_iter_ubuf(&iter, ITER_SOURCE, (void __user *)buf, len);
 
@@ -512,7 +512,7 @@ ssize_t __kernel_write_iter(struct file *file, struct iov_iter *from, loff_t *po
 	if (unlikely(!file->f_op->write_iter || file->f_op->write))
 		return warn_unsupported(file, "write");
 
-	init_sync_kiocb(&kiocb, file);
+	init_kiocb(&kiocb, file, WRITE);
 	kiocb.ki_pos = pos ? *pos : 0;
 	ret = file->f_op->write_iter(&kiocb, from);
 	if (ret > 0) {
@@ -723,7 +723,7 @@ static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
 	struct kiocb kiocb;
 	ssize_t ret;
 
-	init_sync_kiocb(&kiocb, filp);
+	init_kiocb(&kiocb, filp, type);
 	ret = kiocb_set_rw_flags(&kiocb, flags);
 	if (ret)
 		return ret;

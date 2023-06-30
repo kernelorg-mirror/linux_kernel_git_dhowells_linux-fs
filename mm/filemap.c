@@ -2905,7 +2905,7 @@ ssize_t filemap_splice_read(struct file *in, loff_t *ppos,
 	if (unlikely(*ppos >= in->f_mapping->host->i_sb->s_maxbytes))
 		return 0;
 
-	init_sync_kiocb(&iocb, in);
+	init_kiocb(&iocb, in, READ);
 	iocb.ki_pos = *ppos;
 
 	/* Work out how much data we can actually add into the pipe */

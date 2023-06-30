@@ -155,7 +155,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 	struct iov_iter iter;
 	ssize_t ret;
 
-	init_sync_kiocb(&kiocb, file);
+	init_kiocb(&kiocb, file, READ);
 	iov_iter_init(&iter, ITER_DEST, &iov, 1, size);
 
 	kiocb.ki_pos = *ppos;

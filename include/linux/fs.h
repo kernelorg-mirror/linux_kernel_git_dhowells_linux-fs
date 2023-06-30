@@ -2017,13 +2017,17 @@ static inline bool HAS_UNMAPPED_ID(struct mnt_idmap *idmap,
 	       !vfsgid_valid(i_gid_into_vfsgid(idmap, inode));
 }
 
-static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
+static inline void init_kiocb(struct kiocb *kiocb, struct file *filp,
+			      unsigned int rw)
 {
 	*kiocb = (struct kiocb) {
 		.ki_filp = filp,
 		.ki_flags = filp->f_iocb_flags,
 		.ki_ioprio = get_current_ioprio(),
 	};
+
+	if (rw == WRITE)
+		kiocb->ki_flags |= IOCB_WRITE;
 }
 
 static inline void kiocb_clone(struct kiocb *kiocb, struct kiocb *kiocb_src,

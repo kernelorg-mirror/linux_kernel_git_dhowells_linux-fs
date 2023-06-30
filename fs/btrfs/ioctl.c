@@ -4422,7 +4422,7 @@ static int btrfs_ioctl_encoded_read(struct file *file, void __user *argp,
 	if (ret < 0)
 		goto out_iov;
 
-	init_sync_kiocb(&kiocb, file);
+	init_kiocb(&kiocb, file, READ);
 	kiocb.ki_pos = pos;
 
 	ret = btrfs_encoded_read(&kiocb, &iter, &args);
@@ -4523,7 +4523,7 @@ static int btrfs_ioctl_encoded_write(struct file *file, void __user *argp, bool 
 	if (ret < 0)
 		goto out_end_write;
 
-	init_sync_kiocb(&kiocb, file);
+	init_kiocb(&kiocb, file, WRITE);
 	ret = kiocb_set_rw_flags(&kiocb, 0);
 	if (ret)
 		goto out_end_write;

@@ -362,7 +362,7 @@ ssize_t copy_splice_read(struct file *in, loff_t *ppos,
 
 	/* Do the I/O */
 	iov_iter_bvec(&to, ITER_DEST, bv, npages, len);
-	init_sync_kiocb(&kiocb, in);
+	init_kiocb(&kiocb, in, READ);
 	kiocb.ki_pos = *ppos;
 	ret = call_read_iter(in, &kiocb, &to);
 
