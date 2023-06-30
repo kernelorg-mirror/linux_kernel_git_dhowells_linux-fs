@@ -587,7 +587,7 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	 * Revert iter to a state corresponding to that as some callers (such
 	 * as the splice code) rely on it.
 	 */
-	if (iov_iter_rw(iter) == READ && iomi.pos >= dio->i_size)
+	if (!(iomi.flags & IOMAP_WRITE) && iomi.pos >= dio->i_size)
 		iov_iter_revert(iter, iomi.pos - dio->i_size);
 
 	if (ret == -EFAULT && dio->size && (dio_flags & IOMAP_DIO_PARTIAL)) {
