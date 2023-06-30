@@ -134,11 +134,10 @@ static int cachefiles_read(struct netfs_cache_resources *cres,
 	if (!ki)
 		goto presubmission_error;
 
+	init_kiocb(&ki->iocb, file, READ);
 	refcount_set(&ki->ki_refcnt, 2);
-	ki->iocb.ki_filp	= file;
+	ki->iocb.ki_flags	|= IOCB_DIRECT;
 	ki->iocb.ki_pos		= start_pos + skipped;
-	ki->iocb.ki_flags	= IOCB_DIRECT;
-	ki->iocb.ki_ioprio	= get_current_ioprio();
 	ki->skipped		= skipped;
 	ki->object		= object;
 	ki->inval_counter	= cres->inval_counter;
@@ -306,10 +305,9 @@ int __cachefiles_write(struct cachefiles_object *object,
 	}
 
 	refcount_set(&ki->ki_refcnt, 2);
-	ki->iocb.ki_filp	= file;
+	init_kiocb(&ki->iocb, file, WRITE);
 	ki->iocb.ki_pos		= start_pos;
-	ki->iocb.ki_flags	= IOCB_DIRECT | IOCB_WRITE;
-	ki->iocb.ki_ioprio	= get_current_ioprio();
+	ki->iocb.ki_flags	|= IOCB_DIRECT;
 	ki->object		= object;
 	ki->start		= start_pos;
 	ki->len			= len;

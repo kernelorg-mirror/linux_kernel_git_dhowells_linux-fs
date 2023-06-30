@@ -655,12 +655,13 @@ static bool need_complete_io(struct io_kiocb *req)
 		S_ISBLK(file_inode(req->file)->i_mode);
 }
 
-static int io_rw_init_file(struct io_kiocb *req, fmode_t mode)
+static int io_rw_init_file(struct io_kiocb *req, unsigned int io_direction)
 {
 	struct io_rw *rw = io_kiocb_to_cmd(req, struct io_rw);
 	struct kiocb *kiocb = &rw->kiocb;
 	struct io_ring_ctx *ctx = req->ctx;
 	struct file *file = req->file;
+	fmode_t mode = (io_direction == WRITE) ? FMODE_WRITE : FMODE_READ;
 	int ret;
 
 	if (unlikely(!file || !(file->f_mode & mode)))
@@ -669,7 +670,7 @@ static int io_rw_init_file(struct io_kiocb *req, fmode_t mode)
 	if (!(req->flags & REQ_F_FIXED_FILE))
 		req->flags |= io_file_get_flags(file);
 
-	kiocb->ki_flags = file->f_iocb_flags;
+	init_kiocb(kiocb, file, io_direction);
 	ret = kiocb_set_rw_flags(kiocb, rw->flags);
 	if (unlikely(ret))
 		return ret;
@@ -738,7 +739,7 @@ int io_read(struct io_kiocb *req, unsigned int issue_flags)
 		iov_iter_restore(&s->iter, &s->iter_state);
 		iovec = NULL;
 	}
-	ret = io_rw_init_file(req, FMODE_READ);
+	ret = io_rw_init_file(req, READ);
 	if (unlikely(ret)) {
 		kfree(iovec);
 		return ret;
@@ -870,7 +871,7 @@ int io_write(struct io_kiocb *req, unsigned int issue_flags)
 		iov_iter_restore(&s->iter, &s->iter_state);
 		iovec = NULL;
 	}
-	ret = io_rw_init_file(req, FMODE_WRITE);
+	ret = io_rw_init_file(req, WRITE);
 	if (unlikely(ret)) {
 		kfree(iovec);
 		return ret;
@@ -914,7 +915,6 @@ int io_write(struct io_kiocb *req, unsigned int issue_flags)
 		__sb_writers_release(file_inode(req->file)->i_sb,
 					SB_FREEZE_WRITE);
 	}
-	kiocb->ki_flags |= IOCB_WRITE;
 
 	if (likely(req->file->f_op->write_iter))
 		ret2 = call_write_iter(req->file, kiocb, &s->iter);
