@@ -2780,12 +2780,15 @@ static ssize_t shmem_file_splice_read(struct file *in, loff_t *ppos,
 				      struct pipe_inode_info *pipe,
 				      size_t len, unsigned int flags)
 {
-	struct inode *inode = file_inode(in);
+	struct inode *inode = in->f_mapping->host;
 	struct address_space *mapping = inode->i_mapping;
 	struct folio *folio = NULL;
 	size_t total_spliced = 0, used, npages, n, part;
 	loff_t isize;
 	int error = 0;
+
+	if (unlikely(*ppos >= inode->i_sb->s_maxbytes))
+		return 0;
 
 	/* Work out how much data we can actually add into the pipe */
 	used = pipe_occupancy(pipe->head, pipe->tail);
