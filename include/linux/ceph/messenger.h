@@ -308,7 +308,7 @@ struct ceph_connection_v2_info {
 	int in_enc_page_cnt;
 	int in_enc_resid;
 	int in_enc_i;
-	struct page **out_enc_pages;
+	struct bvecq *out_enc_buffer;
 	int out_enc_page_cnt;
 	int out_enc_resid;
 	int out_enc_i;

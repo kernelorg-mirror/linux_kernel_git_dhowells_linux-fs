@@ -64,7 +64,7 @@
 
 #define OUT_S_QUEUE_DATA		1
 #define OUT_S_QUEUE_DATA_CONT		2
-#define OUT_S_QUEUE_ENC_PAGE		3
+#define OUT_S_QUEUE_ENC_BVECQ		3
 #define OUT_S_QUEUE_ZEROS		4
 #define OUT_S_FINISH_MESSAGE		5
 #define OUT_S_GET_NEXT			6
@@ -1634,10 +1634,12 @@ static int prepare_message_secure(struct ceph_connection *con,
 				  struct ceph_msg *msg)
 {
 	void *zerop = page_address(ceph_zero_page);
+	struct bvecq *enc_buffer = NULL, *bq;
+	struct iov_iter enc_iter;
 	struct sg_table enc_sgt = {};
 	struct sg_table sgt = {};
-	struct page **enc_pages;
-	int enc_page_cnt;
+	unsigned int nr_segs = 0;
+	ssize_t xsize;
 	int tail_len;
 	int ret;
 
@@ -1662,23 +1664,30 @@ static int prepare_message_secure(struct ceph_connection *con,
 	if (ret)
 		goto out;
 
-	enc_page_cnt = calc_pages_for(0, tail_len);
-	enc_pages = ceph_alloc_page_vector(enc_page_cnt, GFP_NOIO);
-	if (IS_ERR(enc_pages)) {
-		ret = PTR_ERR(enc_pages);
+	enc_buffer = bvecq_alloc_buffer(tail_len, GFP_NOIO, false);
+	if (ret < 0)
+		goto out;
+
+	for (bq = enc_buffer; bq; bq = bq->next)
+		nr_segs += bq->nr_slots;
+
+	ret = sg_alloc_table(&enc_sgt, nr_segs, GFP_NOIO);
+	if (ret)
+		goto out;
+
+	iov_iter_bvec_queue(&enc_iter, READ, enc_buffer, 0, 0, tail_len);
+	xsize = extract_iter_to_sg(&enc_iter, tail_len, &enc_sgt, nr_segs, 0);
+	if (WARN_ON(xsize != tail_len)) {
+		ret = -EIO;
 		goto out;
 	}
 
-	WARN_ON(con->v2.out_enc_pages || con->v2.out_enc_page_cnt);
-	con->v2.out_enc_pages = enc_pages;
-	con->v2.out_enc_page_cnt = enc_page_cnt;
+	WARN_ON(con->v2.out_enc_buffer || con->v2.out_enc_page_cnt);
+	con->v2.out_enc_buffer = enc_buffer;
+	con->v2.out_enc_page_cnt = nr_segs;
 	con->v2.out_enc_resid = tail_len;
 	con->v2.out_enc_i = 0;
-
-	ret = sg_alloc_table_from_pages(&enc_sgt, enc_pages, enc_page_cnt,
-					0, tail_len, GFP_NOIO);
-	if (ret)
-		goto out;
+	enc_buffer = NULL;
 
 	ret = gcm_crypt(con, true, sgt.sgl, enc_sgt.sgl,
 			tail_len - CEPH_GCM_TAG_LEN);
@@ -1686,12 +1695,13 @@ static int prepare_message_secure(struct ceph_connection *con,
 		goto out;
 
 	dout("%s con %p msg %p sg_cnt %d enc_page_cnt %d\n", __func__, con,
-	     msg, sgt.orig_nents, enc_page_cnt);
-	con->v2.out_state = OUT_S_QUEUE_ENC_PAGE;
+	     msg, sgt.orig_nents, nr_segs);
+	con->v2.out_state = OUT_S_QUEUE_ENC_BVECQ;
 
 out:
 	sg_free_table(&sgt);
 	sg_free_table(&enc_sgt);
+	bvecq_put(enc_buffer);
 	return ret;
 }
 
