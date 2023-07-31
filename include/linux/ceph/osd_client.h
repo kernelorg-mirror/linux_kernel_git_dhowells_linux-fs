@@ -352,7 +352,8 @@ struct ceph_osd_linger_request {
 	void *data;
 
 	struct ceph_pagelist *request_pl;
-	struct page **notify_id_pages;
+	struct bvecq *notify_id_buf;
+	size_t notify_id_len;
 
 	struct page ***preply_pages;
 	size_t *preply_len;
