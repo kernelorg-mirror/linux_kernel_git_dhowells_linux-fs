@@ -122,21 +122,6 @@ static void ceph_osd_data_init(struct ceph_osd_data *osd_data)
 	osd_data->type = CEPH_OSD_DATA_TYPE_NONE;
 }
 
-/*
- * Consumes @pages if @own_pages is true.
- */
-static void ceph_osd_data_pages_init(struct ceph_osd_data *osd_data,
-			struct page **pages, u64 length, u32 offset,
-			bool pages_from_pool, bool own_pages)
-{
-	osd_data->type = CEPH_OSD_DATA_TYPE_PAGES;
-	osd_data->pages = pages;
-	osd_data->length = length;
-	osd_data->offset = offset;
-	osd_data->pages_from_pool = pages_from_pool;
-	osd_data->own_pages = own_pages;
-}
-
 static void ceph_osd_iter_init(struct ceph_osd_data *osd_data,
 			       struct iov_iter *iter)
 {
@@ -183,19 +168,6 @@ void osd_req_op_raw_data_in_bvecq(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_raw_data_in_bvecq);
 
-void osd_req_op_raw_data_in_pages(struct ceph_osd_request *osd_req,
-			unsigned int which, struct page **pages,
-			u64 length, u32 offset,
-			bool pages_from_pool, bool own_pages)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_raw_data_in(osd_req, which);
-	ceph_osd_data_pages_init(osd_data, pages, length, offset,
-				pages_from_pool, own_pages);
-}
-EXPORT_SYMBOL(osd_req_op_raw_data_in_pages);
-
 void osd_req_op_extent_osd_bvecq(struct ceph_osd_request *osd_req,
 				 unsigned int which,
 				 struct bvecq *bvecq, size_t len)
@@ -206,19 +178,6 @@ void osd_req_op_extent_osd_bvecq(struct ceph_osd_request *osd_req,
 	ceph_osd_bvecq_init(osd_data, bvecq, len);
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_bvecq);
-
-void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *osd_req,
-			unsigned int which, struct page **pages,
-			u64 length, u32 offset,
-			bool pages_from_pool, bool own_pages)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_data_pages_init(osd_data, pages, length, offset,
-				pages_from_pool, own_pages);
-}
-EXPORT_SYMBOL(osd_req_op_extent_osd_data_pages);
 
 /**
  * osd_req_op_extent_osd_iter - Set up an operation with an iterator buffer
@@ -282,8 +241,6 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 		return 0;
 	case CEPH_OSD_DATA_TYPE_BVECQ:
 		return osd_data->bvecq_len;
-	case CEPH_OSD_DATA_TYPE_PAGES:
-		return osd_data->length;
 	case CEPH_OSD_DATA_TYPE_ITER:
 		return iov_iter_count(&osd_data->iter);
 	default:
@@ -294,15 +251,8 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 
 static void ceph_osd_data_release(struct ceph_osd_data *osd_data)
 {
-	if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ) {
+	if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ)
 		bvecq_put(osd_data->bvecq);
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGES && osd_data->own_pages) {
-		int num_pages;
-
-		num_pages = calc_pages_for((u64)osd_data->offset,
-						(u64)osd_data->length);
-		ceph_release_page_vector(osd_data->pages, num_pages);
-	}
 	ceph_osd_data_init(osd_data);
 }
 
@@ -866,11 +816,6 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 
 	if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ) {
 		ceph_msg_data_add_bvecq(msg, osd_data->bvecq, length);
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGES) {
-		BUG_ON(length > (u64) SIZE_MAX);
-		if (length)
-			ceph_msg_data_add_pages(msg, osd_data->pages,
-					length, osd_data->offset, false);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_ITER) {
 		ceph_msg_data_add_iter(msg, &osd_data->iter);
 	} else {

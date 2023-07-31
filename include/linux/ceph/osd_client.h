@@ -104,26 +104,14 @@ struct ceph_osd {
 enum ceph_osd_data_type {
 	CEPH_OSD_DATA_TYPE_NONE = 0,
 	CEPH_OSD_DATA_TYPE_BVECQ,
-	CEPH_OSD_DATA_TYPE_PAGES,
 	CEPH_OSD_DATA_TYPE_ITER,
 };
 
 struct ceph_osd_data {
 	enum ceph_osd_data_type	type;
 	struct iov_iter		iter;
-	union {
-		struct {
-			struct bvecq	*bvecq;
-			size_t		bvecq_len;
-		};
-		struct {
-			struct page	**pages;
-			u64		length;
-			u32		offset;
-			bool		pages_from_pool;
-			bool		own_pages;
-		};
-	};
+	struct bvecq		*bvecq;
+	size_t			bvecq_len;
 };
 
 struct ceph_osd_req_op {
@@ -457,12 +445,6 @@ void ceph_osdc_clear_abort_err(struct ceph_osd_client *osdc);
 
 struct ceph_osd_req_op *osd_req_op_init(struct ceph_osd_request *osd_req,
 			    unsigned int which, u16 opcode, u32 flags);
-
-extern void osd_req_op_raw_data_in_pages(struct ceph_osd_request *,
-					unsigned int which,
-					struct page **pages, u64 length,
-					u32 offset, bool pages_from_pool,
-					bool own_pages);
 
 extern void osd_req_op_extent_init(struct ceph_osd_request *osd_req,
 					unsigned int which, u16 opcode,

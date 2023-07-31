@@ -283,7 +283,7 @@ int ceph_uninline_data(struct file *file)
 	struct folio *folio = NULL;
 	struct ceph_snap_context *snapc = NULL;
 	u64 inline_version = CEPH_INLINE_NONE;
-	struct page *pages[1];
+	struct bvecq *dbuf;
 	int err = 0;
 	u64 len;
 
@@ -365,8 +365,15 @@ int ceph_uninline_data(struct file *file)
 		goto out_unlock;
 	}
 
-	pages[0] = folio_page(folio, 0);
-	osd_req_op_extent_osd_data_pages(req, 1, pages, len, 0, false, false);
+	dbuf = bvecq_alloc_one(1, GFP_KERNEL, false);
+	if (!dbuf) {
+		err = -ENOMEM;
+		goto out_put_req;
+	}
+	dbuf->mem_type = BVECQ_MEM_PAGECACHE;
+	folio_get(folio);
+	bvec_set_folio(&dbuf->bv[0], folio, len, 0);
+	osd_req_op_extent_osd_bvecq(req, 1, dbuf, len);
 
 	{
 		__le64 xattr_buf = cpu_to_le64(inline_version);
@@ -457,7 +464,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci,
 	struct ceph_osd_request *rd_req = NULL, *wr_req = NULL;
 	struct rb_node **p, *parent;
 	struct ceph_pool_perm *perm;
-	struct page **pages;
+	struct bvecq *bvecq;
 	size_t pool_ns_len;
 	int err = 0, err2 = 0, have = 0;
 
@@ -557,14 +564,13 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci,
 		goto out_unlock;
 
 	/* one page should be large enough for STAT data */
-	pages = ceph_alloc_page_vector(1, GFP_KERNEL);
-	if (IS_ERR(pages)) {
-		err = PTR_ERR(pages);
+	bvecq = bvecq_alloc_buffer(PAGE_SIZE, GFP_KERNEL, false);
+	if (!bvecq) {
+		err = -ENOMEM;
 		goto out_unlock;
 	}
 
-	osd_req_op_raw_data_in_pages(rd_req, 0, pages, PAGE_SIZE,
-				     0, false, true);
+	osd_req_op_raw_data_in_bvecq(rd_req, 0, bvecq, PAGE_SIZE);
 	ceph_osdc_start_request(&fsc->client->osdc, rd_req);
 
 	wr_req->r_mtime = inode_get_mtime(&ci->netfs.inode);
