@@ -119,26 +119,15 @@ struct ceph_messenger {
 enum ceph_msg_data_type {
 	CEPH_MSG_DATA_NONE,	/* message contains no data payload */
 	CEPH_MSG_DATA_BVECQ,	/* data source/destination is a bvecq */
-	CEPH_MSG_DATA_PAGES,	/* data source/destination is a page array */
 	CEPH_MSG_DATA_ITER,	/* data source/destination is an iov_iter */
 };
 
 struct ceph_msg_data {
-	enum ceph_msg_data_type		type;
-	struct iov_iter			iter;
-	bool				release_bvecq;
-	union {
-		struct {
-			struct bvecq	*bvecq;
-			u32		bvecq_len;
-		};
-		struct {
-			struct page	**pages;
-			size_t		length;		/* total # bytes */
-			unsigned int	offset;		/* first page */
-			bool		own_pages;
-		};
-	};
+	enum ceph_msg_data_type	type;
+	struct iov_iter		iter;
+	bool			release_bvecq;
+	struct bvecq		*bvecq;
+	u32			bvecq_len;
 };
 
 struct ceph_msg_data_cursor {
@@ -148,18 +137,9 @@ struct ceph_msg_data_cursor {
 	size_t			resid;		/* bytes not yet consumed */
 	int			sr_resid;	/* residual sparse_read len */
 	bool			need_crc;	/* crc update needed */
-	union {
-		struct {				/* pages */
-			unsigned int	page_offset;	/* offset in page */
-			unsigned short	page_index;	/* index in array */
-			unsigned short	page_count;	/* pages in array */
-		};
-		struct {
-			struct iov_iter		iov_iter;
-			struct iov_iter		crc_iter;
-			unsigned int		lastlen;
-		};
-	};
+	struct iov_iter		iov_iter;
+	struct iov_iter		crc_iter;
+	unsigned int		lastlen;
 };
 
 /*
@@ -508,8 +488,6 @@ extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 				       unsigned long interval);
 
 void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq, size_t len);
-void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
-			     size_t length, size_t offset, bool own_pages);
 void ceph_msg_data_add_iter(struct ceph_msg *msg,
 			    struct iov_iter *iter);
 
