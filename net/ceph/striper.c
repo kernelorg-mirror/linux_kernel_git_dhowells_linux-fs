@@ -70,25 +70,6 @@ lookup_last(struct list_head *object_extents, u64 objno,
 	return NULL;
 }
 
-static struct ceph_object_extent *
-lookup_containing(struct list_head *object_extents, u64 objno,
-		  u64 objoff, u32 xlen)
-{
-	struct ceph_object_extent *ex;
-
-	list_for_each_entry(ex, object_extents, oe_item) {
-		if (ex->oe_objno == objno &&
-		    ex->oe_off <= objoff &&
-		    ex->oe_off + ex->oe_len >= objoff + xlen) /* paranoia */
-			return ex;
-
-		if (ex->oe_objno > objno)
-			break;
-	}
-
-	return NULL;
-}
-
 /*
  * Map a file extent to a sorted list of object extents.
  *
@@ -166,40 +147,6 @@ int ceph_file_to_extents(struct ceph_file_layout *l, u64 off, u64 len,
 	return 0;
 }
 EXPORT_SYMBOL(ceph_file_to_extents);
-
-/*
- * A stripped down, non-allocating version of ceph_file_to_extents(),
- * for when @object_extents is already populated.
- */
-int ceph_iterate_extents(struct ceph_file_layout *l, u64 off, u64 len,
-			 struct list_head *object_extents,
-			 ceph_object_extent_fn_t action_fn,
-			 void *action_arg)
-{
-	while (len) {
-		struct ceph_object_extent *ex;
-		u64 objno, objoff;
-		u32 xlen;
-
-		ceph_calc_file_object_mapping(l, off, len, &objno, &objoff,
-					      &xlen);
-
-		ex = lookup_containing(object_extents, objno, objoff, xlen);
-		if (!ex) {
-			WARN(1, "%s: objno %llu %llu~%u not found!\n",
-			     __func__, objno, objoff, xlen);
-			return -EINVAL;
-		}
-
-		action_fn(ex, xlen, action_arg);
-
-		off += xlen;
-		len -= xlen;
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL(ceph_iterate_extents);
 
 /*
  * Reverse map an object extent to a sorted list of file extents.
