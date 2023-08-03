@@ -9,9 +9,6 @@
 #include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#ifdef CONFIG_BLOCK
-#include <linux/bio.h>
-#endif
 
 #include <linux/ceph/ceph_features.h>
 #include <linux/ceph/libceph.h>
@@ -151,26 +148,6 @@ static void ceph_osd_data_pagelist_init(struct ceph_osd_data *osd_data,
 	osd_data->pagelist = pagelist;
 }
 
-#ifdef CONFIG_BLOCK
-static void ceph_osd_data_bio_init(struct ceph_osd_data *osd_data,
-				   struct ceph_bio_iter *bio_pos,
-				   u32 bio_length)
-{
-	osd_data->type = CEPH_OSD_DATA_TYPE_BIO;
-	osd_data->bio_pos = *bio_pos;
-	osd_data->bio_length = bio_length;
-}
-#endif /* CONFIG_BLOCK */
-
-static void ceph_osd_data_bvecs_init(struct ceph_osd_data *osd_data,
-				     struct ceph_bvec_iter *bvec_pos,
-				     u32 num_bvecs)
-{
-	osd_data->type = CEPH_OSD_DATA_TYPE_BVECS;
-	osd_data->bvec_pos = *bvec_pos;
-	osd_data->num_bvecs = num_bvecs;
-}
-
 static void ceph_osd_iter_init(struct ceph_osd_data *osd_data,
 			       struct iov_iter *iter)
 {
@@ -243,47 +220,6 @@ void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_data_pages);
 
-#ifdef CONFIG_BLOCK
-void osd_req_op_extent_osd_data_bio(struct ceph_osd_request *osd_req,
-				    unsigned int which,
-				    struct ceph_bio_iter *bio_pos,
-				    u32 bio_length)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_data_bio_init(osd_data, bio_pos, bio_length);
-}
-EXPORT_SYMBOL(osd_req_op_extent_osd_data_bio);
-#endif /* CONFIG_BLOCK */
-
-void osd_req_op_extent_osd_data_bvecs(struct ceph_osd_request *osd_req,
-				      unsigned int which,
-				      struct bio_vec *bvecs, u32 num_bvecs,
-				      u32 bytes)
-{
-	struct ceph_osd_data *osd_data;
-	struct ceph_bvec_iter it = {
-		.bvecs = bvecs,
-		.iter = { .bi_size = bytes },
-	};
-
-	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_data_bvecs_init(osd_data, &it, num_bvecs);
-}
-EXPORT_SYMBOL(osd_req_op_extent_osd_data_bvecs);
-
-void osd_req_op_extent_osd_data_bvec_pos(struct ceph_osd_request *osd_req,
-					 unsigned int which,
-					 struct ceph_bvec_iter *bvec_pos)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_data_bvecs_init(osd_data, bvec_pos, 0);
-}
-EXPORT_SYMBOL(osd_req_op_extent_osd_data_bvec_pos);
-
 /**
  * osd_req_op_extent_osd_iter - Set up an operation with an iterator buffer
  * @osd_req: The request to set up
@@ -338,24 +274,6 @@ static void osd_req_op_cls_request_data_pages(struct ceph_osd_request *osd_req,
 	osd_req->r_ops[which].indata_len += length;
 }
 
-void osd_req_op_cls_request_data_bvecs(struct ceph_osd_request *osd_req,
-				       unsigned int which,
-				       struct bio_vec *bvecs, u32 num_bvecs,
-				       u32 bytes)
-{
-	struct ceph_osd_data *osd_data;
-	struct ceph_bvec_iter it = {
-		.bvecs = bvecs,
-		.iter = { .bi_size = bytes },
-	};
-
-	osd_data = osd_req_op_data(osd_req, which, cls, request_data);
-	ceph_osd_data_bvecs_init(osd_data, &it, num_bvecs);
-	osd_req->r_ops[which].cls.indata_len += bytes;
-	osd_req->r_ops[which].indata_len += bytes;
-}
-EXPORT_SYMBOL(osd_req_op_cls_request_data_bvecs);
-
 void osd_req_op_cls_response_bvecq(struct ceph_osd_request *osd_req,
 				   unsigned int which,
 				   struct bvecq *dbuf, size_t len)
@@ -380,12 +298,6 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 		return osd_data->length;
 	case CEPH_OSD_DATA_TYPE_PAGELIST:
 		return (u64)osd_data->pagelist->length;
-#ifdef CONFIG_BLOCK
-	case CEPH_OSD_DATA_TYPE_BIO:
-		return (u64)osd_data->bio_length;
-#endif /* CONFIG_BLOCK */
-	case CEPH_OSD_DATA_TYPE_BVECS:
-		return osd_data->bvec_pos.iter.bi_size;
 	case CEPH_OSD_DATA_TYPE_ITER:
 		return iov_iter_count(&osd_data->iter);
 	default:
@@ -994,12 +906,6 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGELIST) {
 		BUG_ON(!length);
 		ceph_msg_data_add_pagelist(msg, osd_data->pagelist);
-#ifdef CONFIG_BLOCK
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_BIO) {
-		ceph_msg_data_add_bio(msg, &osd_data->bio_pos, length);
-#endif
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECS) {
-		ceph_msg_data_add_bvecs(msg, &osd_data->bvec_pos);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_ITER) {
 		ceph_msg_data_add_iter(msg, &osd_data->iter);
 	} else {
