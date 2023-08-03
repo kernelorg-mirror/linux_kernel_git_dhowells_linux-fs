@@ -2111,7 +2111,8 @@ static int rbd_obj_calc_img_extents(struct rbd_obj_request *obj_req,
 
 static int rbd_osd_setup_stat(struct ceph_osd_request *osd_req, int which)
 {
-	struct page **pages;
+	struct bvecq *dbuf;
+	size_t dlen  = 8 + sizeof(struct ceph_timespec);
 
 	/*
 	 * The response data for a STAT call consists of:
@@ -2121,14 +2122,12 @@ static int rbd_osd_setup_stat(struct ceph_osd_request *osd_req, int which)
 	 *         le32 tv_nsec;
 	 *     } mtime;
 	 */
-	pages = ceph_alloc_page_vector(1, GFP_NOIO);
-	if (IS_ERR(pages))
-		return PTR_ERR(pages);
+	dbuf = bvecq_alloc_buffer(dlen, GFP_NOIO, false);
+	if (!dbuf)
+		return -ENOMEM;
 
 	osd_req_op_init(osd_req, which, CEPH_OSD_OP_STAT, 0);
-	osd_req_op_raw_data_in_pages(osd_req, which, pages,
-				     8 + sizeof(struct ceph_timespec),
-				     0, false, true);
+	osd_req_op_raw_data_in_bvecq(osd_req, which, dbuf, dlen);
 	return 0;
 }
 

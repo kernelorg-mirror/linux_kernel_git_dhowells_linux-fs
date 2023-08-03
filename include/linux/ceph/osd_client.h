@@ -486,6 +486,9 @@ extern void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *,
 					struct page **pages, u64 length,
 					u32 offset, bool pages_from_pool,
 					bool own_pages);
+void osd_req_op_raw_data_in_bvecq(struct ceph_osd_request *osd_req,
+				  unsigned int which,
+				  struct bvecq *dbuf, size_t len);
 void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
 				unsigned int which, struct iov_iter *iter);
 

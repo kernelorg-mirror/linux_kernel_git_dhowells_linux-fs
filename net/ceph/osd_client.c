@@ -183,6 +183,17 @@ osd_req_op_extent_osd_data(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_data);
 
+void osd_req_op_raw_data_in_bvecq(struct ceph_osd_request *osd_req,
+				  unsigned int which,
+				  struct bvecq *dbuf, size_t dbuf_len)
+{
+	struct ceph_osd_data *osd_data;
+
+	osd_data = osd_req_op_raw_data_in(osd_req, which);
+	ceph_osd_bvecq_init(osd_data, dbuf, dbuf_len);
+}
+EXPORT_SYMBOL(osd_req_op_raw_data_in_bvecq);
+
 void osd_req_op_raw_data_in_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages,
 			u64 length, u32 offset,
@@ -4996,7 +5007,7 @@ int ceph_osdc_list_watchers(struct ceph_osd_client *osdc,
 			    u32 *num_watchers)
 {
 	struct ceph_osd_request *req;
-	struct page **pages;
+	struct bvecq *reply;
 	int ret;
 
 	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_NOIO);
@@ -5007,16 +5018,15 @@ int ceph_osdc_list_watchers(struct ceph_osd_client *osdc,
 	ceph_oloc_copy(&req->r_base_oloc, oloc);
 	req->r_flags = CEPH_OSD_FLAG_READ;
 
-	pages = ceph_alloc_page_vector(1, GFP_NOIO);
-	if (IS_ERR(pages)) {
-		ret = PTR_ERR(pages);
+	reply = bvecq_alloc_buffer(PAGE_SIZE, GFP_NOIO, false);
+	if (!reply) {
+		ret = -ENOMEM;
 		goto out_put_req;
 	}
 
 	osd_req_op_init(req, 0, CEPH_OSD_OP_LIST_WATCHERS, 0);
-	ceph_osd_data_pages_init(osd_req_op_data(req, 0, list_watchers,
-						 response_data),
-				 pages, PAGE_SIZE, 0, false, true);
+	ceph_osd_bvecq_init(osd_req_op_data(req, 0, list_watchers, response_data),
+			    reply, PAGE_SIZE);
 
 	ret = ceph_osdc_alloc_messages(req, GFP_NOIO);
 	if (ret)
@@ -5025,10 +5035,11 @@ int ceph_osdc_list_watchers(struct ceph_osd_client *osdc,
 	ceph_osdc_start_request(osdc, req);
 	ret = ceph_osdc_wait_request(osdc, req);
 	if (ret >= 0) {
-		void *p = page_address(pages[0]);
+		void *p = ceph_map_dec_start(reply);
 		void *const end = p + req->r_ops[0].outdata_len;
 
 		ret = decode_watchers(&p, end, watchers, num_watchers);
+		ceph_map_dec_stop(reply, p);
 	}
 
 out_put_req:
@@ -5242,12 +5253,13 @@ int osd_req_op_copy_from_init(struct ceph_osd_request *req,
 			      u8 copy_from_flags)
 {
 	struct ceph_osd_req_op *op;
-	struct page **pages;
-	void *p, *end;
+	struct bvecq *dbuf;
+	size_t dlen;
+	void *p;
 
-	pages = ceph_alloc_page_vector(1, GFP_KERNEL);
-	if (IS_ERR(pages))
-		return PTR_ERR(pages);
+	dbuf = bvecq_alloc_buffer(PAGE_SIZE, GFP_KERNEL, false);
+	if (!dbuf)
+		return -ENOMEM;
 
 	op = osd_req_op_init(req, 0, CEPH_OSD_OP_COPY_FROM2,
 			     dst_fadvise_flags);
@@ -5256,16 +5268,15 @@ int osd_req_op_copy_from_init(struct ceph_osd_request *req,
 	op->copy_from.flags = copy_from_flags;
 	op->copy_from.src_fadvise_flags = src_fadvise_flags;
 
-	p = page_address(pages[0]);
-	end = p + PAGE_SIZE;
+	p = ceph_map_enc_start(dbuf);
 	ceph_encode_string(&p, src_oid->name, src_oid->name_len);
 	encode_oloc(&p, src_oloc);
 	ceph_encode_32(&p, truncate_seq);
 	ceph_encode_64(&p, truncate_size);
-	op->indata_len = PAGE_SIZE - (end - p);
+	dlen = ceph_map_enc_stop(dbuf, p);
+	op->indata_len = dlen;
 
-	ceph_osd_data_pages_init(&op->copy_from.osd_data, pages,
-				 op->indata_len, 0, false, true);
+	ceph_osd_bvecq_init(&op->copy_from.osd_data, dbuf, dlen);
 	return 0;
 }
 EXPORT_SYMBOL(osd_req_op_copy_from_init);
