@@ -1884,14 +1884,14 @@ static void ceph_msg_data_destroy(struct ceph_msg_data *data)
 	}
 }
 
-void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bvecq)
+void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bvecq, size_t len)
 {
 	struct ceph_msg_data *data;
-	size_t len = bvecq_len(bvecq);
 
 	data = ceph_msg_data_add(msg);
-	data->type  = CEPH_MSG_DATA_BVECQ;
-	data->bvecq = bvecq_get(bvecq);
+	data->type	= CEPH_MSG_DATA_BVECQ;
+	data->bvecq	= bvecq_get(bvecq);
+	data->bvecq_len	= len;
 	msg->data_length += len;
 
 	iov_iter_bvec_queue(&data->iter, ITER_SOURCE, bvecq, 0, 0, len);

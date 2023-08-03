@@ -1174,8 +1174,7 @@ void ceph_mdsc_release_request(struct kref *kref)
 	put_cred(req->r_cred);
 	if (req->r_mnt_idmap)
 		mnt_idmap_put(req->r_mnt_idmap);
-	if (req->r_pagelist)
-		ceph_pagelist_release(req->r_pagelist);
+	bvecq_put(req->r_dbuf);
 	kfree(req->r_fscrypt_auth);
 	kfree(req->r_altname);
 	put_request_session(req);
@@ -3401,10 +3400,10 @@ static struct ceph_msg *create_request_message(struct ceph_mds_session *session,
 	msg->front.iov_len = p - msg->front.iov_base;
 	msg->hdr.front_len = cpu_to_le32(msg->front.iov_len);
 
-	if (req->r_pagelist) {
-		struct ceph_pagelist *pagelist = req->r_pagelist;
-		ceph_msg_data_add_pagelist(msg, pagelist);
-		msg->hdr.data_len = cpu_to_le32(pagelist->length);
+	if (req->r_dbuf) {
+		struct bvecq *dbuf = req->r_dbuf;
+		ceph_msg_data_add_bvecq(msg, dbuf, req->r_dbuf_len);
+		msg->hdr.data_len = cpu_to_le32(req->r_dbuf_len);
 	} else {
 		msg->hdr.data_len = 0;
 	}

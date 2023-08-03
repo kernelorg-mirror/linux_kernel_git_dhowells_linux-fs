@@ -382,7 +382,8 @@ struct ceph_mds_request {
 	u32 r_direct_hash;      /* choose dir frag based on this dentry hash */
 
 	/* data payload is used for xattr ops */
-	struct ceph_pagelist *r_pagelist;
+	struct bvecq *r_dbuf;
+	u32 r_dbuf_len;
 
 	/* what caps shall we drop? */
 	int r_inode_drop, r_inode_unless;

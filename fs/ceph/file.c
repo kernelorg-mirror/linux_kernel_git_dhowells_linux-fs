@@ -695,9 +695,9 @@ static int ceph_finish_async_create(struct inode *dir, struct inode *inode,
 	iinfo.change_attr = 1;
 	ceph_encode_timespec64(&iinfo.btime, &now);
 
-	if (req->r_pagelist) {
-		iinfo.xattr_len = req->r_pagelist->length;
-		iinfo.xattr_data = req->r_pagelist->mapped_tail;
+	if (req->r_dbuf) {
+		iinfo.xattr_len = req->r_dbuf_len;
+		iinfo.xattr_data = kmap_local_bvecq(req->r_dbuf, 0);
 	} else {
 		/* fake it */
 		iinfo.xattr_len = ARRAY_SIZE(xattr_buf);
@@ -747,6 +747,8 @@ static int ceph_finish_async_create(struct inode *dir, struct inode *inode,
 	ret = ceph_fill_inode(inode, NULL, &iinfo, NULL, req->r_session,
 			      req->r_fmode, NULL);
 	up_read(&mdsc->snap_rwsem);
+	if (req->r_dbuf)
+		kunmap_local(iinfo.xattr_data);
 	if (ret) {
 		doutc(cl, "failed to fill inode: %d\n", ret);
 		ceph_dir_clear_complete(dir);
@@ -864,8 +866,8 @@ retry:
 			goto out_ctx;
 		}
 		/* Async create can't handle more than a page of xattrs */
-		if (as_ctx.pagelist &&
-		    !list_is_singular(&as_ctx.pagelist->head))
+		if (as_ctx.enc.dbuf &&
+		    bvecq_nr_slots(as_ctx.enc.dbuf) > 1)
 			try_async = false;
 	} else if (!d_in_lookup(dentry)) {
 		/* If it's not being looked up, it's negative */

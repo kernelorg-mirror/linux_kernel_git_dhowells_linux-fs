@@ -337,7 +337,7 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 	case CEPH_OSD_DATA_TYPE_NONE:
 		return 0;
 	case CEPH_OSD_DATA_TYPE_BVECQ:
-		return bvecq_len(osd_data->bvecq);
+		return osd_data->bvecq_len;
 	case CEPH_OSD_DATA_TYPE_PAGES:
 		return osd_data->length;
 	case CEPH_OSD_DATA_TYPE_PAGELIST:
@@ -947,7 +947,7 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 	u64 length = ceph_osd_data_length(osd_data);
 
 	if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ) {
-		ceph_msg_data_add_bvecq(msg, osd_data->bvecq);
+		ceph_msg_data_add_bvecq(msg, osd_data->bvecq, length);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGES) {
 		BUG_ON(length > (u64) SIZE_MAX);
 		if (length)

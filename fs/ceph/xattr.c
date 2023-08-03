@@ -1112,17 +1112,17 @@ static int ceph_sync_setxattr(struct inode *inode, const char *name,
 	struct ceph_mds_request *req;
 	struct ceph_mds_client *mdsc = fsc->mdsc;
 	struct ceph_osd_client *osdc = &fsc->client->osdc;
-	struct ceph_pagelist *pagelist = NULL;
+	struct ceph_encode enc = {};
 	int op = CEPH_MDS_OP_SETXATTR;
 	int err;
 
 	if (size > 0) {
-		/* copy value into pagelist */
-		pagelist = ceph_pagelist_alloc(GFP_NOFS);
-		if (!pagelist)
-			return -ENOMEM;
-
-		err = ceph_pagelist_append(pagelist, value, size);
+		/* copy value into dbuf */
+		err = ceph_start_encode(&enc, size, GFP_NOFS);
+		if (err < 0)
+			goto out;
+		ceph_bvecq_append(&enc, value, size);
+		err = ceph_encode_error(&enc);
 		if (err)
 			goto out;
 	} else if (!value) {
@@ -1152,8 +1152,10 @@ static int ceph_sync_setxattr(struct inode *inode, const char *name,
 		req->r_args.setxattr.flags = cpu_to_le32(flags);
 		req->r_args.setxattr.osdmap_epoch =
 			cpu_to_le32(osdc->osdmap->epoch);
-		req->r_pagelist = pagelist;
-		pagelist = NULL;
+		req->r_dbuf	= enc.dbuf;
+		req->r_dbuf_len	= enc.len;
+		enc.dbuf = NULL;
+		enc.p = NULL;
 	}
 
 	req->r_inode = inode;
@@ -1167,8 +1169,7 @@ static int ceph_sync_setxattr(struct inode *inode, const char *name,
 	doutc(cl, "xattr.ver (after): %lld\n", ci->i_xattrs.version);
 
 out:
-	if (pagelist)
-		ceph_pagelist_release(pagelist);
+	ceph_end_encode(&enc);
 	return err;
 }
 
@@ -1392,7 +1393,7 @@ bool ceph_security_xattr_deadlock(struct inode *in)
 int ceph_security_init_secctx(struct dentry *dentry, umode_t mode,
 			   struct ceph_acl_sec_ctx *as_ctx)
 {
-	struct ceph_pagelist *pagelist = as_ctx->pagelist;
+	struct ceph_encode *enc = &as_ctx->enc;
 	const char *name;
 	size_t name_len;
 	int err;
@@ -1405,15 +1406,10 @@ int ceph_security_init_secctx(struct dentry *dentry, umode_t mode,
 		goto out;
 	}
 
-	err = -ENOMEM;
-	if (!pagelist) {
-		pagelist = ceph_pagelist_alloc(GFP_KERNEL);
-		if (!pagelist)
+	if (!enc->dbuf) {
+		err = ceph_start_encode(enc, PAGE_SIZE, GFP_KERNEL);
+		if (err < 0)
 			goto out;
-		err = ceph_pagelist_reserve(pagelist, PAGE_SIZE);
-		if (err)
-			goto out;
-		ceph_pagelist_encode_32(pagelist, 1);
 	}
 
 	/*
@@ -1422,38 +1418,29 @@ int ceph_security_init_secctx(struct dentry *dentry, umode_t mode,
 	 * dentry_init_security hook.
 	 */
 	name_len = strlen(name);
-	err = ceph_pagelist_reserve(pagelist,
-				    4 * 2 + name_len + as_ctx->lsmctx.len);
+	err = ceph_bvecq_reserve(enc, 4 * 2 + name_len + as_ctx->lsmctx.len);
 	if (err)
 		goto out;
 
-	if (as_ctx->pagelist) {
-		/* update count of KV pairs */
-		BUG_ON(pagelist->length <= sizeof(__le32));
-		if (list_is_singular(&pagelist->head)) {
-			le32_add_cpu((__le32*)pagelist->mapped_tail, 1);
-		} else {
-			struct page *page = list_first_entry(&pagelist->head,
-							     struct page, lru);
-			void *addr = kmap_atomic(page);
-			le32_add_cpu((__le32*)addr, 1);
-			kunmap_atomic(addr);
-		}
+	if (enc->len == 0) {
+		ceph_bq_encode_32(enc, 1);
 	} else {
-		as_ctx->pagelist = pagelist;
+		/* update count of KV pairs */
+		if (WARN_ON_ONCE(enc->dbuf->bv[0].bv_len <= sizeof(__le32))) {
+			err = -EIO;
+			goto out;
+		}
+		__le32 *addr = kmap_local_bvecq(enc->dbuf, 0);
+		le32_add_cpu(addr, 1);
+		kunmap_local(addr);
 	}
 
-	ceph_pagelist_encode_32(pagelist, name_len);
-	ceph_pagelist_append(pagelist, name, name_len);
-
-	ceph_pagelist_encode_32(pagelist, as_ctx->lsmctx.len);
-	ceph_pagelist_append(pagelist, as_ctx->lsmctx.context,
-			     as_ctx->lsmctx.len);
-
-	err = 0;
+	ceph_bq_encode_32(enc, name_len);
+	ceph_bq_encode(enc, name, name_len);
+	ceph_bq_encode_32(enc, as_ctx->lsmctx.len);
+	ceph_bq_encode(enc, as_ctx->lsmctx.context, as_ctx->lsmctx.len);
+	err = ceph_encode_error(enc);
 out:
-	if (pagelist && !as_ctx->pagelist)
-		ceph_pagelist_release(pagelist);
 	return err;
 }
 #endif /* CONFIG_CEPH_FS_SECURITY_LABEL */
@@ -1471,8 +1458,7 @@ void ceph_release_acl_sec_ctx(struct ceph_acl_sec_ctx *as_ctx)
 #ifdef CONFIG_FS_ENCRYPTION
 	kfree(as_ctx->fscrypt_auth);
 #endif
-	if (as_ctx->pagelist)
-		ceph_pagelist_release(as_ctx->pagelist);
+	ceph_end_encode(&as_ctx->enc);
 }
 
 /*

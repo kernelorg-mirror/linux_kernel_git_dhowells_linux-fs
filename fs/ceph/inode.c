@@ -158,9 +158,11 @@ out_err:
 void ceph_as_ctx_to_req(struct ceph_mds_request *req,
 			struct ceph_acl_sec_ctx *as_ctx)
 {
-	if (as_ctx->pagelist) {
-		req->r_pagelist = as_ctx->pagelist;
-		as_ctx->pagelist = NULL;
+	if (as_ctx->enc.dbuf) {
+		req->r_dbuf	= as_ctx->enc.dbuf;
+		req->r_dbuf_len	= as_ctx->enc.len;
+		as_ctx->enc.dbuf = NULL;
+		as_ctx->enc.p = NULL;
 	}
 	ceph_fscrypt_as_ctx_to_req(req, as_ctx);
 }
@@ -2444,11 +2446,10 @@ static int fill_fscrypt_truncate(struct inode *inode,
 	loff_t pos, orig_pos = round_down(attr->ia_size,
 					  CEPH_FSCRYPT_BLOCK_SIZE);
 	u64 block = orig_pos >> CEPH_FSCRYPT_BLOCK_SHIFT;
-	struct ceph_pagelist *pagelist = NULL;
-	struct kvec iov = {0};
+	struct bvecq *dbuf = NULL;
 	struct iov_iter iter;
-	struct page *page = NULL;
-	struct ceph_fscrypt_truncate_size_header header;
+	struct ceph_fscrypt_truncate_size_header *header;
+	void *p;
 	int retry_op = 0;
 	int len = CEPH_FSCRYPT_BLOCK_SIZE;
 	loff_t i_size = i_size_read(inode);
@@ -2475,37 +2476,34 @@ static int fill_fscrypt_truncate(struct inode *inode,
 			goto out;
 	}
 
-	page = __page_cache_alloc(GFP_KERNEL);
-	if (page == NULL) {
-		ret = -ENOMEM;
+	ret = -ENOMEM;
+	dbuf = bvecq_alloc_chain(2, GFP_KERNEL, false);
+	if (!dbuf)
 		goto out;
-	}
 
-	pagelist = ceph_pagelist_alloc(GFP_KERNEL);
-	if (!pagelist) {
-		ret = -ENOMEM;
+	if (ceph_bvecq_insert_frag(dbuf, 0, sizeof(*header), GFP_KERNEL) < 0 ||
+	    ceph_bvecq_insert_frag(dbuf, 1, PAGE_SIZE, GFP_KERNEL) < 0)
 		goto out;
-	}
 
-	iov.iov_base = kmap_local_page(page);
-	iov.iov_len = len;
-	iov_iter_kvec(&iter, READ, &iov, 1, len);
+	iov_iter_bvec_queue(&iter, ITER_DEST, dbuf, 1, 0, len);
 
 	pos = orig_pos;
 	ret = __ceph_sync_read(inode, &pos, &iter, &retry_op, &objver);
 	if (ret < 0)
 		goto out;
 
+	header = kmap_local_bvecq(dbuf, 0);
+
 	/* Insert the header first */
-	header.ver = 1;
-	header.compat = 1;
-	header.change_attr = cpu_to_le64(inode_peek_iversion_raw(inode));
+	header->ver = 1;
+	header->compat = 1;
+	header->change_attr = cpu_to_le64(inode_peek_iversion_raw(inode));
 
 	/*
 	 * Always set the block_size to CEPH_FSCRYPT_BLOCK_SIZE,
 	 * because in MDS it may need this to do the truncate.
 	 */
-	header.block_size = cpu_to_le32(CEPH_FSCRYPT_BLOCK_SIZE);
+	header->block_size = cpu_to_le32(CEPH_FSCRYPT_BLOCK_SIZE);
 
 	/*
 	 * If we hit a hole here, we should just skip filling
@@ -2520,50 +2518,40 @@ static int fill_fscrypt_truncate(struct inode *inode,
 	if (!objver) {
 		doutc(cl, "hit hole, ppos %lld < size %lld\n", pos, i_size);
 
-		header.data_len = cpu_to_le32(8 + 8 + 4);
-		header.file_offset = 0;
+		header->data_len = cpu_to_le32(8 + 8 + 4);
+		header->file_offset = 0;
 		ret = 0;
 	} else {
-		header.data_len = cpu_to_le32(8 + 8 + 4 + CEPH_FSCRYPT_BLOCK_SIZE);
-		header.file_offset = cpu_to_le64(orig_pos);
+		header->data_len = cpu_to_le32(8 + 8 + 4 + CEPH_FSCRYPT_BLOCK_SIZE);
+		header->file_offset = cpu_to_le64(orig_pos);
 
 		doutc(cl, "encrypt block boff/bsize %d/%lu\n", boff,
 		      CEPH_FSCRYPT_BLOCK_SIZE);
 
 		/* truncate and zero out the extra contents for the last block */
-		memset(iov.iov_base + boff, 0, PAGE_SIZE - boff);
+		p = kmap_local_bvecq(dbuf, 1);
+		memset(p + boff, 0, PAGE_SIZE - boff);
+		kunmap_local(p);
 
 		/* encrypt the last block */
-		ret = ceph_fscrypt_encrypt_block_inplace(inode, page,
-						    CEPH_FSCRYPT_BLOCK_SIZE,
-						    0, block);
+		ret = ceph_fscrypt_encrypt_block_inplace(inode, dbuf->bv[0].bv_page,
+							 CEPH_FSCRYPT_BLOCK_SIZE,
+							 0, block);
 		if (ret)
 			goto out;
 	}
 
-	/* Insert the header */
-	ret = ceph_pagelist_append(pagelist, &header, sizeof(header));
-	if (ret)
-		goto out;
-
-	if (header.block_size) {
-		/* Append the last block contents to pagelist */
-		ret = ceph_pagelist_append(pagelist, iov.iov_base,
-					   CEPH_FSCRYPT_BLOCK_SIZE);
-		if (ret)
-			goto out;
-	}
-	req->r_pagelist = pagelist;
+	req->r_dbuf = dbuf;
+	req->r_dbuf_len = sizeof(*header);
+	if (header->block_size)
+		req->r_dbuf_len += CEPH_FSCRYPT_BLOCK_SIZE;
 out:
 	doutc(cl, "%p %llx.%llx size dropping cap refs on %s\n", inode,
 	      ceph_vinop(inode), ceph_cap_string(got));
 	ceph_put_cap_refs(ci, got);
-	if (iov.iov_base)
-		kunmap_local(iov.iov_base);
-	if (page)
-		__free_pages(page, 0);
-	if (ret && pagelist)
-		ceph_pagelist_release(pagelist);
+	kunmap_local(header);
+	if (ret)
+		bvecq_put(dbuf);
 	return ret;
 }
 

@@ -117,7 +117,10 @@ enum ceph_osd_data_type {
 struct ceph_osd_data {
 	enum ceph_osd_data_type	type;
 	union {
-		struct bvecq		*bvecq;
+		struct {
+			struct bvecq	*bvecq;
+			size_t		bvecq_len;
+		};
 		struct {
 			struct page	**pages;
 			u64		length;

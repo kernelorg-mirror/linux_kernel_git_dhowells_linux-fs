@@ -215,7 +215,10 @@ struct ceph_msg_data {
 	struct iov_iter			iter;
 	bool				release_bvecq;
 	union {
-		struct bvecq		*bvecq;
+		struct {
+			struct bvecq	*bvecq;
+			u32		bvecq_len;
+		};
 #ifdef CONFIG_BLOCK
 		struct {
 			struct ceph_bio_iter	bio_pos;
@@ -606,7 +609,7 @@ extern void ceph_con_keepalive(struct ceph_connection *con);
 extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 				       unsigned long interval);
 
-void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq);
+void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq, size_t len);
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 			     size_t length, size_t offset, bool own_pages);
 extern void ceph_msg_data_add_pagelist(struct ceph_msg *msg,

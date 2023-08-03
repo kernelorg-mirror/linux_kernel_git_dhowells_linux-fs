@@ -165,9 +165,9 @@ out:
 int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 		       struct ceph_acl_sec_ctx *as_ctx)
 {
+	struct ceph_encode *enc = &as_ctx->enc;
 	struct posix_acl *acl, *default_acl;
 	size_t val_size1 = 0, val_size2 = 0;
-	struct ceph_pagelist *pagelist = NULL;
 	void *tmp_buf1 = NULL, *tmp_buf2 = NULL;
 	int err;
 
@@ -188,16 +188,11 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 	if (!default_acl && !acl)
 		return 0;
 
-	err = -ENOMEM;
-	pagelist = ceph_pagelist_alloc(GFP_KERNEL);
-	if (!pagelist)
-		goto out_err;
-
-	err = ceph_pagelist_reserve(pagelist, PAGE_SIZE);
+	err = ceph_start_encode(enc, PAGE_SIZE,  GFP_KERNEL);
 	if (err)
 		goto out_err;
 
-	ceph_pagelist_encode_32(pagelist, acl && default_acl ? 2 : 1);
+	ceph_bq_encode_32(enc, acl && default_acl ? 2 : 1);
 
 	if (acl) {
 		size_t len = strlen(XATTR_NAME_POSIX_ACL_ACCESS);
@@ -207,13 +202,10 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 					      &val_size1, GFP_KERNEL);
 		if (!tmp_buf1)
 			goto out_err;
-		err = ceph_pagelist_reserve(pagelist, len + val_size1 + 8);
-		if (err)
-			goto out_err;
-		ceph_pagelist_encode_string(pagelist, XATTR_NAME_POSIX_ACL_ACCESS,
-					    len);
-		ceph_pagelist_encode_32(pagelist, val_size1);
-		ceph_pagelist_append(pagelist, tmp_buf1, val_size1);
+		ceph_bvecq_reserve(enc, len + val_size1 + 8);
+		ceph_bq_encode_string(enc, XATTR_NAME_POSIX_ACL_ACCESS, len);
+		ceph_bq_encode_32(enc, val_size1);
+		ceph_bq_encode(enc, tmp_buf1, val_size1);
 	}
 	if (default_acl) {
 		size_t len = strlen(XATTR_NAME_POSIX_ACL_DEFAULT);
@@ -223,21 +215,21 @@ int ceph_pre_init_acls(struct inode *dir, umode_t *mode,
 					      &val_size2, GFP_KERNEL);
 		if (!tmp_buf2)
 			goto out_err;
-		err = ceph_pagelist_reserve(pagelist, len + val_size2 + 8);
-		if (err)
-			goto out_err;
-		ceph_pagelist_encode_string(pagelist,
-					  XATTR_NAME_POSIX_ACL_DEFAULT, len);
-		ceph_pagelist_encode_32(pagelist, val_size2);
-		ceph_pagelist_append(pagelist, tmp_buf2, val_size2);
+		ceph_bvecq_reserve(enc, len + val_size2 + 8);
+		ceph_bq_encode_string(enc, XATTR_NAME_POSIX_ACL_DEFAULT, len);
+		ceph_bq_encode_32(enc, val_size2);
+		ceph_bq_encode(enc, tmp_buf2, val_size2);
 	}
+
+	err = ceph_encode_error(enc);
+	if (err)
+		goto out_err;
 
 	kfree(tmp_buf1);
 	kfree(tmp_buf2);
 
 	as_ctx->acl = acl;
 	as_ctx->default_acl = default_acl;
-	as_ctx->pagelist = pagelist;
 	return 0;
 
 out_err:
@@ -245,8 +237,7 @@ out_err:
 	posix_acl_release(default_acl);
 	kfree(tmp_buf1);
 	kfree(tmp_buf2);
-	if (pagelist)
-		ceph_pagelist_release(pagelist);
+	ceph_end_encode(enc);
 	return err;
 }
 

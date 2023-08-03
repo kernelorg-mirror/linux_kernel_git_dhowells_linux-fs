@@ -1184,7 +1184,7 @@ struct ceph_acl_sec_ctx {
 #ifdef CONFIG_FS_ENCRYPTION
 	struct ceph_fscrypt_auth *fscrypt_auth;
 #endif
-	struct ceph_pagelist *pagelist;
+	struct ceph_encode enc;
 };
 
 #ifdef CONFIG_SECURITY
