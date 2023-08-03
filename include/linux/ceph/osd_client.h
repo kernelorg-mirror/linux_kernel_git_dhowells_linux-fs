@@ -16,6 +16,7 @@
 #include <linux/ceph/msgpool.h>
 #include <linux/ceph/auth.h>
 #include <linux/ceph/pagelist.h>
+#include <linux/ceph/databuf.h>
 
 struct ceph_msg;
 struct ceph_snap_context;
@@ -103,6 +104,7 @@ struct ceph_osd {
 
 enum ceph_osd_data_type {
 	CEPH_OSD_DATA_TYPE_NONE = 0,
+	CEPH_OSD_DATA_TYPE_BVECQ,
 	CEPH_OSD_DATA_TYPE_PAGES,
 	CEPH_OSD_DATA_TYPE_PAGELIST,
 #ifdef CONFIG_BLOCK
@@ -115,6 +117,7 @@ enum ceph_osd_data_type {
 struct ceph_osd_data {
 	enum ceph_osd_data_type	type;
 	union {
+		struct bvecq		*bvecq;
 		struct {
 			struct page	**pages;
 			u64		length;

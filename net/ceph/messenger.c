@@ -1874,13 +1874,29 @@ static struct ceph_msg_data *ceph_msg_data_add(struct ceph_msg *msg)
 
 static void ceph_msg_data_destroy(struct ceph_msg_data *data)
 {
-	if (data->type == CEPH_MSG_DATA_PAGES && data->own_pages) {
+	if (data->type == CEPH_MSG_DATA_BVECQ) {
+		bvecq_put(data->bvecq);
+	} else if (data->type == CEPH_MSG_DATA_PAGES && data->own_pages) {
 		int num_pages = calc_pages_for(data->offset, data->length);
 		ceph_release_page_vector(data->pages, num_pages);
 	} else if (data->type == CEPH_MSG_DATA_PAGELIST) {
 		ceph_pagelist_release(data->pagelist);
 	}
 }
+
+void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bvecq)
+{
+	struct ceph_msg_data *data;
+	size_t len = bvecq_len(bvecq);
+
+	data = ceph_msg_data_add(msg);
+	data->type  = CEPH_MSG_DATA_BVECQ;
+	data->bvecq = bvecq_get(bvecq);
+	msg->data_length += len;
+
+	iov_iter_bvec_queue(&data->iter, ITER_SOURCE, bvecq, 0, 0, len);
+}
+EXPORT_SYMBOL(ceph_msg_data_add_bvecq);
 
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 			     size_t length, size_t offset, bool own_pages)

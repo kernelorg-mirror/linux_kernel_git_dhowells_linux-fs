@@ -118,6 +118,7 @@ struct ceph_messenger {
 
 enum ceph_msg_data_type {
 	CEPH_MSG_DATA_NONE,	/* message contains no data payload */
+	CEPH_MSG_DATA_BVECQ,	/* data source/destination is a bvecq */
 	CEPH_MSG_DATA_PAGES,	/* data source/destination is a page array */
 	CEPH_MSG_DATA_PAGELIST,	/* data source/destination is a pagelist */
 #ifdef CONFIG_BLOCK
@@ -211,7 +212,10 @@ struct ceph_bvec_iter {
 
 struct ceph_msg_data {
 	enum ceph_msg_data_type		type;
+	struct iov_iter			iter;
+	bool				release_bvecq;
 	union {
+		struct bvecq		*bvecq;
 #ifdef CONFIG_BLOCK
 		struct {
 			struct ceph_bio_iter	bio_pos;
@@ -226,7 +230,6 @@ struct ceph_msg_data {
 			bool		own_pages;
 		};
 		struct ceph_pagelist	*pagelist;
-		struct iov_iter		iter;
 	};
 };
 
@@ -603,6 +606,7 @@ extern void ceph_con_keepalive(struct ceph_connection *con);
 extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 				       unsigned long interval);
 
+void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq);
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 			     size_t length, size_t offset, bool own_pages);
 extern void ceph_msg_data_add_pagelist(struct ceph_msg *msg,
