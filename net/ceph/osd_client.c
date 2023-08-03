@@ -4535,12 +4535,11 @@ static void handle_watch_notify(struct ceph_osd_client *osdc,
 			    msg->num_data_items ? &msg->data[0] : NULL;
 
 			if (data) {
-				if (lreq->preply_pages) {
-					WARN_ON(data->type !=
-							CEPH_MSG_DATA_PAGES);
-					*lreq->preply_pages = data->pages;
-					*lreq->preply_len = data->length;
-					data->own_pages = false;
+				if (lreq->preply) {
+					WARN_ON(data->type != CEPH_MSG_DATA_BVECQ);
+					*lreq->preply = data->bvecq;
+					*lreq->preply_len = data->bvecq_len;
+					data->bvecq = NULL;
 				}
 			}
 			lreq->notify_finish_error = return_code;
@@ -4831,10 +4830,7 @@ EXPORT_SYMBOL(ceph_osdc_notify_ack);
 /*
  * @timeout: in seconds
  *
- * @preply_{pages,len} are initialized both on success and error.
- * The caller is responsible for:
- *
- *     ceph_release_page_vector(reply_pages, calc_pages_for(0, reply_len))
+ * @reply should be an empty ceph_databuf.
  */
 int ceph_osdc_notify(struct ceph_osd_client *osdc,
 		     struct ceph_object_id *oid,
@@ -4842,7 +4838,7 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 		     void *payload,
 		     u32 payload_len,
 		     u32 timeout,
-		     struct page ***preply_pages,
+		     struct bvecq **preply,
 		     size_t *preply_len)
 {
 	struct ceph_osd_linger_request *lreq;
@@ -4850,8 +4846,8 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 	int ret;
 
 	WARN_ON(!timeout);
-	if (preply_pages) {
-		*preply_pages = NULL;
+	if (preply) {
+		*preply = NULL;
 		*preply_len = 0;
 	}
 
@@ -4882,7 +4878,7 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 		goto out_put_lreq;
 	}
 
-	lreq->preply_pages = preply_pages;
+	lreq->preply = preply;
 	lreq->preply_len = preply_len;
 
 	ceph_oid_copy(&lreq->t.base_oid, oid);
@@ -5393,7 +5389,7 @@ out_unlock_osdc:
 	return m;
 }
 
-static struct ceph_msg *alloc_msg_with_page_vector(struct ceph_msg_header *hdr)
+static struct ceph_msg *alloc_msg_with_data_buffer(struct ceph_msg_header *hdr)
 {
 	struct ceph_msg *m;
 	int type = le16_to_cpu(hdr->type);
@@ -5405,16 +5401,15 @@ static struct ceph_msg *alloc_msg_with_page_vector(struct ceph_msg_header *hdr)
 		return NULL;
 
 	if (data_len) {
-		struct page **pages;
+		struct bvecq *dbuf;
 
-		pages = ceph_alloc_page_vector(calc_pages_for(0, data_len),
-					       GFP_NOIO);
-		if (IS_ERR(pages)) {
+		dbuf = ceph_alloc_frag(data_len, GFP_NOIO);
+		if (!dbuf) {
 			ceph_msg_put(m);
 			return NULL;
 		}
 
-		ceph_msg_data_add_pages(m, pages, data_len, 0, true);
+		ceph_msg_data_add_bvecq(m, dbuf, data_len);
 	}
 
 	return m;
@@ -5432,7 +5427,7 @@ static struct ceph_msg *osd_alloc_msg(struct ceph_connection *con,
 	case CEPH_MSG_OSD_MAP:
 	case CEPH_MSG_OSD_BACKOFF:
 	case CEPH_MSG_WATCH_NOTIFY:
-		return alloc_msg_with_page_vector(hdr);
+		return alloc_msg_with_data_buffer(hdr);
 	case CEPH_MSG_OSD_OPREPLY:
 		return get_reply(con, hdr, skip);
 	default:

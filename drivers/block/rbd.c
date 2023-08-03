@@ -3645,7 +3645,7 @@ static void rbd_unlock(struct rbd_device *rbd_dev)
 
 static int __rbd_notify_op_lock(struct rbd_device *rbd_dev,
 				enum rbd_notify_op notify_op,
-				struct page ***preply_pages,
+				struct bvecq **preply,
 				size_t *preply_len)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
@@ -3664,7 +3664,7 @@ static int __rbd_notify_op_lock(struct rbd_device *rbd_dev,
 
 	return ceph_osdc_notify(osdc, &rbd_dev->header_oid,
 				&rbd_dev->header_oloc, buf, buf_size,
-				RBD_NOTIFY_TIMEOUT, preply_pages, preply_len);
+				RBD_NOTIFY_TIMEOUT, preply, preply_len);
 }
 
 static void rbd_notify_op_lock(struct rbd_device *rbd_dev,
@@ -3691,7 +3691,7 @@ static void rbd_notify_released_lock(struct work_struct *work)
 
 static int rbd_request_lock(struct rbd_device *rbd_dev)
 {
-	struct page **reply_pages;
+	struct bvecq *reply = NULL;
 	size_t reply_len;
 	bool lock_owner_responded = false;
 	int ret;
@@ -3699,15 +3699,16 @@ static int rbd_request_lock(struct rbd_device *rbd_dev)
 	dout("%s rbd_dev %p\n", __func__, rbd_dev);
 
 	ret = __rbd_notify_op_lock(rbd_dev, RBD_NOTIFY_OP_REQUEST_LOCK,
-				   &reply_pages, &reply_len);
+				   &reply, &reply_len);
 	if (ret && ret != -ETIMEDOUT) {
 		rbd_warn(rbd_dev, "failed to request lock: %d", ret);
 		goto out;
 	}
 
 	if (reply_len > 0 && reply_len <= PAGE_SIZE) {
-		void *p = page_address(reply_pages[0]);
-		void *const end = p + reply_len;
+		void *content = ceph_map_dec_start(reply);
+		void *p = content;
+		void *const end = p + umin(reply_len, reply->bv[0].bv_len);
 		u32 n;
 
 		ceph_decode_32_safe(&p, end, n, e_inval); /* num_acks */
@@ -3723,6 +3724,7 @@ static int rbd_request_lock(struct rbd_device *rbd_dev)
 				continue;
 
 			if (lock_owner_responded) {
+				ceph_map_dec_stop(reply, p);
 				rbd_warn(rbd_dev,
 					 "duplicate lock owners detected");
 				ret = -EIO;
@@ -3733,6 +3735,7 @@ static int rbd_request_lock(struct rbd_device *rbd_dev)
 			ret = ceph_start_decoding(&p, end, 1, "ResponseMessage",
 						  &struct_v, &len);
 			if (ret) {
+				ceph_map_dec_stop(reply, p);
 				rbd_warn(rbd_dev,
 					 "failed to decode ResponseMessage: %d",
 					 ret);
@@ -3741,6 +3744,8 @@ static int rbd_request_lock(struct rbd_device *rbd_dev)
 
 			ret = ceph_decode_32(&p);
 		}
+
+		ceph_map_dec_stop(reply, p);
 	}
 
 	if (!lock_owner_responded) {
@@ -3749,7 +3754,7 @@ static int rbd_request_lock(struct rbd_device *rbd_dev)
 	}
 
 out:
-	ceph_release_page_vector(reply_pages, calc_pages_for(0, reply_len));
+	bvecq_put(reply);
 	return ret;
 
 e_inval:

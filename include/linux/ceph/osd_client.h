@@ -339,7 +339,7 @@ struct ceph_osd_linger_request {
 	struct bvecq *notify_id_buf;
 	size_t notify_id_len;
 
-	struct page ***preply_pages;
+	struct bvecq **preply;
 	size_t *preply_len;
 };
 
@@ -594,7 +594,7 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 		     void *payload,
 		     u32 payload_len,
 		     u32 timeout,
-		     struct page ***preply_pages,
+		     struct bvecq **preply,
 		     size_t *preply_len);
 int ceph_osdc_list_watchers(struct ceph_osd_client *osdc,
 			    struct ceph_object_id *oid,
