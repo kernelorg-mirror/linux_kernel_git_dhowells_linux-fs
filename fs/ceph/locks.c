@@ -8,7 +8,6 @@
 #include "super.h"
 #include "mds_client.h"
 #include <linux/filelock.h>
-#include <linux/ceph/pagelist.h>
 
 static u64 lock_secret;
 static int ceph_lock_wait_for_completion(struct ceph_mds_client *mdsc,

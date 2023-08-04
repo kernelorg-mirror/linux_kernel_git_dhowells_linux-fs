@@ -15,7 +15,6 @@
 #include <linux/ceph/messenger.h>
 #include <linux/ceph/msgpool.h>
 #include <linux/ceph/auth.h>
-#include <linux/ceph/pagelist.h>
 #include <linux/ceph/databuf.h>
 
 struct ceph_msg;
@@ -106,7 +105,6 @@ enum ceph_osd_data_type {
 	CEPH_OSD_DATA_TYPE_NONE = 0,
 	CEPH_OSD_DATA_TYPE_BVECQ,
 	CEPH_OSD_DATA_TYPE_PAGES,
-	CEPH_OSD_DATA_TYPE_PAGELIST,
 	CEPH_OSD_DATA_TYPE_ITER,
 };
 
@@ -125,7 +123,6 @@ struct ceph_osd_data {
 			bool		pages_from_pool;
 			bool		own_pages;
 		};
-		struct ceph_pagelist	*pagelist;
 	};
 };
 

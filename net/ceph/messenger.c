@@ -20,7 +20,6 @@
 #include <linux/ceph/libceph.h>
 #include <linux/ceph/messenger.h>
 #include <linux/ceph/decode.h>
-#include <linux/ceph/pagelist.h>
 #include <linux/export.h>
 
 /*
@@ -776,87 +775,6 @@ static bool ceph_msg_data_pages_advance(struct ceph_msg_data_cursor *cursor,
 	return true;
 }
 
-/*
- * For a pagelist, a piece is whatever remains to be consumed in the
- * first page in the list, or the front of the next page.
- */
-static void
-ceph_msg_data_pagelist_cursor_init(struct ceph_msg_data_cursor *cursor,
-					size_t length)
-{
-	struct ceph_msg_data *data = cursor->data;
-	struct ceph_pagelist *pagelist;
-	struct page *page;
-
-	BUG_ON(data->type != CEPH_MSG_DATA_PAGELIST);
-
-	pagelist = data->pagelist;
-	BUG_ON(!pagelist);
-
-	if (!length)
-		return;		/* pagelist can be assigned but empty */
-
-	BUG_ON(list_empty(&pagelist->head));
-	page = list_first_entry(&pagelist->head, struct page, lru);
-
-	cursor->resid = min(length, pagelist->length);
-	cursor->page = page;
-	cursor->offset = 0;
-}
-
-static struct page *
-ceph_msg_data_pagelist_next(struct ceph_msg_data_cursor *cursor,
-				size_t *page_offset, size_t *length)
-{
-	struct ceph_msg_data *data = cursor->data;
-	struct ceph_pagelist *pagelist;
-
-	BUG_ON(data->type != CEPH_MSG_DATA_PAGELIST);
-
-	pagelist = data->pagelist;
-	BUG_ON(!pagelist);
-
-	BUG_ON(!cursor->page);
-	BUG_ON(cursor->offset + cursor->resid != pagelist->length);
-
-	/* offset of first page in pagelist is always 0 */
-	*page_offset = cursor->offset & ~PAGE_MASK;
-	*length = min_t(size_t, cursor->resid, PAGE_SIZE - *page_offset);
-	return cursor->page;
-}
-
-static bool ceph_msg_data_pagelist_advance(struct ceph_msg_data_cursor *cursor,
-						size_t bytes)
-{
-	struct ceph_msg_data *data = cursor->data;
-	struct ceph_pagelist *pagelist;
-
-	BUG_ON(data->type != CEPH_MSG_DATA_PAGELIST);
-
-	pagelist = data->pagelist;
-	BUG_ON(!pagelist);
-
-	BUG_ON(cursor->offset + cursor->resid != pagelist->length);
-	BUG_ON((cursor->offset & ~PAGE_MASK) + bytes > PAGE_SIZE);
-
-	/* Advance the cursor offset */
-
-	cursor->resid -= bytes;
-	cursor->offset += bytes;
-	/* offset of first page in pagelist is always 0 */
-	if (!bytes || cursor->offset & ~PAGE_MASK)
-		return false;	/* more bytes to process in the current page */
-
-	if (!cursor->resid)
-		return false;   /* no more data */
-
-	/* Move on to the next page */
-
-	BUG_ON(list_is_last(&cursor->page->lru, &pagelist->head));
-	cursor->page = list_next_entry(cursor->page, lru);
-	return true;
-}
-
 static void ceph_msg_data_iter_cursor_init(struct ceph_msg_data_cursor *cursor,
 					   size_t length)
 {
@@ -927,9 +845,6 @@ static void __ceph_msg_data_cursor_init(struct ceph_msg_data_cursor *cursor)
 	size_t length = cursor->total_resid;
 
 	switch (cursor->data->type) {
-	case CEPH_MSG_DATA_PAGELIST:
-		ceph_msg_data_pagelist_cursor_init(cursor, length);
-		break;
 	case CEPH_MSG_DATA_PAGES:
 		ceph_msg_data_pages_cursor_init(cursor, length);
 		break;
@@ -970,9 +885,6 @@ struct page *ceph_msg_data_next(struct ceph_msg_data_cursor *cursor,
 	struct page *page;
 
 	switch (cursor->data->type) {
-	case CEPH_MSG_DATA_PAGELIST:
-		page = ceph_msg_data_pagelist_next(cursor, page_offset, length);
-		break;
 	case CEPH_MSG_DATA_PAGES:
 		page = ceph_msg_data_pages_next(cursor, page_offset, length);
 		break;
@@ -1004,9 +916,6 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 
 	BUG_ON(bytes > cursor->resid);
 	switch (cursor->data->type) {
-	case CEPH_MSG_DATA_PAGELIST:
-		new_piece = ceph_msg_data_pagelist_advance(cursor, bytes);
-		break;
 	case CEPH_MSG_DATA_PAGES:
 		new_piece = ceph_msg_data_pages_advance(cursor, bytes);
 		break;
@@ -1746,8 +1655,6 @@ static void ceph_msg_data_destroy(struct ceph_msg_data *data)
 	} else if (data->type == CEPH_MSG_DATA_PAGES && data->own_pages) {
 		int num_pages = calc_pages_for(data->offset, data->length);
 		ceph_release_page_vector(data->pages, num_pages);
-	} else if (data->type == CEPH_MSG_DATA_PAGELIST) {
-		ceph_pagelist_release(data->pagelist);
 	}
 }
 
@@ -1783,23 +1690,6 @@ void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 	msg->data_length += length;
 }
 EXPORT_SYMBOL(ceph_msg_data_add_pages);
-
-void ceph_msg_data_add_pagelist(struct ceph_msg *msg,
-				struct ceph_pagelist *pagelist)
-{
-	struct ceph_msg_data *data;
-
-	BUG_ON(!pagelist);
-	BUG_ON(!pagelist->length);
-
-	data = ceph_msg_data_add(msg);
-	data->type = CEPH_MSG_DATA_PAGELIST;
-	refcount_inc(&pagelist->refcnt);
-	data->pagelist = pagelist;
-
-	msg->data_length += pagelist->length;
-}
-EXPORT_SYMBOL(ceph_msg_data_add_pagelist);
 
 void ceph_msg_data_add_iter(struct ceph_msg *msg,
 			    struct iov_iter *iter)

@@ -120,7 +120,6 @@ enum ceph_msg_data_type {
 	CEPH_MSG_DATA_NONE,	/* message contains no data payload */
 	CEPH_MSG_DATA_BVECQ,	/* data source/destination is a bvecq */
 	CEPH_MSG_DATA_PAGES,	/* data source/destination is a page array */
-	CEPH_MSG_DATA_PAGELIST,	/* data source/destination is a pagelist */
 	CEPH_MSG_DATA_ITER,	/* data source/destination is an iov_iter */
 };
 
@@ -139,7 +138,6 @@ struct ceph_msg_data {
 			unsigned int	offset;		/* first page */
 			bool		own_pages;
 		};
-		struct ceph_pagelist	*pagelist;
 	};
 };
 
@@ -155,10 +153,6 @@ struct ceph_msg_data_cursor {
 			unsigned int	page_offset;	/* offset in page */
 			unsigned short	page_index;	/* index in array */
 			unsigned short	page_count;	/* pages in array */
-		};
-		struct {				/* pagelist */
-			struct page	*page;		/* page from list */
-			size_t		offset;		/* bytes from list */
 		};
 		struct {
 			struct iov_iter		iov_iter;
@@ -516,8 +510,6 @@ extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq, size_t len);
 void ceph_msg_data_add_pages(struct ceph_msg *msg, struct page **pages,
 			     size_t length, size_t offset, bool own_pages);
-extern void ceph_msg_data_add_pagelist(struct ceph_msg *msg,
-				struct ceph_pagelist *pagelist);
 void ceph_msg_data_add_iter(struct ceph_msg *msg,
 			    struct iov_iter *iter);
 

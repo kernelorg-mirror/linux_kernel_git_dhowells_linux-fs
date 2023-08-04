@@ -16,7 +16,6 @@
 #include <linux/ceph/messenger.h>
 #include <linux/ceph/decode.h>
 #include <linux/ceph/auth.h>
-#include <linux/ceph/pagelist.h>
 #include <linux/ceph/striper.h>
 
 #define OSD_OPREPLY_FRONT_LEN	512
@@ -136,16 +135,6 @@ static void ceph_osd_data_pages_init(struct ceph_osd_data *osd_data,
 	osd_data->offset = offset;
 	osd_data->pages_from_pool = pages_from_pool;
 	osd_data->own_pages = own_pages;
-}
-
-/*
- * Consumes a ref on @pagelist.
- */
-static void ceph_osd_data_pagelist_init(struct ceph_osd_data *osd_data,
-			struct ceph_pagelist *pagelist)
-{
-	osd_data->type = CEPH_OSD_DATA_TYPE_PAGELIST;
-	osd_data->pagelist = pagelist;
 }
 
 static void ceph_osd_iter_init(struct ceph_osd_data *osd_data,
@@ -295,8 +284,6 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 		return osd_data->bvecq_len;
 	case CEPH_OSD_DATA_TYPE_PAGES:
 		return osd_data->length;
-	case CEPH_OSD_DATA_TYPE_PAGELIST:
-		return (u64)osd_data->pagelist->length;
 	case CEPH_OSD_DATA_TYPE_ITER:
 		return iov_iter_count(&osd_data->iter);
 	default:
@@ -315,8 +302,6 @@ static void ceph_osd_data_release(struct ceph_osd_data *osd_data)
 		num_pages = calc_pages_for((u64)osd_data->offset,
 						(u64)osd_data->length);
 		ceph_release_page_vector(osd_data->pages, num_pages);
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGELIST) {
-		ceph_pagelist_release(osd_data->pagelist);
 	}
 	ceph_osd_data_init(osd_data);
 }
@@ -886,9 +871,6 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 		if (length)
 			ceph_msg_data_add_pages(msg, osd_data->pages,
 					length, osd_data->offset, false);
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_PAGELIST) {
-		BUG_ON(!length);
-		ceph_msg_data_add_pagelist(msg, osd_data->pagelist);
 	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_ITER) {
 		ceph_msg_data_add_iter(msg, &osd_data->iter);
 	} else {
