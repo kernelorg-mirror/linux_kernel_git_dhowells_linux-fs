@@ -378,8 +378,8 @@ int ceph_flock(struct file *file, int cmd, struct file_lock *fl)
 }
 
 /*
- * Fills in the passed counter variables, so you can prepare pagelist metadata
- * before calling ceph_encode_locks.
+ * Fills in the passed counter variables, so you can prepare metadata before
+ * calling ceph_encode_locks.
  */
 void ceph_count_locks(struct inode *inode, int *fcntl_count, int *flock_count)
 {
@@ -490,39 +490,26 @@ fail:
 }
 
 /*
- * Copy the encoded flock and fcntl locks into the pagelist.
+ * Copy the encoded flock and fcntl locks into the data buffer.
  * Format is: #fcntl locks, sequential fcntl locks, #flock locks,
  * sequential flock locks.
  * Returns zero on success.
  */
-int ceph_locks_to_pagelist(struct ceph_filelock *flocks,
-			   struct ceph_pagelist *pagelist,
-			   int num_fcntl_locks, int num_flock_locks)
+int ceph_locks_to_bvecq(struct ceph_filelock *flocks, struct ceph_encode *enc,
+			int num_fcntl_locks, int num_flock_locks)
 {
-	int err = 0;
 	__le32 nlocks;
 
 	nlocks = cpu_to_le32(num_fcntl_locks);
-	err = ceph_pagelist_append(pagelist, &nlocks, sizeof(nlocks));
-	if (err)
-		goto out_fail;
-
-	if (num_fcntl_locks > 0) {
-		err = ceph_pagelist_append(pagelist, flocks,
-					   num_fcntl_locks * sizeof(*flocks));
-		if (err)
-			goto out_fail;
-	}
+	ceph_bq_encode(enc, &nlocks, sizeof(nlocks));
+	if (num_fcntl_locks > 0)
+		ceph_bq_encode(enc, flocks, num_fcntl_locks * sizeof(*flocks));
 
 	nlocks = cpu_to_le32(num_flock_locks);
-	err = ceph_pagelist_append(pagelist, &nlocks, sizeof(nlocks));
-	if (err)
-		goto out_fail;
+	ceph_bq_encode(enc, &nlocks, sizeof(nlocks));
 
-	if (num_flock_locks > 0) {
-		err = ceph_pagelist_append(pagelist, &flocks[num_fcntl_locks],
-					   num_flock_locks * sizeof(*flocks));
-	}
-out_fail:
-	return err;
+	if (num_flock_locks > 0)
+		ceph_bq_encode(enc, &flocks[num_fcntl_locks],
+			       num_flock_locks * sizeof(*flocks));
+	return ceph_encode_error(enc);
 }

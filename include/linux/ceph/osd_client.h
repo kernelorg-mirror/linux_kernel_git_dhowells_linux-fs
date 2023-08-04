@@ -337,7 +337,8 @@ struct ceph_osd_linger_request {
 	rados_watcherrcb_t errcb;
 	void *data;
 
-	struct ceph_pagelist *request_pl;
+	struct bvecq *request_pl;
+	size_t request_len;
 	struct bvecq *notify_id_buf;
 	size_t notify_id_len;
 

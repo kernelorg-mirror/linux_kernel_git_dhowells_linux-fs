@@ -1398,9 +1398,8 @@ extern int ceph_encode_locks_to_buffer(struct inode *inode,
 				       struct ceph_filelock *flocks,
 				       int num_fcntl_locks,
 				       int num_flock_locks);
-extern int ceph_locks_to_pagelist(struct ceph_filelock *flocks,
-				  struct ceph_pagelist *pagelist,
-				  int num_fcntl_locks, int num_flock_locks);
+int ceph_locks_to_bvecq(struct ceph_filelock *flocks, struct ceph_encode *enc,
+			int num_fcntl_locks, int num_flock_locks);
 
 /* debugfs.c */
 extern void ceph_fs_debugfs_init(struct ceph_fs_client *client);

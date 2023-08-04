@@ -58,7 +58,7 @@
 struct ceph_reconnect_state {
 	struct ceph_mds_session *session;
 	int nr_caps, nr_realms;
-	struct ceph_pagelist *pagelist;
+	struct ceph_encode enc;
 	unsigned msg_version;
 	bool allow_multi;
 };
@@ -4703,9 +4703,8 @@ static void replay_unsafe_requests(struct ceph_mds_client *mdsc,
 
 static int send_reconnect_partial(struct ceph_reconnect_state *recon_state)
 {
+	struct ceph_encode pre_enc;
 	struct ceph_msg *reply;
-	struct ceph_pagelist *_pagelist;
-	struct page *page;
 	__le32 *addr;
 	int err = -ENOMEM;
 
@@ -4715,9 +4714,8 @@ static int send_reconnect_partial(struct ceph_reconnect_state *recon_state)
 	/* can't handle message that contains both caps and realm */
 	BUG_ON(!recon_state->nr_caps == !recon_state->nr_realms);
 
-	/* pre-allocate new pagelist */
-	_pagelist = ceph_pagelist_alloc(GFP_NOFS);
-	if (!_pagelist)
+	/* pre-allocate new databuf */
+	if (ceph_start_encode(&pre_enc, PAGE_SIZE, GFP_NOFS) < 0)
 		return -ENOMEM;
 
 	reply = ceph_msg_new2(CEPH_MSG_CLIENT_RECONNECT, 0, 1, GFP_NOFS, false);
@@ -4725,28 +4723,26 @@ static int send_reconnect_partial(struct ceph_reconnect_state *recon_state)
 		goto fail_msg;
 
 	/* placeholder for nr_caps */
-	err = ceph_pagelist_encode_32(_pagelist, 0);
-	if (err < 0)
-		goto fail;
+	ceph_bq_encode_32(&pre_enc, 0);
 
 	if (recon_state->nr_caps) {
 		/* currently encoding caps */
-		err = ceph_pagelist_encode_32(recon_state->pagelist, 0);
-		if (err)
-			goto fail;
+		ceph_bq_encode_32(&recon_state->enc, 0);
 	} else {
 		/* placeholder for nr_realms (currently encoding relams) */
-		err = ceph_pagelist_encode_32(_pagelist, 0);
-		if (err < 0)
-			goto fail;
+		ceph_bq_encode_32(&pre_enc, 0);
 	}
 
-	err = ceph_pagelist_encode_8(recon_state->pagelist, 1);
+	ceph_bq_encode_8(&recon_state->enc, 1);
+
+	err = ceph_encode_error(&recon_state->enc);
+	if (err)
+		goto fail;
+	err = ceph_encode_error(&pre_enc);
 	if (err)
 		goto fail;
 
-	page = list_first_entry(&recon_state->pagelist->head, struct page, lru);
-	addr = kmap_atomic(page);
+	addr = kmap_local_bvecq(recon_state->enc.dbuf, 0);
 	if (recon_state->nr_caps) {
 		/* currently encoding caps */
 		*addr = cpu_to_le32(recon_state->nr_caps);
@@ -4754,18 +4750,18 @@ static int send_reconnect_partial(struct ceph_reconnect_state *recon_state)
 		/* currently encoding relams */
 		*(addr + 1) = cpu_to_le32(recon_state->nr_realms);
 	}
-	kunmap_atomic(addr);
+	kunmap_local(addr);
 
 	reply->hdr.version = cpu_to_le16(5);
 	reply->hdr.compat_version = cpu_to_le16(4);
 
-	reply->hdr.data_len = cpu_to_le32(recon_state->pagelist->length);
-	ceph_msg_data_add_pagelist(reply, recon_state->pagelist);
+	reply->hdr.data_len = cpu_to_le32(recon_state->enc.len);
+	ceph_msg_data_add_bvecq(reply, recon_state->enc.dbuf, recon_state->enc.len);
 
 	ceph_con_send(&recon_state->session->s_con, reply);
-	ceph_pagelist_release(recon_state->pagelist);
+	ceph_end_encode(&recon_state->enc);
 
-	recon_state->pagelist = _pagelist;
+	recon_state->enc = pre_enc;
 	recon_state->nr_caps = 0;
 	recon_state->nr_realms = 0;
 	recon_state->msg_version = 5;
@@ -4773,7 +4769,7 @@ static int send_reconnect_partial(struct ceph_reconnect_state *recon_state)
 fail:
 	ceph_msg_put(reply);
 fail_msg:
-	ceph_pagelist_release(_pagelist);
+	ceph_end_encode(&pre_enc);
 	return err;
 }
 
@@ -4823,10 +4819,10 @@ static int reconnect_caps_cb(struct inode *inode, int mds, void *arg)
 	} rec;
 	struct ceph_inode_info *ci = ceph_inode(inode);
 	struct ceph_reconnect_state *recon_state = arg;
-	struct ceph_pagelist *pagelist = recon_state->pagelist;
 	struct dentry *dentry;
 	struct ceph_cap *cap;
 	struct ceph_path_info path_info = {0};
+	struct ceph_encode *enc = &recon_state->enc;;
 	int err;
 	u64 snap_follows;
 
@@ -4951,7 +4947,7 @@ encode_again:
 			struct_v = 2;
 		}
 		/*
-		 * number of encoded locks is stable, so copy to pagelist
+		 * number of encoded locks is stable, so copy to databuf
 		 */
 		struct_len = 2 * sizeof(u32) +
 			    (num_fcntl_locks + num_flock_locks) *
@@ -4965,41 +4961,40 @@ encode_again:
 
 		total_len += struct_len;
 
-		if (pagelist->length + total_len > RECONNECT_MAX_SIZE) {
+		if (enc->len + total_len > RECONNECT_MAX_SIZE) {
 			err = send_reconnect_partial(recon_state);
 			if (err)
 				goto out_freeflocks;
-			pagelist = recon_state->pagelist;
 		}
 
-		err = ceph_pagelist_reserve(pagelist, total_len);
+		err = ceph_bvecq_reserve(enc, total_len);
 		if (err)
 			goto out_freeflocks;
 
-		ceph_pagelist_encode_64(pagelist, ceph_ino(inode));
+		ceph_bq_encode_64(enc, ceph_ino(inode));
 		if (recon_state->msg_version >= 3) {
-			ceph_pagelist_encode_8(pagelist, struct_v);
-			ceph_pagelist_encode_8(pagelist, 1);
-			ceph_pagelist_encode_32(pagelist, struct_len);
+			ceph_bq_encode_8(enc, struct_v);
+			ceph_bq_encode_8(enc, 1);
+			ceph_bq_encode_32(enc, struct_len);
 		}
-		ceph_pagelist_encode_string(pagelist, (char *)path_info.path, path_info.pathlen);
-		ceph_pagelist_append(pagelist, &rec, sizeof(rec.v2));
-		ceph_locks_to_pagelist(flocks, pagelist,
-				       num_fcntl_locks, num_flock_locks);
+		ceph_bq_encode_string(enc, (char *)path_info.path, path_info.pathlen);
+		ceph_bq_encode(enc, &rec, sizeof(rec.v2));
+		ceph_locks_to_bvecq(flocks, enc,
+				    num_fcntl_locks, num_flock_locks);
 		if (struct_v >= 2)
-			ceph_pagelist_encode_64(pagelist, snap_follows);
+			ceph_bq_encode_64(enc, snap_follows);
 out_freeflocks:
 		kfree(flocks);
 	} else {
-		err = ceph_pagelist_reserve(pagelist,
-					    sizeof(u64) + sizeof(u32) +
-					    path_info.pathlen + sizeof(rec.v1));
+		err = ceph_bvecq_reserve(enc,
+					 sizeof(u64) + sizeof(u32) +
+					 path_info.pathlen + sizeof(rec.v1));
 		if (err)
 			goto out_err;
 
-		ceph_pagelist_encode_64(pagelist, ceph_ino(inode));
-		ceph_pagelist_encode_string(pagelist, (char *)path_info.path, path_info.pathlen);
-		ceph_pagelist_append(pagelist, &rec, sizeof(rec.v1));
+		ceph_bq_encode_64(enc, ceph_ino(inode));
+		ceph_bq_encode_string(enc, path_info.path, path_info.pathlen);
+		ceph_bq_encode(enc, &rec, sizeof(rec.v1));
 	}
 
 out_err:
@@ -5013,15 +5008,12 @@ static int encode_snap_realms(struct ceph_mds_client *mdsc,
 			      struct ceph_reconnect_state *recon_state)
 {
 	struct rb_node *p;
-	struct ceph_pagelist *pagelist = recon_state->pagelist;
 	struct ceph_client *cl = mdsc->fsc->client;
+	struct ceph_encode *enc = &recon_state->enc;
 	int err = 0;
 
-	if (recon_state->msg_version >= 4) {
-		err = ceph_pagelist_encode_32(pagelist, mdsc->num_snap_realms);
-		if (err < 0)
-			goto fail;
-	}
+	if (recon_state->msg_version >= 4)
+		ceph_bq_encode_32(enc, mdsc->num_snap_realms);
 
 	/*
 	 * snaprealms.  we provide mds with the ino, seq (version), and
@@ -5037,20 +5029,19 @@ static int encode_snap_realms(struct ceph_mds_client *mdsc,
 			size_t need = sizeof(u8) * 2 + sizeof(u32) +
 				      sizeof(sr_rec);
 
-			if (pagelist->length + need > RECONNECT_MAX_SIZE) {
+			if (enc->len + need > RECONNECT_MAX_SIZE) {
 				err = send_reconnect_partial(recon_state);
 				if (err)
 					goto fail;
-				pagelist = recon_state->pagelist;
 			}
 
-			err = ceph_pagelist_reserve(pagelist, need);
+			err = ceph_bvecq_reserve(enc, need);
 			if (err)
 				goto fail;
 
-			ceph_pagelist_encode_8(pagelist, 1);
-			ceph_pagelist_encode_8(pagelist, 1);
-			ceph_pagelist_encode_32(pagelist, sizeof(sr_rec));
+			ceph_bq_encode_8(enc, 1);
+			ceph_bq_encode_8(enc, 1);
+			ceph_bq_encode_32(enc, sizeof(sr_rec));
 		}
 
 		doutc(cl, " adding snap realm %llx seq %lld parent %llx\n",
@@ -5059,12 +5050,11 @@ static int encode_snap_realms(struct ceph_mds_client *mdsc,
 		sr_rec.seq = cpu_to_le64(realm->seq);
 		sr_rec.parent = cpu_to_le64(realm->parent_ino);
 
-		err = ceph_pagelist_append(pagelist, &sr_rec, sizeof(sr_rec));
-		if (err)
-			goto fail;
-
+		ceph_bq_encode(enc, &sr_rec, sizeof(sr_rec));
 		recon_state->nr_realms++;
 	}
+
+	err = ceph_encode_error(enc);
 fail:
 	return err;
 }
@@ -5093,9 +5083,9 @@ static int send_mds_reconnect(struct ceph_mds_client *mdsc,
 	};
 	LIST_HEAD(dispose);
 
-	recon_state.pagelist = ceph_pagelist_alloc(GFP_NOFS);
-	if (!recon_state.pagelist)
-		goto fail_nopagelist;
+	err = ceph_start_encode(&recon_state.enc, PAGE_SIZE, GFP_NOFS);
+	if (err < 0)
+		goto fail_nodatabuf;
 
 	reply = ceph_msg_new2(CEPH_MSG_CLIENT_RECONNECT, 0, 1, GFP_NOFS, false);
 	if (!reply)
@@ -5171,9 +5161,7 @@ static int send_mds_reconnect(struct ceph_mds_client *mdsc,
 	down_read(&mdsc->snap_rwsem);
 
 	/* placeholder for nr_caps */
-	err = ceph_pagelist_encode_32(recon_state.pagelist, 0);
-	if (err)
-		goto fail_clear_cap_reconnect;
+	ceph_bq_encode_32(&recon_state.enc, 0);
 
 	if (test_bit(CEPHFS_FEATURE_MULTI_RECONNECT, &session->s_features)) {
 		recon_state.msg_version = 3;
@@ -5196,7 +5184,7 @@ static int send_mds_reconnect(struct ceph_mds_client *mdsc,
 	/* check if all realms can be encoded into current message */
 	if (mdsc->num_snap_realms) {
 		size_t total_len =
-			recon_state.pagelist->length +
+			recon_state.enc.len +
 			mdsc->num_snap_realms *
 			sizeof(struct ceph_mds_snaprealm_reconnect);
 		if (recon_state.msg_version >= 4) {
@@ -5222,34 +5210,32 @@ static int send_mds_reconnect(struct ceph_mds_client *mdsc,
 
 	err = encode_snap_realms(mdsc, &recon_state);
 	if (err < 0)
+		goto fail_clear_cap_reconnect;
+
+	if (recon_state.msg_version >= 5)
+		ceph_bq_encode_8(&recon_state.enc, 0);
+
+	err = ceph_encode_error(&recon_state.enc);
+	if (err < 0)
 		goto fail;
 
-	if (recon_state.msg_version >= 5) {
-		err = ceph_pagelist_encode_8(recon_state.pagelist, 0);
-		if (err < 0)
-			goto fail;
-	}
-
 	if (recon_state.nr_caps || recon_state.nr_realms) {
-		struct page *page =
-			list_first_entry(&recon_state.pagelist->head,
-					struct page, lru);
-		__le32 *addr = kmap_atomic(page);
+		__le32 *addr = kmap_local_bvecq(recon_state.enc.dbuf, 0);
 		if (recon_state.nr_caps) {
 			WARN_ON(recon_state.nr_realms != mdsc->num_snap_realms);
 			*addr = cpu_to_le32(recon_state.nr_caps);
 		} else if (recon_state.msg_version >= 4) {
 			*(addr + 1) = cpu_to_le32(recon_state.nr_realms);
 		}
-		kunmap_atomic(addr);
+		kunmap_local(addr);
 	}
 
 	reply->hdr.version = cpu_to_le16(recon_state.msg_version);
 	if (recon_state.msg_version >= 4)
 		reply->hdr.compat_version = cpu_to_le16(4);
 
-	reply->hdr.data_len = cpu_to_le32(recon_state.pagelist->length);
-	ceph_msg_data_add_pagelist(reply, recon_state.pagelist);
+	reply->hdr.data_len = cpu_to_le32(recon_state.enc.len);
+	ceph_msg_data_add_bvecq(reply, recon_state.enc.dbuf, recon_state.enc.len);
 
 	ceph_con_send(&session->s_con, reply);
 
@@ -5260,7 +5246,7 @@ static int send_mds_reconnect(struct ceph_mds_client *mdsc,
 	mutex_unlock(&mdsc->mutex);
 
 	up_read(&mdsc->snap_rwsem);
-	ceph_pagelist_release(recon_state.pagelist);
+	ceph_end_encode(&recon_state.enc);
 	return 0;
 
 fail_clear_cap_reconnect:
@@ -5278,8 +5264,8 @@ fail:
 	session->s_state = old_state;
 	mutex_unlock(&session->s_mutex);
 fail_nomsg:
-	ceph_pagelist_release(recon_state.pagelist);
-fail_nopagelist:
+	ceph_end_encode(&recon_state.enc);
+fail_nodatabuf:
 	pr_err_client(cl, "error %d preparing reconnect for mds%d\n",
 		      err, mds);
 	return err;
@@ -5291,7 +5277,7 @@ fail_return:
 	 * unregistered sessions).  Skip the pr_err_client diagnostic
 	 * since these are not genuine reconnect build failures.
 	 */
-	ceph_pagelist_release(recon_state.pagelist);
+	ceph_end_encode(&recon_state.enc);
 	return err;
 }
 
