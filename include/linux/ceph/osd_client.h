@@ -116,6 +116,7 @@ enum ceph_osd_data_type {
 
 struct ceph_osd_data {
 	enum ceph_osd_data_type	type;
+	struct iov_iter		iter;
 	union {
 		struct {
 			struct bvecq	*bvecq;
@@ -139,7 +140,6 @@ struct ceph_osd_data {
 			struct ceph_bvec_iter	bvec_pos;
 			u32			num_bvecs;
 		};
-		struct iov_iter		iter;
 	};
 };
 
@@ -491,6 +491,9 @@ extern struct ceph_osd_data *osd_req_op_extent_osd_data(
 					struct ceph_osd_request *osd_req,
 					unsigned int which);
 
+void osd_req_op_extent_osd_bvecq(struct ceph_osd_request *req,
+				 unsigned int which,
+				 struct bvecq *dbuf, size_t len);
 extern void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
@@ -512,6 +515,9 @@ void osd_req_op_extent_osd_data_bvec_pos(struct ceph_osd_request *osd_req,
 void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
 				unsigned int which, struct iov_iter *iter);
 
+void osd_req_op_cls_request_bvecq(struct ceph_osd_request *req,
+				  unsigned int which,
+				  struct bvecq *dbuf, size_t len);
 extern void osd_req_op_cls_request_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
@@ -521,6 +527,9 @@ void osd_req_op_cls_request_data_bvecs(struct ceph_osd_request *osd_req,
 				       unsigned int which,
 				       struct bio_vec *bvecs, u32 num_bvecs,
 				       u32 bytes);
+void osd_req_op_cls_response_bvecq(struct ceph_osd_request *osd_req,
+				   unsigned int which,
+				   struct bvecq *dbuf, size_t len);
 extern void osd_req_op_cls_response_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,

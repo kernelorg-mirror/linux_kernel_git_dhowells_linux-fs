@@ -178,6 +178,18 @@ static void ceph_osd_iter_init(struct ceph_osd_data *osd_data,
 	osd_data->iter = *iter;
 }
 
+/*
+ * Consumes a ref on @dbuf.
+ */
+static void ceph_osd_bvecq_init(struct ceph_osd_data *osd_data,
+				struct bvecq *dbuf, size_t len)
+{
+	osd_data->type  = CEPH_OSD_DATA_TYPE_BVECQ;
+	osd_data->bvecq = dbuf;
+	osd_data->bvecq_len = len;
+	iov_iter_bvec_queue(&osd_data->iter, ITER_SOURCE, dbuf, 0, 0, len);
+}
+
 static struct ceph_osd_data *
 osd_req_op_raw_data_in(struct ceph_osd_request *osd_req, unsigned int which)
 {
@@ -206,6 +218,17 @@ void osd_req_op_raw_data_in_pages(struct ceph_osd_request *osd_req,
 				pages_from_pool, own_pages);
 }
 EXPORT_SYMBOL(osd_req_op_raw_data_in_pages);
+
+void osd_req_op_extent_osd_bvecq(struct ceph_osd_request *osd_req,
+				 unsigned int which,
+				 struct bvecq *bvecq, size_t len)
+{
+	struct ceph_osd_data *osd_data;
+
+	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
+	ceph_osd_bvecq_init(osd_data, bvecq, len);
+}
+EXPORT_SYMBOL(osd_req_op_extent_osd_bvecq);
 
 void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages,
@@ -287,6 +310,21 @@ static void osd_req_op_cls_request_info_pagelist(
 	ceph_osd_data_pagelist_init(osd_data, pagelist);
 }
 
+void osd_req_op_cls_request_bvecq(struct ceph_osd_request *osd_req,
+				  unsigned int which,
+				  struct bvecq *dbuf, size_t len)
+{
+	struct ceph_osd_data *osd_data;
+
+	BUG_ON(!len);
+
+	osd_data = osd_req_op_data(osd_req, which, cls, request_data);
+	ceph_osd_bvecq_init(osd_data, dbuf, len);
+	osd_req->r_ops[which].cls.indata_len += len;
+	osd_req->r_ops[which].indata_len += len;
+}
+EXPORT_SYMBOL(osd_req_op_cls_request_bvecq);
+
 void osd_req_op_cls_request_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages, u64 length,
 			u32 offset, bool pages_from_pool, bool own_pages)
@@ -318,6 +356,19 @@ void osd_req_op_cls_request_data_bvecs(struct ceph_osd_request *osd_req,
 	osd_req->r_ops[which].indata_len += bytes;
 }
 EXPORT_SYMBOL(osd_req_op_cls_request_data_bvecs);
+
+void osd_req_op_cls_response_bvecq(struct ceph_osd_request *osd_req,
+				   unsigned int which,
+				   struct bvecq *dbuf, size_t len)
+{
+	struct ceph_osd_data *osd_data;
+
+	BUG_ON(!len);
+
+	osd_data = osd_req_op_data(osd_req, which, cls, response_data);
+	ceph_osd_bvecq_init(osd_data, bvecq_get(dbuf), len);
+}
+EXPORT_SYMBOL(osd_req_op_cls_response_bvecq);
 
 void osd_req_op_cls_response_data_pages(struct ceph_osd_request *osd_req,
 			unsigned int which, struct page **pages, u64 length,
