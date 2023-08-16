@@ -95,100 +95,13 @@ static __le32 ceph_flags_sys2wire(struct ceph_mds_client *mdsc, u32 flags)
  * need to wait for MDS acknowledgement.
  */
 
-/*
- * How many pages to get in one call to iov_iter_get_pages().  This
- * determines the size of the on-stack array used as a buffer.
- */
-#define ITER_GET_BVECS_PAGES	64
-
-static ssize_t __iter_get_bvecs(struct iov_iter *iter, size_t maxsize,
-				struct bio_vec *bvecs)
+static void ceph_dirty_pages(struct bvecq *dbuf)
 {
-	size_t size = 0;
-	int bvec_idx = 0;
-
-	if (maxsize > iov_iter_count(iter))
-		maxsize = iov_iter_count(iter);
-
-	while (size < maxsize) {
-		struct page *pages[ITER_GET_BVECS_PAGES];
-		ssize_t bytes;
-		size_t start;
-		int idx = 0;
-
-		bytes = iov_iter_get_pages2(iter, pages, maxsize - size,
-					   ITER_GET_BVECS_PAGES, &start);
-		if (bytes < 0)
-			return size ?: bytes;
-
-		size += bytes;
-
-		for ( ; bytes; idx++, bvec_idx++) {
-			int len = min_t(int, bytes, PAGE_SIZE - start);
-
-			bvec_set_page(&bvecs[bvec_idx], pages[idx], len, start);
-			bytes -= len;
-			start = 0;
-		}
+	for (; dbuf; dbuf = dbuf->next) {
+		for (int i = 0; i < dbuf->nr_slots; i++)
+			if (dbuf->bv[i].bv_page)
+				set_page_dirty_lock(dbuf->bv[i].bv_page);
 	}
-
-	return size;
-}
-
-/*
- * iov_iter_get_pages() only considers one iov_iter segment, no matter
- * what maxsize or maxpages are given.  For ITER_BVEC that is a single
- * page.
- *
- * Attempt to get up to @maxsize bytes worth of pages from @iter.
- * Return the number of bytes in the created bio_vec array, or an error.
- */
-static ssize_t iter_get_bvecs_alloc(struct iov_iter *iter, size_t maxsize,
-				    struct bio_vec **bvecs, int *num_bvecs)
-{
-	struct bio_vec *bv;
-	size_t orig_count = iov_iter_count(iter);
-	ssize_t bytes;
-	int npages;
-
-	iov_iter_truncate(iter, maxsize);
-	npages = iov_iter_npages(iter, INT_MAX);
-	iov_iter_reexpand(iter, orig_count);
-
-	/*
-	 * __iter_get_bvecs() may populate only part of the array -- zero it
-	 * out.
-	 */
-	bv = kvmalloc_objs(*bv, npages, GFP_KERNEL | __GFP_ZERO);
-	if (!bv)
-		return -ENOMEM;
-
-	bytes = __iter_get_bvecs(iter, maxsize, bv);
-	if (bytes < 0) {
-		/*
-		 * No pages were pinned -- just free the array.
-		 */
-		kvfree(bv);
-		return bytes;
-	}
-
-	*bvecs = bv;
-	*num_bvecs = npages;
-	return bytes;
-}
-
-static void put_bvecs(struct bio_vec *bvecs, int num_bvecs, bool should_dirty)
-{
-	int i;
-
-	for (i = 0; i < num_bvecs; i++) {
-		if (bvecs[i].bv_page) {
-			if (should_dirty)
-				set_page_dirty_lock(bvecs[i].bv_page);
-			put_page(bvecs[i].bv_page);
-		}
-	}
-	kvfree(bvecs);
 }
 
 /*
@@ -1366,14 +1279,11 @@ static void ceph_aio_complete_req(struct ceph_osd_request *req)
 	struct ceph_osd_data *osd_data = osd_req_op_extent_osd_data(req, 0);
 	struct ceph_osd_req_op *op = &req->r_ops[0];
 	struct ceph_client_metric *metric = &ceph_sb_to_mdsc(inode->i_sb)->metric;
-	unsigned int len = osd_data->bvec_pos.iter.bi_size;
+	size_t len = osd_data->iter.count;
 	bool sparse = (op->op == CEPH_OSD_OP_SPARSE_READ);
 	struct ceph_client *cl = ceph_inode_to_client(inode);
 
-	BUG_ON(osd_data->type != CEPH_OSD_DATA_TYPE_BVECS);
-	BUG_ON(!osd_data->num_bvecs);
-
-	doutc(cl, "req %p inode %p %llx.%llx, rc %d bytes %u\n", req,
+	doutc(cl, "req %p inode %p %llx.%llx, rc %d bytes %zu\n", req,
 	      inode, ceph_vinop(inode), rc, len);
 
 	if (rc == -EOLDSNAPC) {
@@ -1395,7 +1305,6 @@ static void ceph_aio_complete_req(struct ceph_osd_request *req)
 		if (rc == -ENOENT)
 			rc = 0;
 		if (rc >= 0 && len > rc) {
-			struct iov_iter i;
 			int zlen = len - rc;
 
 			/*
@@ -1412,10 +1321,8 @@ static void ceph_aio_complete_req(struct ceph_osd_request *req)
 				aio_req->total_len = rc + zlen;
 			}
 
-			iov_iter_bvec(&i, ITER_DEST, osd_data->bvec_pos.bvecs,
-				      osd_data->num_bvecs, len);
-			iov_iter_advance(&i, rc);
-			iov_iter_zero(zlen, &i);
+			iov_iter_advance(&osd_data->iter, rc);
+			iov_iter_zero(zlen, &osd_data->iter);
 		}
 	}
 
@@ -1440,8 +1347,8 @@ static void ceph_aio_complete_req(struct ceph_osd_request *req)
 		}
 	}
 
-	put_bvecs(osd_data->bvec_pos.bvecs, osd_data->num_bvecs,
-		  aio_req->should_dirty);
+	if (aio_req->should_dirty)
+		ceph_dirty_pages(osd_data->bvecq);
 	ceph_osdc_put_request(req);
 
 	if (rc < 0)
@@ -1530,9 +1437,7 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 	struct ceph_client_metric *metric = &fsc->mdsc->metric;
 	struct ceph_vino vino;
 	struct ceph_osd_request *req;
-	struct bio_vec *bvecs;
 	struct ceph_aio_request *aio_req = NULL;
-	int num_pages = 0;
 	int flags;
 	int ret = 0;
 	struct timespec64 mtime = current_time(inode);
@@ -1568,8 +1473,9 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 
 	while (iov_iter_count(iter) > 0) {
 		u64 size = iov_iter_count(iter);
-		ssize_t len;
 		struct ceph_osd_req_op *op;
+		struct bvecq *dbuf = NULL;
+		ssize_t len;
 		int readop = sparse ? CEPH_OSD_OP_SPARSE_READ : CEPH_OSD_OP_READ;
 		int extent_cnt;
 
@@ -1602,8 +1508,9 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 			}
 		}
 
-		len = iter_get_bvecs_alloc(iter, size, &bvecs, &num_pages);
+		len = netfs_extract_iter(iter, size, INT_MAX, &dbuf, 0, GFP_KERNEL);
 		if (len < 0) {
+			bvecq_put(dbuf);
 			ceph_osdc_put_request(req);
 			ret = len;
 			break;
@@ -1611,7 +1518,7 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 		if (len != size)
 			osd_req_op_extent_update(req, 0, len);
 
-		osd_req_op_extent_osd_data_bvecs(req, 0, bvecs, num_pages, len);
+		osd_req_op_extent_osd_bvecq(req, 0, dbuf, len);
 
 		/*
 		 * To simplify error handling, allow AIO when IO within i_size
@@ -1687,20 +1594,20 @@ ceph_direct_read_write(struct kiocb *iocb, struct iov_iter *iter,
 				ret = 0;
 
 			if (ret >= 0 && ret < len && pos + ret < size) {
-				struct iov_iter i;
+				struct iov_iter iter;
 				int zlen = min_t(size_t, len - ret,
 						 size - pos - ret);
 
-				iov_iter_bvec(&i, ITER_DEST, bvecs, num_pages, len);
-				iov_iter_advance(&i, ret);
-				iov_iter_zero(zlen, &i);
+				iov_iter_bvec_queue(&iter, ITER_DEST,
+						    dbuf, 0, 0, ret + zlen);
+				iov_iter_advance(&iter, ret);
+				iov_iter_zero(zlen, &iter);
 				ret += zlen;
 			}
 			if (ret >= 0)
 				len = ret;
 		}
 
-		put_bvecs(bvecs, num_pages, should_dirty);
 		ceph_osdc_put_request(req);
 		if (ret < 0)
 			break;
