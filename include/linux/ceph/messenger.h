@@ -259,6 +259,7 @@ struct ceph_msg_data_cursor {
 		};
 		struct {
 			struct iov_iter		iov_iter;
+			struct iov_iter		crc_iter;
 			unsigned int		lastlen;
 		};
 	};

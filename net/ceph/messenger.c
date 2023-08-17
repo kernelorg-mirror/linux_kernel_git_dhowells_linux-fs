@@ -976,6 +976,7 @@ static void ceph_msg_data_iter_cursor_init(struct ceph_msg_data_cursor *cursor,
 	struct ceph_msg_data *data = cursor->data;
 
 	cursor->iov_iter = data->iter;
+	cursor->crc_iter = data->iter;
 	cursor->lastlen = 0;
 	iov_iter_truncate(&cursor->iov_iter, length);
 	cursor->resid = iov_iter_count(&cursor->iov_iter);
