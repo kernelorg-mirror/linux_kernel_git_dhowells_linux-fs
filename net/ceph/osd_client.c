@@ -262,19 +262,6 @@ void osd_req_op_cls_request_bvecq(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_cls_request_bvecq);
 
-static void osd_req_op_cls_request_data_pages(struct ceph_osd_request *osd_req,
-			unsigned int which, struct page **pages, u64 length,
-			u32 offset, bool pages_from_pool, bool own_pages)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_data(osd_req, which, cls, request_data);
-	ceph_osd_data_pages_init(osd_data, pages, length, offset,
-				pages_from_pool, own_pages);
-	osd_req->r_ops[which].cls.indata_len += length;
-	osd_req->r_ops[which].indata_len += length;
-}
-
 void osd_req_op_cls_response_bvecq(struct ceph_osd_request *osd_req,
 				   unsigned int which,
 				   struct bvecq *dbuf, size_t len)
@@ -5085,14 +5072,11 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 		   struct ceph_object_locator *oloc,
 		   const char *class, const char *method,
 		   unsigned int flags,
-		   struct page *req_page, size_t req_len,
+		   struct bvecq *request, size_t req_len,
 		   struct bvecq *response, size_t *resp_len)
 {
 	struct ceph_osd_request *req;
 	int ret;
-
-	if (req_len > PAGE_SIZE)
-		return -E2BIG;
 
 	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_NOIO);
 	if (!req)
@@ -5106,9 +5090,8 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 	if (ret)
 		goto out_put_req;
 
-	if (req_page)
-		osd_req_op_cls_request_data_pages(req, 0, &req_page, req_len,
-						  0, false, false);
+	if (request)
+		osd_req_op_cls_request_bvecq(req, 0, request, req_len);
 	if (response)
 		osd_req_op_cls_response_bvecq(req, 0, response, *resp_len);
 

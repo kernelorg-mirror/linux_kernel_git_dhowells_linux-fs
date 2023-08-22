@@ -4600,9 +4600,9 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 			     size_t inbound_size)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
-	struct bvecq *reply;
-	struct page *req_page = NULL;
+	struct bvecq *request = NULL, *reply;
 	size_t reply_len = inbound_size;
+	void *p;
 	int ret;
 
 	printk("%u: %s\n", current->pid, __func__);
@@ -4618,29 +4618,30 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 		if (outbound_size > PAGE_SIZE)
 			return -E2BIG;
 
-		req_page = alloc_page(GFP_KERNEL);
-		if (!req_page)
+		request = ceph_alloc_frag(outbound_size, GFP_KERNEL);
+		if (!request)
 			return -ENOMEM;
 
-		memcpy(page_address(req_page), outbound, outbound_size);
+		p = ceph_map_enc_start(request);
+		memcpy(p, outbound, outbound_size);
+		ceph_map_enc_stop(request, p);
 	}
 
 	reply = bvecq_alloc_buffer(inbound_size, GFP_KERNEL, false);
 	if (!reply) {
-		if (req_page)
-			__free_page(req_page);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	ret = ceph_osdc_call(osdc, oid, oloc, RBD_DRV_NAME, method_name,
-			     CEPH_OSD_FLAG_READ, req_page, outbound_size,
+			     CEPH_OSD_FLAG_READ, request, outbound_size,
 			     reply, &reply_len);
 	if (!ret)
 		ret = bvecq_copy_to_buf(reply, reply_len, 0, inbound, reply_len);
 
-	if (req_page)
-		__free_page(req_page);
 	bvecq_put(reply);
+out:
+	bvecq_put(request);
 	return ret;
 }
 
@@ -5555,7 +5556,7 @@ e_inval:
 }
 
 static int __get_parent_info(struct rbd_device *rbd_dev,
-			     struct page *req_page,
+			     struct bvecq *request,
 			     struct bvecq *reply,
 			     struct parent_image_info *pii)
 {
@@ -5566,7 +5567,7 @@ static int __get_parent_info(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "parent_get", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), reply, &reply_len);
+			     request, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret == -EOPNOTSUPP ? 1 : ret;
 
@@ -5579,7 +5580,7 @@ static int __get_parent_info(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "parent_overlap_get", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), reply, &reply_len);
+			     request, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret;
 
@@ -5603,7 +5604,7 @@ e_inval:
  * The caller is responsible for @pii.
  */
 static int __get_parent_info_legacy(struct rbd_device *rbd_dev,
-				    struct page *req_page,
+				    struct bvecq *request,
 				    struct bvecq *reply,
 				    struct parent_image_info *pii)
 {
@@ -5614,7 +5615,7 @@ static int __get_parent_info_legacy(struct rbd_device *rbd_dev,
 
 	ret = ceph_osdc_call(osdc, &rbd_dev->header_oid, &rbd_dev->header_oloc,
 			     "rbd", "get_parent", CEPH_OSD_FLAG_READ,
-			     req_page, sizeof(u64), reply, &reply_len);
+			     request, sizeof(u64), reply, &reply_len);
 	if (ret)
 		return ret;
 
@@ -5645,29 +5646,28 @@ e_inval:
 static int rbd_dev_v2_parent_info(struct rbd_device *rbd_dev,
 				  struct parent_image_info *pii)
 {
-	struct bvecq *reply;
-	struct page *req_page;
+	struct bvecq *request, *reply;
 	void *p;
 	int ret = -ENOMEM;
 
-	req_page = alloc_page(GFP_KERNEL);
-	if (!req_page)
+	request = ceph_alloc_frag(sizeof(__le64), GFP_KERNEL);
+	if (!request)
 		goto out;
 
 	reply = bvecq_alloc_buffer(PAGE_SIZE, GFP_KERNEL, false);
 	if (!reply)
 		goto out_free;
 
-	p = kmap_local_page(req_page);
+	p = ceph_map_enc_start(request);
 	ceph_encode_64(&p, rbd_dev->spec->snap_id);
-	kunmap_local(p);
-	ret = __get_parent_info(rbd_dev, req_page, reply, pii);
+	ceph_map_enc_stop(request, p);
+	ret = __get_parent_info(rbd_dev, request, reply, pii);
 	if (ret > 0)
-		ret = __get_parent_info_legacy(rbd_dev, req_page, reply, pii);
+		ret = __get_parent_info_legacy(rbd_dev, request, reply, pii);
 
 	bvecq_put(reply);
 out_free:
-	__free_page(req_page);
+	bvecq_put(request);
 out:
 	return ret;
 }
