@@ -1973,19 +1973,20 @@ static int rbd_cls_object_map_update(struct ceph_osd_request *req,
 				     int which, u64 objno, u8 new_state,
 				     const u8 *current_state)
 {
-	struct ceph_encode enc;
-	void *p, *start;
+	struct bvecq *request;
+	size_t req_len;
+	void *p;
 	int ret;
 
 	ret = osd_req_op_cls_init(req, which, "rbd", "object_map_update");
 	if (ret)
 		return ret;
 
-	ret = ceph_start_encode(&enc, PAGE_SIZE, GFP_NOIO);
-	if (ret < 0)
-		return ret;
+	request = ceph_alloc_frag(8 * 2 + 3 * 1, GFP_NOIO);
+	if (!request)
+		return -ENOMEM;
 
-	p = start = kmap_local_bvecq(enc.dbuf, 0);
+	p = ceph_map_enc_start(request);
 	ceph_encode_64(&p, objno);
 	ceph_encode_64(&p, objno + 1);
 	ceph_encode_8(&p, new_state);
@@ -1995,10 +1996,9 @@ static int rbd_cls_object_map_update(struct ceph_osd_request *req,
 	} else {
 		ceph_encode_8(&p, 0);
 	}
-	ceph_enc_added_data(&enc, p - start);
-	kunmap_local(p);
+	req_len = ceph_map_enc_stop(request, p);
 
-	osd_req_op_cls_request_bvecq(req, which, enc.dbuf, enc.len);
+	osd_req_op_cls_request_bvecq(req, which, request, req_len);
 	return 0;
 }
 
@@ -2111,8 +2111,8 @@ static int rbd_obj_calc_img_extents(struct rbd_obj_request *obj_req,
 
 static int rbd_osd_setup_stat(struct ceph_osd_request *osd_req, int which)
 {
-	struct bvecq *dbuf;
-	size_t dlen  = 8 + sizeof(struct ceph_timespec);
+	struct bvecq *request;
+	size_t req_len  = 8 + sizeof(struct ceph_timespec);
 
 	/*
 	 * The response data for a STAT call consists of:
@@ -2122,12 +2122,12 @@ static int rbd_osd_setup_stat(struct ceph_osd_request *osd_req, int which)
 	 *         le32 tv_nsec;
 	 *     } mtime;
 	 */
-	dbuf = bvecq_alloc_buffer(dlen, GFP_NOIO, false);
-	if (!dbuf)
+	request = ceph_alloc_frag(req_len, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
 	osd_req_op_init(osd_req, which, CEPH_OSD_OP_STAT, 0);
-	osd_req_op_raw_data_in_bvecq(osd_req, which, dbuf, dlen);
+	osd_req_op_raw_data_in_bvecq(osd_req, which, request, req_len);
 	return 0;
 }
 
@@ -4749,13 +4749,13 @@ static void rbd_free_disk(struct rbd_device *rbd_dev)
 static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 			     struct ceph_object_id *oid,
 			     struct ceph_object_locator *oloc,
-			     struct bvecq *dbuf, int len)
+			     struct bvecq *reply, int reply_len)
 {
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
 	struct ceph_osd_request *req;
 	int ret;
 
-	printk("%u: rbd_obj_read_sync %d\n", current->pid, len);
+	printk("%u: rbd_obj_read_sync %d\n", current->pid, reply_len);
 
 	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_KERNEL);
 	if (!req)
@@ -4765,8 +4765,8 @@ static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 	ceph_oloc_copy(&req->r_base_oloc, oloc);
 	req->r_flags = CEPH_OSD_FLAG_READ;
 
-	osd_req_op_extent_init(req, 0, CEPH_OSD_OP_READ, 0, len, 0, 0);
-	osd_req_op_extent_osd_bvecq(req, 0, dbuf, len);
+	osd_req_op_extent_init(req, 0, CEPH_OSD_OP_READ, 0, reply_len, 0, 0);
+	osd_req_op_extent_osd_bvecq(req, 0, reply, reply_len);
 
 	ret = ceph_osdc_alloc_messages(req, GFP_KERNEL);
 	if (ret)
@@ -4789,16 +4789,17 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 				  bool first_time)
 {
 	struct rbd_image_header_ondisk *ondisk;
-	struct ceph_encode enc;
+	struct bvecq *reply = NULL;
+	size_t reply_size = PAGE_SIZE;
 	u32 snap_count = 0;
 	u64 names_size = 0;
 	u32 want_count;
 	int ret;
 
-	ret = ceph_start_encode(&enc, sizeof(*ondisk), GFP_KERNEL);
-	if (ret < 0)
+	reply = bvecq_alloc_buffer(reply_size, GFP_KERNEL, false);
+	if (!reply)
 		return -ENOMEM;
-	ondisk = kmap_local_bvecq(enc.dbuf, 0);
+	ondisk = kmap_local_bvecq(reply, 0);
 
 	/*
 	 * The complete header will include an array of its 64-bit
@@ -4815,12 +4816,13 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 		size += names_size;
 
 		ret = -ENOMEM;
-		if (size > enc.capacity &&
-		    ceph_bvecq_reserve(&enc, size - enc.capacity) < 0)
+		if (size > reply_size &&
+		    bvecq_expand_buffer(&reply, &reply_size, size,
+					GFP_KERNEL, false) < 0)
 			goto out;
 
 		ret = rbd_obj_read_sync(rbd_dev, &rbd_dev->header_oid,
-					&rbd_dev->header_oloc, enc.dbuf, size);
+					&rbd_dev->header_oloc, reply, reply_size);
 		if (ret < 0)
 			goto out;
 		if ((size_t)ret < size) {
@@ -4844,7 +4846,7 @@ static int rbd_dev_v1_header_info(struct rbd_device *rbd_dev,
 	ret = rbd_header_from_disk(header, ondisk, first_time);
 out:
 	kunmap_local(ondisk);
-	ceph_end_encode(&enc);
+	bvecq_put(reply);
 	return ret;
 }
 

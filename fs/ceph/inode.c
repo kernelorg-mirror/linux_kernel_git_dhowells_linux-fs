@@ -162,7 +162,7 @@ void ceph_as_ctx_to_req(struct ceph_mds_request *req,
 		req->r_dbuf	= as_ctx->enc.dbuf;
 		req->r_dbuf_len	= as_ctx->enc.len;
 		as_ctx->enc.dbuf = NULL;
-		as_ctx->enc.p = NULL;
+		as_ctx->enc.bq = NULL;
 	}
 	ceph_fscrypt_as_ctx_to_req(req, as_ctx);
 }

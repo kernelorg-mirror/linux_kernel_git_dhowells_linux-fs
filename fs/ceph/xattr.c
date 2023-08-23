@@ -1154,7 +1154,7 @@ static int ceph_sync_setxattr(struct inode *inode, const char *name,
 		req->r_dbuf	= enc.dbuf;
 		req->r_dbuf_len	= enc.len;
 		enc.dbuf = NULL;
-		enc.p = NULL;
+		enc.bq = NULL;
 	}
 
 	req->r_inode = inode;
