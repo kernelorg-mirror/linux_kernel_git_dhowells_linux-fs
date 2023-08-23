@@ -236,14 +236,15 @@ void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_iter);
 
-static void osd_req_op_cls_request_info_pagelist(
-			struct ceph_osd_request *osd_req,
-			unsigned int which, struct ceph_pagelist *pagelist)
+static void osd_req_op_cls_request_info_bvecq(struct ceph_osd_request *osd_req,
+					      unsigned int which,
+					      struct bvecq *bvecq,
+					      size_t len)
 {
 	struct ceph_osd_data *osd_data;
 
 	osd_data = osd_req_op_data(osd_req, which, cls, request_info);
-	ceph_osd_data_pagelist_init(osd_data, pagelist);
+	ceph_osd_bvecq_init(osd_data, bvecq, len);
 }
 
 void osd_req_op_cls_request_bvecq(struct ceph_osd_request *osd_req,
@@ -756,42 +757,31 @@ int osd_req_op_cls_init(struct ceph_osd_request *osd_req, unsigned int which,
 			const char *class, const char *method)
 {
 	struct ceph_osd_req_op *op;
-	struct ceph_pagelist *pagelist;
-	size_t payload_len = 0;
-	size_t size;
-	int ret;
+	struct bvecq *dbuf;
+	size_t csize = strlen(class), msize = strlen(method), dlen;
+	void *p;
+
+	BUG_ON(csize > (size_t) U8_MAX);
+	BUG_ON(msize > (size_t) U8_MAX);
 
 	op = osd_req_op_init(osd_req, which, CEPH_OSD_OP_CALL, 0);
+	op->cls.class_name = class;
+	op->cls.class_len  = csize;
+	op->cls.method_name = method;
+	op->cls.method_len  = msize;
 
-	pagelist = ceph_pagelist_alloc(GFP_NOFS);
-	if (!pagelist)
+	dbuf = ceph_alloc_frag(csize + msize, GFP_NOFS);
+	if (!dbuf)
 		return -ENOMEM;
 
-	op->cls.class_name = class;
-	size = strlen(class);
-	BUG_ON(size > (size_t) U8_MAX);
-	op->cls.class_len = size;
-	ret = ceph_pagelist_append(pagelist, class, size);
-	if (ret)
-		goto err_pagelist_free;
-	payload_len += size;
-
-	op->cls.method_name = method;
-	size = strlen(method);
-	BUG_ON(size > (size_t) U8_MAX);
-	op->cls.method_len = size;
-	ret = ceph_pagelist_append(pagelist, method, size);
-	if (ret)
-		goto err_pagelist_free;
-	payload_len += size;
-
-	osd_req_op_cls_request_info_pagelist(osd_req, which, pagelist);
-	op->indata_len = payload_len;
+	p = ceph_map_enc_start(dbuf);
+	ceph_encode_copy(&p, class, csize);
+	ceph_encode_copy(&p, method, msize);
+	dlen = ceph_map_enc_stop(dbuf, p);
+	
+	osd_req_op_cls_request_info_bvecq(osd_req, which, dbuf, dlen);
+	op->indata_len = dlen;
 	return 0;
-
-err_pagelist_free:
-	ceph_pagelist_release(pagelist);
-	return ret;
 }
 EXPORT_SYMBOL(osd_req_op_cls_init);
 
