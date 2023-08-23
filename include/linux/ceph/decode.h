@@ -292,10 +292,8 @@ static inline void ceph_encode_filepath(void **p, void *end,
 	*p += len;
 }
 
-static inline void ceph_encode_string(void **p, void *end,
-				      const char *s, u32 len)
+static inline void ceph_encode_string(void **p, const char *s, u32 len)
 {
-	BUG_ON(*p + sizeof(len) + len > end);
 	ceph_encode_32(p, len);
 	if (len)
 		memcpy(*p, s, len);

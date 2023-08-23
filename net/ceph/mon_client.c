@@ -369,7 +369,8 @@ static void __send_subscribe(struct ceph_mon_client *monc)
 		dout("%s %s start %llu flags 0x%x\n", __func__, buf,
 		     le64_to_cpu(monc->subs[i].item.start),
 		     monc->subs[i].item.flags);
-		ceph_encode_string(&p, end, buf, len);
+		BUG_ON(p + sizeof(__le32) + len > end);
+		ceph_encode_string(&p, buf, len);
 		memcpy(p, &monc->subs[i].item, sizeof(monc->subs[i].item));
 		p += sizeof(monc->subs[i].item);
 	}
@@ -856,13 +857,14 @@ __ceph_monc_get_version(struct ceph_mon_client *monc, const char *what,
 			ceph_monc_callback_t cb, u64 private_data)
 {
 	struct ceph_mon_generic_request *req;
+	size_t wsize = strlen(what);
 
 	req = alloc_generic_request(monc, GFP_NOIO);
 	if (!req)
 		goto err_put_req;
 
 	req->request = ceph_msg_new(CEPH_MSG_MON_GET_VERSION,
-				    sizeof(u64) + sizeof(u32) + strlen(what),
+				    sizeof(u64) + sizeof(u32) + wsize,
 				    GFP_NOIO, true);
 	if (!req->request)
 		goto err_put_req;
@@ -875,6 +877,8 @@ __ceph_monc_get_version(struct ceph_mon_client *monc, const char *what,
 	req->complete_cb = cb;
 	req->private_data = private_data;
 
+	BUG_ON(sizeof(__le64) + sizeof(__le32) + wsize > req->request->front_alloc_len);
+
 	mutex_lock(&monc->mutex);
 	register_generic_request(req);
 	{
@@ -882,7 +886,7 @@ __ceph_monc_get_version(struct ceph_mon_client *monc, const char *what,
 		void *const end = p + req->request->front_alloc_len;
 
 		ceph_encode_64(&p, req->tid); /* handle */
-		ceph_encode_string(&p, end, what, strlen(what));
+		ceph_encode_string(&p, what, wsize);
 		WARN_ON(p != end);
 	}
 	send_generic_request(monc, req);

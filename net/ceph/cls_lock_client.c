@@ -28,14 +28,14 @@ int ceph_cls_lock(struct ceph_osd_client *osdc,
 		  char *lock_name, u8 type, char *cookie,
 		  char *tag, char *desc, u8 flags)
 {
-	int lock_op_buf_size;
-	int name_len = strlen(lock_name);
-	int cookie_len = strlen(cookie);
-	int tag_len = strlen(tag);
-	int desc_len = strlen(desc);
-	void *p, *end;
-	struct bvecq *lock_op_req;
+	struct bvecq *request;
 	struct timespec64 mtime;
+	size_t lock_op_buf_size;
+	size_t name_len = strlen(lock_name);
+	size_t cookie_len = strlen(cookie);
+	size_t tag_len = strlen(tag);
+	size_t desc_len = strlen(desc);
+	void *p;
 	int ret;
 
 	lock_op_buf_size = name_len + sizeof(__le32) +
@@ -49,36 +49,35 @@ int ceph_cls_lock(struct ceph_osd_client *osdc,
 	if (lock_op_buf_size > PAGE_SIZE)
 		return -E2BIG;
 
-	lock_op_req = ceph_alloc_frag(lock_op_buf_size, GFP_NOIO);
-	if (!lock_op_req)
+	request = ceph_alloc_frag(lock_op_buf_size, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
-	p = ceph_map_enc_start(lock_op_req);
-	end = p + lock_op_buf_size;
+	p = ceph_map_enc_start(request);
 
 	/* encode cls_lock_lock_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    lock_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
+	ceph_encode_string(&p, lock_name, name_len);
 	ceph_encode_8(&p, type);
-	ceph_encode_string(&p, end, cookie, cookie_len);
-	ceph_encode_string(&p, end, tag, tag_len);
-	ceph_encode_string(&p, end, desc, desc_len);
+	ceph_encode_string(&p, cookie, cookie_len);
+	ceph_encode_string(&p, tag, tag_len);
+	ceph_encode_string(&p, desc, desc_len);
 	/* only support infinite duration */
 	memset(&mtime, 0, sizeof(mtime));
 	ceph_encode_timespec64(p, &mtime);
 	p += sizeof(struct ceph_timespec);
 	ceph_encode_8(&p, flags);
-	ceph_map_enc_stop(lock_op_req, p);
+	ceph_map_enc_stop(request, p);
 
 	dout("%s lock_name %s type %d cookie %s tag %s desc %s flags 0x%x\n",
 	     __func__, lock_name, type, cookie, tag, desc, flags);
 	ret = ceph_osdc_call(osdc, oid, oloc, "lock", "lock",
-			     CEPH_OSD_FLAG_WRITE, lock_op_req,
-			     lock_op_buf_size, NULL, NULL);
+			     CEPH_OSD_FLAG_WRITE, request, lock_op_buf_size,
+			     NULL, NULL);
 
 	dout("%s: status %d\n", __func__, ret);
-	bvecq_put(lock_op_req);
+	bvecq_put(request);
 	return ret;
 }
 EXPORT_SYMBOL(ceph_cls_lock);
@@ -96,11 +95,11 @@ int ceph_cls_unlock(struct ceph_osd_client *osdc,
 		    struct ceph_object_locator *oloc,
 		    char *lock_name, char *cookie)
 {
-	int unlock_op_buf_size;
-	int name_len = strlen(lock_name);
-	int cookie_len = strlen(cookie);
-	void *p, *end;
-	struct bvecq *unlock_op_req;
+	struct bvecq *request;
+	size_t unlock_op_buf_size;
+	size_t name_len = strlen(lock_name);
+	size_t cookie_len = strlen(cookie);
+	void *p;
 	int ret;
 
 	unlock_op_buf_size = name_len + sizeof(__le32) +
@@ -109,27 +108,26 @@ int ceph_cls_unlock(struct ceph_osd_client *osdc,
 	if (unlock_op_buf_size > PAGE_SIZE)
 		return -E2BIG;
 
-	unlock_op_req = ceph_alloc_frag(unlock_op_buf_size, GFP_NOIO);
-	if (!unlock_op_req)
+	request = ceph_alloc_frag(unlock_op_buf_size, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
-	p = ceph_map_enc_start(unlock_op_req);
-	end = p + unlock_op_buf_size;
+	p = ceph_map_enc_start(request);
 
 	/* encode cls_lock_unlock_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    unlock_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
-	ceph_encode_string(&p, end, cookie, cookie_len);
-	ceph_map_enc_stop(unlock_op_req, p);
+	ceph_encode_string(&p, lock_name, name_len);
+	ceph_encode_string(&p, cookie, cookie_len);
+	ceph_map_enc_stop(request, p);
 
 	dout("%s lock_name %s cookie %s\n", __func__, lock_name, cookie);
 	ret = ceph_osdc_call(osdc, oid, oloc, "lock", "unlock",
-			     CEPH_OSD_FLAG_WRITE, unlock_op_req,
+			     CEPH_OSD_FLAG_WRITE, request,
 			     unlock_op_buf_size, NULL, NULL);
 
 	dout("%s: status %d\n", __func__, ret);
-	bvecq_put(unlock_op_req);
+	bvecq_put(request);
 	return ret;
 }
 EXPORT_SYMBOL(ceph_cls_unlock);
@@ -149,11 +147,11 @@ int ceph_cls_break_lock(struct ceph_osd_client *osdc,
 			char *lock_name, char *cookie,
 			struct ceph_entity_name *locker)
 {
-	int break_op_buf_size;
-	int name_len = strlen(lock_name);
-	int cookie_len = strlen(cookie);
-	struct bvecq *break_op_req;
-	void *p, *end;
+	struct bvecq *request;
+	size_t break_op_buf_size;
+	size_t name_len = strlen(lock_name);
+	size_t cookie_len = strlen(cookie);
+	void *p;
 	int ret;
 
 	break_op_buf_size = name_len + sizeof(__le32) +
@@ -163,29 +161,28 @@ int ceph_cls_break_lock(struct ceph_osd_client *osdc,
 	if (break_op_buf_size > PAGE_SIZE)
 		return -E2BIG;
 
-	break_op_req = ceph_alloc_frag(break_op_buf_size, GFP_NOIO);
-	if (!break_op_req)
+	request = ceph_alloc_frag(break_op_buf_size, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
-	p = ceph_map_enc_start(break_op_req);
-	end = p + break_op_buf_size;
+	p = ceph_map_enc_start(request);
 
 	/* encode cls_lock_break_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    break_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
+	ceph_encode_string(&p, lock_name, name_len);
 	ceph_encode_copy(&p, locker, sizeof(*locker));
-	ceph_encode_string(&p, end, cookie, cookie_len);
-	ceph_map_enc_stop(break_op_req, p);
+	ceph_encode_string(&p, cookie, cookie_len);
+	ceph_map_enc_stop(request, p);
 
 	dout("%s lock_name %s cookie %s locker %s%llu\n", __func__, lock_name,
 	     cookie, ENTITY_NAME(*locker));
 	ret = ceph_osdc_call(osdc, oid, oloc, "lock", "break_lock",
-			     CEPH_OSD_FLAG_WRITE, break_op_req,
-			     break_op_buf_size, NULL, NULL);
+			     CEPH_OSD_FLAG_WRITE, request, break_op_buf_size,
+			     NULL, NULL);
 
 	dout("%s: status %d\n", __func__, ret);
-	bvecq_put(break_op_req);
+	bvecq_put(request);
 	return ret;
 }
 EXPORT_SYMBOL(ceph_cls_break_lock);
@@ -196,13 +193,13 @@ int ceph_cls_set_cookie(struct ceph_osd_client *osdc,
 			char *lock_name, u8 type, char *old_cookie,
 			char *tag, char *new_cookie)
 {
-	int cookie_op_buf_size;
-	int name_len = strlen(lock_name);
-	int old_cookie_len = strlen(old_cookie);
-	int tag_len = strlen(tag);
-	int new_cookie_len = strlen(new_cookie);
-	void *p, *end;
-	struct bvecq *cookie_op_req;
+	struct bvecq *request;
+	size_t cookie_op_buf_size;
+	size_t name_len = strlen(lock_name);
+	size_t old_cookie_len = strlen(old_cookie);
+	size_t tag_len = strlen(tag);
+	size_t new_cookie_len = strlen(new_cookie);
+	void *p;
 	int ret;
 
 	cookie_op_buf_size = name_len + sizeof(__le32) +
@@ -213,31 +210,30 @@ int ceph_cls_set_cookie(struct ceph_osd_client *osdc,
 	if (cookie_op_buf_size > PAGE_SIZE)
 		return -E2BIG;
 
-	cookie_op_req = ceph_alloc_frag(cookie_op_buf_size, GFP_NOIO);
-	if (!cookie_op_req)
+	request = ceph_alloc_frag(cookie_op_buf_size, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
-	p = ceph_map_enc_start(cookie_op_req);
-	end = p + cookie_op_buf_size;
+	p = ceph_map_enc_start(request);
 
 	/* encode cls_lock_set_cookie_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    cookie_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
+	ceph_encode_string(&p, lock_name, name_len);
 	ceph_encode_8(&p, type);
-	ceph_encode_string(&p, end, old_cookie, old_cookie_len);
-	ceph_encode_string(&p, end, tag, tag_len);
-	ceph_encode_string(&p, end, new_cookie, new_cookie_len);
-	ceph_map_enc_stop(cookie_op_req, p);
+	ceph_encode_string(&p, old_cookie, old_cookie_len);
+	ceph_encode_string(&p, tag, tag_len);
+	ceph_encode_string(&p, new_cookie, new_cookie_len);
+	ceph_map_enc_stop(request, p);
 
 	dout("%s lock_name %s type %d old_cookie %s tag %s new_cookie %s\n",
 	     __func__, lock_name, type, old_cookie, tag, new_cookie);
 	ret = ceph_osdc_call(osdc, oid, oloc, "lock", "set_cookie",
-			     CEPH_OSD_FLAG_WRITE, cookie_op_req,
+			     CEPH_OSD_FLAG_WRITE, request,
 			     cookie_op_buf_size, NULL, NULL);
 
 	dout("%s: status %d\n", __func__, ret);
-	bvecq_put(cookie_op_req);
+	bvecq_put(request);
 	return ret;
 }
 EXPORT_SYMBOL(ceph_cls_set_cookie);
@@ -294,9 +290,10 @@ bad:
 	return -EINVAL;
 }
 
-static int decode_lockers(void **p, void *end, u8 *type, char **tag,
+static int decode_lockers(void **p, size_t size, u8 *type, char **tag,
 			  struct ceph_locker **lockers, u32 *num_lockers)
 {
+	void *end = *p + size;
 	u8 struct_v;
 	u32 struct_len;
 	char *s;
@@ -351,10 +348,10 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 		       struct ceph_locker **lockers, u32 *num_lockers)
 {
 	struct bvecq *request, *reply;
-	int get_info_op_buf_size;
-	int name_len = strlen(lock_name);
+	size_t get_info_op_buf_size;
 	size_t reply_len = PAGE_SIZE;
-	void *p, *end;
+	size_t name_len = strlen(lock_name);
+	void *p;
 	int ret = -ENOMEM;
 
 	get_info_op_buf_size = name_len + sizeof(__le32) +
@@ -371,12 +368,11 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 		goto out;
 
 	p = ceph_map_enc_start(request);
-	end = p + get_info_op_buf_size;
 
 	/* encode cls_lock_get_info_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    get_info_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
+	ceph_encode_string(&p, lock_name, name_len);
 	ceph_map_enc_stop(request, p);
 
 	dout("%s lock_name %s\n", __func__, lock_name);
@@ -388,9 +384,8 @@ int ceph_cls_lock_info(struct ceph_osd_client *osdc,
 	dout("%s: status %d\n", __func__, ret);
 	if (ret >= 0) {
 		p = ceph_map_dec_start(reply);
-		end = p + reply_len;
 
-		ret = decode_lockers(&p, end, type, tag, lockers, num_lockers);
+		ret = decode_lockers(&p, reply_len, type, tag, lockers, num_lockers);
 		ceph_map_dec_stop(reply, p);
 	}
 
@@ -404,12 +399,12 @@ EXPORT_SYMBOL(ceph_cls_lock_info);
 int ceph_cls_assert_locked(struct ceph_osd_request *req, int which,
 			   char *lock_name, u8 type, char *cookie, char *tag)
 {
-	struct bvecq *dbuf;
-	int assert_op_buf_size;
-	int name_len = strlen(lock_name);
-	int cookie_len = strlen(cookie);
-	int tag_len = strlen(tag);
-	void *p, *end;
+	struct bvecq *request;
+	size_t assert_op_buf_size;
+	size_t name_len = strlen(lock_name);
+	size_t cookie_len = strlen(cookie);
+	size_t tag_len = strlen(tag);
+	void *p;
 	int ret;
 
 	assert_op_buf_size = name_len + sizeof(__le32) +
@@ -423,25 +418,22 @@ int ceph_cls_assert_locked(struct ceph_osd_request *req, int which,
 	if (ret)
 		return ret;
 
-	dbuf = bvecq_alloc_buffer(assert_op_buf_size, GFP_NOIO, false);
-	if (!dbuf)
+	request = ceph_alloc_frag(assert_op_buf_size, GFP_NOIO);
+	if (!request)
 		return -ENOMEM;
 
-	p = kmap_local_bvecq(dbuf, 0);
-	end = p + assert_op_buf_size;
+	p = ceph_map_enc_start(request);
 
 	/* encode cls_lock_assert_op struct */
 	ceph_start_encoding(&p, 1, 1,
 			    assert_op_buf_size - CEPH_ENCODING_START_BLK_LEN);
-	ceph_encode_string(&p, end, lock_name, name_len);
+	ceph_encode_string(&p, lock_name, name_len);
 	ceph_encode_8(&p, type);
-	ceph_encode_string(&p, end, cookie, cookie_len);
-	ceph_encode_string(&p, end, tag, tag_len);
-	kunmap(p);
-	WARN_ON(p != end);
+	ceph_encode_string(&p, cookie, cookie_len);
+	ceph_encode_string(&p, tag, tag_len);
+	ceph_map_enc_stop(request, p);
 
-	osd_req_op_cls_request_bvecq(req, which, dbuf, assert_op_buf_size);
+	osd_req_op_cls_request_bvecq(req, which, request, assert_op_buf_size);
 	return 0;
 }
 EXPORT_SYMBOL(ceph_cls_assert_locked);
-

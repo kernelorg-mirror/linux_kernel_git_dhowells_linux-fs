@@ -1813,15 +1813,15 @@ static int hoid_encoding_size(const struct ceph_hobject_id *hoid)
 	       4 + hoid->key_len + 4 + hoid->oid_len + 4 + hoid->nspace_len;
 }
 
-static void encode_hoid(void **p, void *end, const struct ceph_hobject_id *hoid)
+static void encode_hoid(void **p, const struct ceph_hobject_id *hoid)
 {
 	ceph_start_encoding(p, 4, 3, hoid_encoding_size(hoid));
-	ceph_encode_string(p, end, hoid->key, hoid->key_len);
-	ceph_encode_string(p, end, hoid->oid, hoid->oid_len);
+	ceph_encode_string(p, hoid->key, hoid->key_len);
+	ceph_encode_string(p, hoid->oid, hoid->oid_len);
 	ceph_encode_64(p, hoid->snapid);
 	ceph_encode_32(p, hoid->hash);
 	ceph_encode_8(p, hoid->is_max);
-	ceph_encode_string(p, end, hoid->nspace, hoid->nspace_len);
+	ceph_encode_string(p, hoid->nspace, hoid->nspace_len);
 	ceph_encode_64(p, hoid->pool);
 }
 
@@ -2054,16 +2054,14 @@ static void encode_spgid(void **p, const struct ceph_spg *spgid)
 	ceph_encode_8(p, spgid->shard);
 }
 
-static void encode_oloc(void **p, void *end,
-			const struct ceph_object_locator *oloc)
+static void encode_oloc(void **p, const struct ceph_object_locator *oloc)
 {
 	ceph_start_encoding(p, 5, 4, ceph_oloc_encoding_size(oloc));
 	ceph_encode_64(p, oloc->pool);
 	ceph_encode_32(p, -1); /* preferred */
 	ceph_encode_32(p, 0);  /* key len */
 	if (oloc->pool_ns)
-		ceph_encode_string(p, end, oloc->pool_ns->str,
-				   oloc->pool_ns->len);
+		ceph_encode_string(p, oloc->pool_ns->str, oloc->pool_ns->len);
 	else
 		ceph_encode_32(p, 0);
 }
@@ -2104,8 +2102,8 @@ static void encode_request_partial(struct ceph_osd_request *req,
 	ceph_encode_timespec64(p, &req->r_mtime);
 	p += sizeof(struct ceph_timespec);
 
-	encode_oloc(&p, end, &req->r_t.target_oloc);
-	ceph_encode_string(&p, end, req->r_t.target_oid.name,
+	encode_oloc(&p, &req->r_t.target_oloc);
+	ceph_encode_string(&p, req->r_t.target_oid.name,
 			   req->r_t.target_oid.name_len);
 
 	/* ops, can imply data */
@@ -4321,8 +4319,8 @@ static struct ceph_msg *create_backoff_message(
 	ceph_encode_32(&p, map_epoch);
 	ceph_encode_8(&p, CEPH_OSD_BACKOFF_OP_ACK_BLOCK);
 	ceph_encode_64(&p, backoff->id);
-	encode_hoid(&p, end, backoff->begin);
-	encode_hoid(&p, end, backoff->end);
+	encode_hoid(&p, backoff->begin);
+	encode_hoid(&p, backoff->end);
 	BUG_ON(p != end);
 
 	msg->front.iov_len = p - msg->front.iov_base;
@@ -5260,8 +5258,8 @@ int osd_req_op_copy_from_init(struct ceph_osd_request *req,
 
 	p = page_address(pages[0]);
 	end = p + PAGE_SIZE;
-	ceph_encode_string(&p, end, src_oid->name, src_oid->name_len);
-	encode_oloc(&p, end, src_oloc);
+	ceph_encode_string(&p, src_oid->name, src_oid->name_len);
+	encode_oloc(&p, src_oloc);
 	ceph_encode_32(&p, truncate_seq);
 	ceph_encode_64(&p, truncate_size);
 	op->indata_len = PAGE_SIZE - (end - p);

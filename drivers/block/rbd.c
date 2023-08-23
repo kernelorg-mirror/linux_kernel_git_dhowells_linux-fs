@@ -5802,8 +5802,7 @@ static char *rbd_dev_image_name(struct rbd_device *rbd_dev)
 		return NULL;
 
 	p = image_id;
-	end = image_id + image_id_size;
-	ceph_encode_string(&p, end, rbd_dev->spec->image_id, (u32)len);
+	ceph_encode_string(&p, rbd_dev->spec->image_id, len);
 
 	size = sizeof (__le32) + RBD_IMAGE_NAME_LEN_MAX;
 	reply_buf = kmalloc(size, GFP_KERNEL);
