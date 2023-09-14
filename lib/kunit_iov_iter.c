@@ -19,18 +19,18 @@ MODULE_AUTHOR("David Howells <dhowells@redhat.com>");
 MODULE_LICENSE("GPL");
 
 struct kvec_test_range {
-	int	from, to;
+	int	page, from, to;
 };
 
 static const struct kvec_test_range kvec_test_ranges[] = {
-	{ 0x00002, 0x00002 },
-	{ 0x00027, 0x03000 },
-	{ 0x05193, 0x18794 },
-	{ 0x20000, 0x20000 },
-	{ 0x20000, 0x24000 },
-	{ 0x24000, 0x27001 },
-	{ 0x29000, 0xffffb },
-	{ 0xffffd, 0xffffe },
+	{ 0, 0x00002, 0x00002 },
+	{ 0, 0x00027, 0x03000 },
+	{ 0, 0x05193, 0x18794 },
+	{ 0, 0x20000, 0x20000 },
+	{ 0, 0x20000, 0x24000 },
+	{ 0, 0x24000, 0x27001 },
+	{ 0, 0x29000, 0xffffb },
+	{ 0, 0xffffd, 0xffffe },
 	{ -1 }
 };
 
@@ -69,6 +69,57 @@ static void *__init iov_kunit_create_buffer(struct kunit *test,
 	return buffer;
 }
 
+/*
+ * Build the reference pattern in the scratch buffer that we expect to see in
+ * the iterator buffer (ie. the result of copy *to*).
+ */
+static void iov_kunit_build_to_reference_pattern(struct kunit *test, u8 *scratch,
+						 size_t bufsize,
+						 const struct kvec_test_range *pr)
+{
+	int i, patt = 0;
+
+	memset(scratch, 0, bufsize);
+	for (; pr->page >= 0; pr++)
+		for (i = pr->from; i < pr->to; i++)
+			scratch[i] = pattern(patt++);
+}
+
+/*
+ * Build the reference pattern in the iterator buffer that we expect to see in
+ * the scratch buffer (ie. the result of copy *from*).
+ */
+static void iov_kunit_build_from_reference_pattern(struct kunit *test, u8 *buffer,
+						   size_t bufsize,
+						   const struct kvec_test_range *pr)
+{
+	size_t i = 0, j;
+
+	memset(buffer, 0, bufsize);
+	for (; pr->page >= 0; pr++) {
+		for (j = pr->from; j < pr->to; j++) {
+			buffer[i++] = pattern(j);
+			if (i >= bufsize)
+				return;
+		}
+	}
+}
+
+/*
+ * Compare two kernel buffers to see that they're the same.
+ */
+static void iov_kunit_check_pattern(struct kunit *test, const u8 *buffer,
+				    const u8 *scratch, size_t bufsize)
+{
+	size_t i;
+
+	for (i = 0; i < bufsize; i++) {
+		KUNIT_EXPECT_EQ_MSG(test, buffer[i], scratch[i], "at i=%x", i);
+		if (buffer[i] != scratch[i])
+			return;
+	}
+}
+
 static void __init iov_kunit_load_kvec(struct kunit *test,
 				       struct iov_iter *iter, int dir,
 				       struct kvec *kvec, unsigned int kvmax,
@@ -79,7 +130,7 @@ static void __init iov_kunit_load_kvec(struct kunit *test,
 	int i;
 
 	for (i = 0; i < kvmax; i++, pr++) {
-		if (pr->from < 0)
+		if (pr->page < 0)
 			break;
 		KUNIT_ASSERT_GE(test, pr->to, pr->from);
 		KUNIT_ASSERT_LE(test, pr->to, bufsize);
@@ -97,13 +148,12 @@ static void __init iov_kunit_load_kvec(struct kunit *test,
  */
 static void __init iov_kunit_copy_to_kvec(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
 	struct iov_iter iter;
 	struct page **spages, **bpages;
 	struct kvec kvec[8];
 	u8 *scratch, *buffer;
 	size_t bufsize, npages, size, copied;
-	int i, patt;
+	int i;
 
 	bufsize = 0x100000;
 	npages = bufsize / PAGE_SIZE;
@@ -125,20 +175,8 @@ static void __init iov_kunit_copy_to_kvec(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, iter.count, 0);
 	KUNIT_EXPECT_EQ(test, iter.nr_segs, 0);
 
-	/* Build the expected image in the scratch buffer. */
-	patt = 0;
-	memset(scratch, 0, bufsize);
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++)
-		for (i = pr->from; i < pr->to; i++)
-			scratch[i] = pattern(patt++);
-
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, buffer[i], scratch[i], "at i=%x", i);
-		if (buffer[i] != scratch[i])
-			return;
-	}
-
+	iov_kunit_build_to_reference_pattern(test, scratch, bufsize, kvec_test_ranges);
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -147,13 +185,12 @@ static void __init iov_kunit_copy_to_kvec(struct kunit *test)
  */
 static void __init iov_kunit_copy_from_kvec(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
 	struct iov_iter iter;
 	struct page **spages, **bpages;
 	struct kvec kvec[8];
 	u8 *scratch, *buffer;
 	size_t bufsize, npages, size, copied;
-	int i, j;
+	int i;
 
 	bufsize = 0x100000;
 	npages = bufsize / PAGE_SIZE;
@@ -175,25 +212,8 @@ static void __init iov_kunit_copy_from_kvec(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, iter.count, 0);
 	KUNIT_EXPECT_EQ(test, iter.nr_segs, 0);
 
-	/* Build the expected image in the main buffer. */
-	i = 0;
-	memset(buffer, 0, bufsize);
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++) {
-		for (j = pr->from; j < pr->to; j++) {
-			buffer[i++] = pattern(j);
-			if (i >= bufsize)
-				goto stop;
-		}
-	}
-stop:
-
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, scratch[i], buffer[i], "at i=%x", i);
-		if (scratch[i] != buffer[i])
-			return;
-	}
-
+	iov_kunit_build_from_reference_pattern(test, buffer, bufsize, kvec_test_ranges);
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -210,7 +230,7 @@ static const struct bvec_test_range bvec_test_ranges[] = {
 	{ 5, 0x0000, 0x1000 },
 	{ 6, 0x0000, 0x0ffb },
 	{ 6, 0x0ffd, 0x0ffe },
-	{ -1, -1, -1 }
+	{ -1 }
 };
 
 static void __init iov_kunit_load_bvec(struct kunit *test,
@@ -225,7 +245,7 @@ static void __init iov_kunit_load_bvec(struct kunit *test,
 	int i;
 
 	for (i = 0; i < bvmax; i++, pr++) {
-		if (pr->from < 0)
+		if (pr->page < 0)
 			break;
 		KUNIT_ASSERT_LT(test, pr->page, npages);
 		KUNIT_ASSERT_LT(test, pr->page * PAGE_SIZE, bufsize);
@@ -288,20 +308,14 @@ static void __init iov_kunit_copy_to_bvec(struct kunit *test)
 	b = 0;
 	patt = 0;
 	memset(scratch, 0, bufsize);
-	for (pr = bvec_test_ranges; pr->from >= 0; pr++, b++) {
+	for (pr = bvec_test_ranges; pr->page >= 0; pr++, b++) {
 		u8 *p = scratch + pr->page * PAGE_SIZE;
 
 		for (i = pr->from; i < pr->to; i++)
 			p[i] = pattern(patt++);
 	}
 
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, buffer[i], scratch[i], "at i=%x", i);
-		if (buffer[i] != scratch[i])
-			return;
-	}
-
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -341,7 +355,7 @@ static void __init iov_kunit_copy_from_bvec(struct kunit *test)
 	/* Build the expected image in the main buffer. */
 	i = 0;
 	memset(buffer, 0, bufsize);
-	for (pr = bvec_test_ranges; pr->from >= 0; pr++) {
+	for (pr = bvec_test_ranges; pr->page >= 0; pr++) {
 		size_t patt = pr->page * PAGE_SIZE;
 
 		for (j = pr->from; j < pr->to; j++) {
@@ -352,13 +366,7 @@ static void __init iov_kunit_copy_from_bvec(struct kunit *test)
 	}
 stop:
 
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, scratch[i], buffer[i], "at i=%x", i);
-		if (scratch[i] != buffer[i])
-			return;
-	}
-
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -409,7 +417,7 @@ static void __init iov_kunit_copy_to_xarray(struct kunit *test)
 	struct page **spages, **bpages;
 	u8 *scratch, *buffer;
 	size_t bufsize, npages, size, copied;
-	int i, patt;
+	int i;
 
 	bufsize = 0x100000;
 	npages = bufsize / PAGE_SIZE;
@@ -426,7 +434,7 @@ static void __init iov_kunit_copy_to_xarray(struct kunit *test)
 	iov_kunit_load_xarray(test, &iter, READ, xarray, bpages, npages);
 
 	i = 0;
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++) {
+	for (pr = kvec_test_ranges; pr->page >= 0; pr++) {
 		size = pr->to - pr->from;
 		KUNIT_ASSERT_LE(test, pr->to, bufsize);
 
@@ -439,20 +447,8 @@ static void __init iov_kunit_copy_to_xarray(struct kunit *test)
 		i += size;
 	}
 
-	/* Build the expected image in the scratch buffer. */
-	patt = 0;
-	memset(scratch, 0, bufsize);
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++)
-		for (i = pr->from; i < pr->to; i++)
-			scratch[i] = pattern(patt++);
-
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, buffer[i], scratch[i], "at i=%x", i);
-		if (buffer[i] != scratch[i])
-			return;
-	}
-
+	iov_kunit_build_to_reference_pattern(test, scratch, bufsize, kvec_test_ranges);
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -467,7 +463,7 @@ static void __init iov_kunit_copy_from_xarray(struct kunit *test)
 	struct page **spages, **bpages;
 	u8 *scratch, *buffer;
 	size_t bufsize, npages, size, copied;
-	int i, j;
+	int i;
 
 	bufsize = 0x100000;
 	npages = bufsize / PAGE_SIZE;
@@ -484,7 +480,7 @@ static void __init iov_kunit_copy_from_xarray(struct kunit *test)
 	iov_kunit_load_xarray(test, &iter, READ, xarray, bpages, npages);
 
 	i = 0;
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++) {
+	for (pr = kvec_test_ranges; pr->page >= 0; pr++) {
 		size = pr->to - pr->from;
 		KUNIT_ASSERT_LE(test, pr->to, bufsize);
 
@@ -497,25 +493,8 @@ static void __init iov_kunit_copy_from_xarray(struct kunit *test)
 		i += size;
 	}
 
-	/* Build the expected image in the main buffer. */
-	i = 0;
-	memset(buffer, 0, bufsize);
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++) {
-		for (j = pr->from; j < pr->to; j++) {
-			buffer[i++] = pattern(j);
-			if (i >= bufsize)
-				goto stop;
-		}
-	}
-stop:
-
-	/* Compare the images */
-	for (i = 0; i < bufsize; i++) {
-		KUNIT_EXPECT_EQ_MSG(test, scratch[i], buffer[i], "at i=%x", i);
-		if (scratch[i] != buffer[i])
-			return;
-	}
-
+	iov_kunit_build_from_reference_pattern(test, buffer, bufsize, kvec_test_ranges);
+	iov_kunit_check_pattern(test, buffer, scratch, bufsize);
 	KUNIT_SUCCEED();
 }
 
@@ -573,7 +552,7 @@ static void __init iov_kunit_extract_pages_kvec(struct kunit *test)
 			while (from == pr->to) {
 				pr++;
 				from = pr->from;
-				if (from < 0)
+				if (pr->page < 0)
 					goto stop;
 			}
 			ix = from / PAGE_SIZE;
@@ -651,7 +630,7 @@ static void __init iov_kunit_extract_pages_bvec(struct kunit *test)
 			while (from == pr->to) {
 				pr++;
 				from = pr->from;
-				if (from < 0)
+				if (pr->page < 0)
 					goto stop;
 			}
 			ix = pr->page + from / PAGE_SIZE;
@@ -698,7 +677,7 @@ static void __init iov_kunit_extract_pages_xarray(struct kunit *test)
 	iov_kunit_create_buffer(test, &bpages, npages);
 	iov_kunit_load_xarray(test, &iter, READ, xarray, bpages, npages);
 
-	for (pr = kvec_test_ranges; pr->from >= 0; pr++) {
+	for (pr = kvec_test_ranges; pr->page >= 0; pr++) {
 		from = pr->from;
 		size = pr->to - from;
 		KUNIT_ASSERT_LE(test, pr->to, bufsize);
