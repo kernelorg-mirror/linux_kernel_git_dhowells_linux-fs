@@ -18,22 +18,46 @@ MODULE_DESCRIPTION("iov_iter testing");
 MODULE_AUTHOR("David Howells <dhowells@redhat.com>");
 MODULE_LICENSE("GPL");
 
-struct kvec_test_range {
+struct iov_kunit_range {
 	int	page, from, to;
 };
 
-static const struct kvec_test_range kvec_test_ranges[] = {
-	{ 0, 0x00002, 0x00002 },
-	{ 0, 0x00027, 0x03000 },
-	{ 0, 0x05193, 0x18794 },
-	{ 0, 0x20000, 0x20000 },
-	{ 0, 0x20000, 0x24000 },
-	{ 0, 0x24000, 0x27001 },
-	{ 0, 0x29000, 0xffffb },
-	{ 0, 0xffffd, 0xffffe },
+/*
+ * Ranges that to use in tests where we have address/offset ranges to play
+ * with (ie. KVEC) or where we have a single blob that we can copy
+ * arbitrary chunks of (ie. XARRAY).
+ */
+static const struct iov_kunit_range kvec_test_ranges[] = {
+	{ 0, 0x00002, 0x00002 }, /* Start with an empty range */
+	{ 0, 0x00027, 0x03000 }, /* Midpage to page end */
+	{ 0, 0x05193, 0x18794 }, /* Midpage to midpage */
+	{ 0, 0x20000, 0x20000 }, /* Empty range in the middle */
+	{ 0, 0x20000, 0x24000 }, /* Page start to page end */
+	{ 0, 0x24000, 0x27001 }, /* Page end to midpage */
+	{ 0, 0x29000, 0xffffb }, /* Page start to midpage */
+	{ 0, 0xffffd, 0xffffe }, /* Almost contig to last, ending in same page */
 	{ -1 }
 };
 
+/*
+ * Ranges that to use in tests where we have a list of partial pages to
+ * play with (ie. BVEC).
+ */
+static const struct iov_kunit_range bvec_test_ranges[] = {
+	{ 0, 0x0002, 0x0002 }, /* Start with an empty range */
+	{ 1, 0x0027, 0x0893 }, /* Random part of page */
+	{ 2, 0x0193, 0x0794 }, /* Random part of page */
+	{ 3, 0x0000, 0x1000 }, /* Full page */
+	{ 4, 0x0000, 0x1000 }, /* Full page logically contig to last */
+	{ 5, 0x0000, 0x1000 }, /* Full page logically contig to last */
+	{ 6, 0x0000, 0x0ffb }, /* Part page logically contig to last */
+	{ 6, 0x0ffd, 0x0ffe }, /* Part of prev page, but not quite contig */
+	{ -1 }
+};
+
+/*
+ * The pattern to fill with.
+ */
 static inline u8 pattern(unsigned long x)
 {
 	return x & 0xff;
@@ -44,6 +68,9 @@ static void iov_kunit_unmap(void *data)
 	vunmap(data);
 }
 
+/*
+ * Create a buffer out of some pages and return a vmap'd pointer to it.
+ */
 static void *__init iov_kunit_create_buffer(struct kunit *test,
 					    struct page ***ppages,
 					    size_t npages)
@@ -75,7 +102,7 @@ static void *__init iov_kunit_create_buffer(struct kunit *test,
  */
 static void iov_kunit_build_to_reference_pattern(struct kunit *test, u8 *scratch,
 						 size_t bufsize,
-						 const struct kvec_test_range *pr)
+						 const struct iov_kunit_range *pr)
 {
 	int i, patt = 0;
 
@@ -91,7 +118,7 @@ static void iov_kunit_build_to_reference_pattern(struct kunit *test, u8 *scratch
  */
 static void iov_kunit_build_from_reference_pattern(struct kunit *test, u8 *buffer,
 						   size_t bufsize,
-						   const struct kvec_test_range *pr)
+						   const struct iov_kunit_range *pr)
 {
 	size_t i = 0, j;
 
@@ -124,7 +151,7 @@ static void __init iov_kunit_load_kvec(struct kunit *test,
 				       struct iov_iter *iter, int dir,
 				       struct kvec *kvec, unsigned int kvmax,
 				       void *buffer, size_t bufsize,
-				       const struct kvec_test_range *pr)
+				       const struct iov_kunit_range *pr)
 {
 	size_t size = 0;
 	int i;
@@ -217,28 +244,12 @@ static void __init iov_kunit_copy_from_kvec(struct kunit *test)
 	KUNIT_SUCCEED();
 }
 
-struct bvec_test_range {
-	int	page, from, to;
-};
-
-static const struct bvec_test_range bvec_test_ranges[] = {
-	{ 0, 0x0002, 0x0002 },
-	{ 1, 0x0027, 0x0893 },
-	{ 2, 0x0193, 0x0794 },
-	{ 3, 0x0000, 0x1000 },
-	{ 4, 0x0000, 0x1000 },
-	{ 5, 0x0000, 0x1000 },
-	{ 6, 0x0000, 0x0ffb },
-	{ 6, 0x0ffd, 0x0ffe },
-	{ -1 }
-};
-
 static void __init iov_kunit_load_bvec(struct kunit *test,
 				       struct iov_iter *iter, int dir,
 				       struct bio_vec *bvec, unsigned int bvmax,
 				       struct page **pages, size_t npages,
 				       size_t bufsize,
-				       const struct bvec_test_range *pr)
+				       const struct iov_kunit_range *pr)
 {
 	struct page *can_merge = NULL, *page;
 	size_t size = 0;
@@ -276,13 +287,13 @@ static void __init iov_kunit_load_bvec(struct kunit *test,
  */
 static void __init iov_kunit_copy_to_bvec(struct kunit *test)
 {
-	const struct bvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct bio_vec bvec[8];
 	struct page **spages, **bpages;
 	u8 *scratch, *buffer;
 	size_t bufsize, npages, size, copied;
-	int i, b, patt;
+	int i, patt;
 
 	bufsize = 0x100000;
 	npages = bufsize / PAGE_SIZE;
@@ -305,10 +316,9 @@ static void __init iov_kunit_copy_to_bvec(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, iter.nr_segs, 0);
 
 	/* Build the expected image in the scratch buffer. */
-	b = 0;
 	patt = 0;
 	memset(scratch, 0, bufsize);
-	for (pr = bvec_test_ranges; pr->page >= 0; pr++, b++) {
+	for (pr = bvec_test_ranges; pr->page >= 0; pr++) {
 		u8 *p = scratch + pr->page * PAGE_SIZE;
 
 		for (i = pr->from; i < pr->to; i++)
@@ -324,7 +334,7 @@ static void __init iov_kunit_copy_to_bvec(struct kunit *test)
  */
 static void __init iov_kunit_copy_from_bvec(struct kunit *test)
 {
-	const struct bvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct bio_vec bvec[8];
 	struct page **spages, **bpages;
@@ -411,7 +421,7 @@ static struct xarray *iov_kunit_create_xarray(struct kunit *test)
  */
 static void __init iov_kunit_copy_to_xarray(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct xarray *xarray;
 	struct page **spages, **bpages;
@@ -457,7 +467,7 @@ static void __init iov_kunit_copy_to_xarray(struct kunit *test)
  */
 static void __init iov_kunit_copy_from_xarray(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct xarray *xarray;
 	struct page **spages, **bpages;
@@ -503,7 +513,7 @@ static void __init iov_kunit_copy_from_xarray(struct kunit *test)
  */
 static void __init iov_kunit_extract_pages_kvec(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct page **bpages, *pagelist[8], **pages = pagelist;
 	struct kvec kvec[8];
@@ -583,7 +593,7 @@ stop:
  */
 static void __init iov_kunit_extract_pages_bvec(struct kunit *test)
 {
-	const struct bvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct page **bpages, *pagelist[8], **pages = pagelist;
 	struct bio_vec bvec[8];
@@ -661,7 +671,7 @@ stop:
  */
 static void __init iov_kunit_extract_pages_xarray(struct kunit *test)
 {
-	const struct kvec_test_range *pr;
+	const struct iov_kunit_range *pr;
 	struct iov_iter iter;
 	struct xarray *xarray;
 	struct page **bpages, *pagelist[8], **pages = pagelist;
