@@ -972,6 +972,92 @@ static void __init iov_kunit_benchmark_xarray(struct kunit *test)
 	KUNIT_SUCCEED();
 }
 
+/*
+ * Time copying 256MiB through an ITER_XARRAY, decanting it to ITER_BVECs.
+ */
+static void __init iov_kunit_benchmark_xarray_to_bvec(struct kunit *test)
+{
+	struct iov_iter xiter;
+	struct xarray *xarray;
+	struct page *page;
+	unsigned int samples[IOV_KUNIT_NR_SAMPLES];
+	ktime_t a, b;
+	ssize_t copied;
+	size_t size = 256 * 1024 * 1024, npages = size / PAGE_SIZE;
+	void *scratch;
+	int i;
+
+	/* Allocate a page and tile it repeatedly in the buffer. */
+	page = alloc_page(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, page);
+	kunit_add_action_or_reset(test, iov_kunit_free_page, page);
+
+	xarray = iov_kunit_create_xarray(test);
+
+	for (i = 0; i < npages; i++) {
+		void *x = xa_store(xarray, i, page, GFP_KERNEL);
+
+		KUNIT_ASSERT_FALSE(test, xa_is_err(x));
+	}
+
+	/* Create a single large buffer to copy to/from. */
+	scratch = iov_kunit_create_source(test, npages);
+
+	/* Perform and time a bunch of copies. */
+	kunit_info(test, "Benchmarking copy_to_iter() over BVECs decanted from an XARRAY:\n");
+	for (i = 0; i < IOV_KUNIT_NR_SAMPLES; i++) {
+		size = 256 * 1024 * 1024;
+		iov_iter_xarray(&xiter, ITER_SOURCE, xarray, 0, size);
+		a = ktime_get_real();
+
+		do {
+			struct iov_iter biter;
+			struct bio_vec *bvec;
+			struct page **pages;
+			size_t req, part, offset0, got;
+			int j;
+
+			npages = 256;
+			req = min_t(size_t, size, npages * PAGE_SIZE);
+			bvec = kunit_kmalloc_array(test, npages, sizeof(bvec[0]), GFP_KERNEL);
+			KUNIT_ASSERT_NOT_NULL(test, bvec);
+
+			pages = (void *)bvec + array_size(npages, sizeof(bvec[0])) -
+				array_size(npages, sizeof(*pages));
+
+			part = iov_iter_extract_pages(&xiter, &pages, req,
+						      npages, 0, &offset0);
+			KUNIT_EXPECT_NE(test, part, 0);
+			KUNIT_EXPECT_GT(test, part, 0);
+
+			j = 0;
+			got = part;
+			do {
+				size_t chunk = min_t(size_t, got, PAGE_SIZE - offset0);
+
+				bvec_set_page(&bvec[j++], page, chunk, offset0);
+				offset0 = 0;
+				got -= chunk;
+			} while (got > 0);
+
+			iov_iter_bvec(&biter, ITER_SOURCE, bvec, j, part);
+			copied = copy_from_iter(scratch, part, &biter);
+			KUNIT_EXPECT_EQ(test, copied, part);
+			size -= copied;
+			if (test->status == KUNIT_FAILURE)
+				break;
+		} while (size > 0);
+
+		b = ktime_get_real();
+		samples[i] = ktime_to_us(ktime_sub(b, a));
+		if (test->status == KUNIT_FAILURE)
+			break;
+	}
+
+	iov_kunit_benchmark_print_stats(test, samples);
+	KUNIT_SUCCEED();
+}
+
 static struct kunit_case __refdata iov_kunit_cases[] = {
 	KUNIT_CASE(iov_kunit_copy_to_kvec),
 	KUNIT_CASE(iov_kunit_copy_from_kvec),
@@ -986,6 +1072,7 @@ static struct kunit_case __refdata iov_kunit_cases[] = {
 	KUNIT_CASE(iov_kunit_benchmark_bvec),
 	KUNIT_CASE(iov_kunit_benchmark_bvec_split),
 	KUNIT_CASE(iov_kunit_benchmark_xarray),
+	KUNIT_CASE(iov_kunit_benchmark_xarray_to_bvec),
 	{}
 };
 
