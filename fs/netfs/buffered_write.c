@@ -84,7 +84,8 @@ static enum netfs_how_to_modify netfs_how_to_modify(struct netfs_inode *ctx,
 	if (test_bit(NETFS_ICTX_NO_WRITE_STREAMING, &ctx->flags))
 		goto no_write_streaming;
 
-	if (netfs_is_cache_enabled(ctx)) {
+	if (netfs_is_cache_enabled(ctx) ||
+	    ctx->min_bshift > 0) {
 		/* We don't want to get a streaming write on a file that loses
 		 * caching service temporarily because the backing store got
 		 * culled.
