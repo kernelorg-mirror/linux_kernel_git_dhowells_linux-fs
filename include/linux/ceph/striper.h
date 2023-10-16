@@ -10,7 +10,7 @@ struct ceph_file_layout;
 
 void ceph_calc_file_object_mapping(struct ceph_file_layout *l,
 				   u64 off, u64 len,
-				   u64 *objno, u64 *objoff, u32 *xlen);
+				   u64 *objno, u64 *objoff, size_t *xlen);
 
 struct ceph_object_extent {
 	struct list_head oe_item;
@@ -97,14 +97,14 @@ int ceph_iterate_extents(struct ceph_file_layout *l, u64 off, u64 len,
 	while (len) {
 		struct ceph_object_extent *ex;
 		u64 objno, objoff;
-		u32 xlen;
+		size_t xlen;
 
 		ceph_calc_file_object_mapping(l, off, len, &objno, &objoff,
 					      &xlen);
 
 		ex = ceph_lookup_containing(object_extents, objno, objoff, xlen);
 		if (!ex) {
-			WARN(1, "%s: objno %llu %llu~%u not found!\n",
+			WARN(1, "%s: objno %llu %llu~%zu not found!\n",
 			     __func__, objno, objoff, xlen);
 			return -EINVAL;
 		}

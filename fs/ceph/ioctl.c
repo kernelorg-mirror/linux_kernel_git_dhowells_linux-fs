@@ -192,7 +192,7 @@ static long ceph_ioctl_get_dataloc(struct file *file, void __user *arg)
 		&ceph_sb_to_fs_client(inode->i_sb)->client->osdc;
 	struct ceph_object_locator oloc;
 	CEPH_DEFINE_OID_ONSTACK(oid);
-	u32 xlen;
+	size_t xlen;
 	u64 tmp;
 	struct ceph_pg pgid;
 	int r;

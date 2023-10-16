@@ -23,7 +23,7 @@
  */
 void ceph_calc_file_object_mapping(struct ceph_file_layout *l,
 				   u64 off, u64 len,
-				   u64 *objno, u64 *objoff, u32 *xlen)
+				   u64 *objno, u64 *objoff, size_t *xlen)
 {
 	u32 stripes_per_object = l->object_size / l->stripe_unit;
 	u64 blockno;	/* which su in the file (i.e. globally) */
@@ -100,7 +100,7 @@ int ceph_file_to_extents(struct ceph_file_layout *l, u64 off, u64 len,
 	while (len) {
 		struct list_head *add_pos = NULL;
 		u64 objno, objoff;
-		u32 xlen;
+		size_t xlen;
 
 		ceph_calc_file_object_mapping(l, off, len, &objno, &objoff,
 					      &xlen);

@@ -1704,12 +1704,11 @@ ceph_sync_write(struct kiocb *iocb, struct iov_iter *from, loff_t pos,
 		u64 write_pos = pos;
 		u64 write_len = len;
 		u64 objnum, objoff;
-		u32 xlen;
 		u64 assert_ver = 0;
 		bool rmw;
 		bool first, last;
 		struct iov_iter saved_iter = *from;
-		size_t off;
+		size_t off, xlen;
 
 		ceph_fscrypt_adjust_off_and_len(inode, &write_pos, &write_len);
 
@@ -2869,8 +2868,8 @@ static ssize_t ceph_do_objects_copy(struct ceph_inode_info *src_ci, u64 *src_off
 	struct ceph_osd_client *osdc;
 	struct ceph_osd_request *req;
 	ssize_t bytes = 0;
+	size_t src_objlen, dst_objlen;
 	u64 src_objnum, src_objoff, dst_objnum, dst_objoff;
-	u32 src_objlen, dst_objlen;
 	u32 object_size = src_ci->i_layout.object_size;
 	struct ceph_client *cl = fsc->client;
 	int ret;
@@ -2947,8 +2946,8 @@ static ssize_t __ceph_copy_file_range(struct file *src_file, loff_t src_off,
 	struct ceph_client *cl = src_fsc->client;
 	loff_t size;
 	ssize_t ret = -EIO, bytes;
+	size_t src_objlen, dst_objlen;
 	u64 src_objnum, dst_objnum, src_objoff, dst_objoff;
-	u32 src_objlen, dst_objlen;
 	int src_got = 0, dst_got = 0, err, dirty;
 
 	if (src_inode->i_sb != dst_inode->i_sb) {
@@ -3059,7 +3058,7 @@ static ssize_t __ceph_copy_file_range(struct file *src_file, loff_t src_off,
 	 * starting at the src_off
 	 */
 	if (src_objoff) {
-		doutc(cl, "Initial partial copy of %u bytes\n", src_objlen);
+		doutc(cl, "Initial partial copy of %zu bytes\n", src_objlen);
 
 		/*
 		 * we need to temporarily drop all caps as we'll be calling

@@ -515,8 +515,8 @@ int ceph_fscrypt_decrypt_extents(struct inode *inode, struct page **page,
 	struct ceph_client *cl = ceph_inode_to_client(inode);
 	int i, ret = 0;
 	struct ceph_inode_info *ci = ceph_inode(inode);
+	size_t xlen;
 	u64 objno, objoff;
-	u32 xlen;
 
 	/* Nothing to do for empty array */
 	if (ext_cnt == 0) {

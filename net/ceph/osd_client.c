@@ -100,7 +100,7 @@ static int calc_layout(struct ceph_file_layout *layout, u64 off, u64 *plen,
 			u64 *objnum, u64 *objoff, u64 *objlen)
 {
 	u64 orig_len = *plen;
-	u32 xlen;
+	size_t xlen;
 
 	/* object extent? */
 	ceph_calc_file_object_mapping(layout, off, orig_len, objnum,

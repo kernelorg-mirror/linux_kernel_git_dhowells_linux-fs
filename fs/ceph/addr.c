@@ -363,8 +363,8 @@ static int ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 	struct ceph_osd_request *req = NULL;
 	struct ceph_vino vino = ceph_vino(inode);
 	struct iov_iter iter;
+	size_t maxlen;
 	u64 objno, objoff, len, off = subreq->start;
-	u32 maxlen;
 	int err = -EIO;
 	bool sparse = IS_ENCRYPTED(inode) || ceph_test_mount_opt(fsc, SPARSEREAD);
 	int extent_cnt;
@@ -1243,9 +1243,9 @@ void ceph_allocate_page_array(struct address_space *mapping,
 {
 	struct inode *inode = mapping->host;
 	struct ceph_inode_info *ci = ceph_inode(inode);
+	size_t xlen;
 	u64 objnum;
 	u64 objoff;
-	u32 xlen;
 
 	/* prepare async write request */
 	ceph_wbc->offset = (u64)folio_pos(folio);
