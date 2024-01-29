@@ -56,8 +56,7 @@ static inline void v9fs_fid_add_modes(struct p9_fid *fid, unsigned int s_flags,
 	   ((fid->qid.version == 0) && !(s_flags & V9FS_IGNORE_QV)) ||
 	   (s_flags & V9FS_DIRECT_IO) || (f_flags & O_DIRECT)) {
 		fid->mode |= P9L_DIRECT; /* no read or write cache */
-	} else if ((!(s_cache & CACHE_WRITEBACK)) ||
-				(f_flags & O_DSYNC) || (s_flags & V9FS_SYNC)) {
+	} else if ((!(s_cache & CACHE_WRITEBACK)) || (s_flags & V9FS_SYNC)) {
 		fid->mode |= P9L_NOWRITECACHE;
 	}
 }
