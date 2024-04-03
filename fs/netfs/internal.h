@@ -38,6 +38,13 @@ void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
 			 loff_t pos, size_t copied);
 
 /*
+ * crypto.c
+ */
+int netfs_encrypt_folio(struct netfs_io_request *wreq, struct folio *folio,
+			unsigned long long start, size_t len, gfp_t gfp);
+int netfs_encrypt(struct netfs_io_request *wreq, unsigned long long to, gfp_t gfp);
+
+/*
  * direct_read.c
  */
 int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,

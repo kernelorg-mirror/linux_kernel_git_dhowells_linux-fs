@@ -61,6 +61,7 @@
 	EM(netfs_rreq_trace_dirty,		"DIRTY  ")	\
 	EM(netfs_rreq_trace_done,		"DONE   ")	\
 	EM(netfs_rreq_trace_end_copy_to_cache,	"END-C2C")	\
+	EM(netfs_rreq_trace_encrypt,		"ENCRYPT")	\
 	EM(netfs_rreq_trace_free,		"FREE   ")	\
 	EM(netfs_rreq_trace_intr,		"INTR   ")	\
 	EM(netfs_rreq_trace_inval_cache,	"INVL-CA")	\
@@ -205,6 +206,7 @@
 	EM(netfs_folio_trace_cancel_copy,	"cancel-copy")	\
 	EM(netfs_folio_trace_cancel_store,	"cancel-store")	\
 	EM(netfs_folio_trace_copy_to_cache,	"mark-copy")	\
+	EM(netfs_folio_trace_encrypt,		"encrypt")	\
 	EM(netfs_folio_trace_end_copy,		"end-copy")	\
 	EM(netfs_folio_trace_endwb,		"endwb")	\
 	EM(netfs_folio_trace_endwb_cc,		"endwb-cc")	\

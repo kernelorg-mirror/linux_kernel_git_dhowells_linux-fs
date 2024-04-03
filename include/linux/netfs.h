@@ -23,6 +23,7 @@
 enum netfs_sreq_ref_trace;
 typedef struct mempool mempool_t;
 struct readahead_control;
+struct scatterlist;
 struct netfs_io_request;
 struct netfs_io_subrequest;
 struct fscache_occupancy;
@@ -261,6 +262,7 @@ struct netfs_io_request {
 	struct bvecq_pos	load_cursor;	/* Point at which new folios are loaded in */
 	struct bvecq_pos	collect_cursor;	/* Clear-up point of I/O buffer */
 	struct bvecq_pos	bounce_alloc;	/* Bounce buffer allocation point */
+	struct bvecq_pos	encrypt_cursor;	/* Encrypt dispatch point */
 	struct bvecq_pos	bounce_collect;	/* Bounce buffer cleanup point */
 	struct bvecq_pos	retry_cursor;	/* Point from which retries are dispatched */
 	wait_queue_head_t	waitq;		/* Processor waiter */
@@ -273,6 +275,7 @@ struct netfs_io_request {
 	unsigned long long	i_size;		/* Size of the file */
 	unsigned long long	start;		/* Start position */
 	unsigned long long	bounce_alloc_to; /* Bounce buffer allocated to */
+	atomic64_t		encrypted_to;	/* Position encryption has reached */
 	unsigned long long	collected_to;	/* Point we've collected to */
 	unsigned long long	cache_coll_to;	/* Point the cache has collected to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
@@ -350,6 +353,13 @@ struct netfs_request_ops {
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	void (*retry_request)(struct netfs_io_request *wreq, struct netfs_io_stream *stream);
 	void (*invalidate_cache)(struct netfs_io_request *wreq);
+
+	/* Content encryption */
+	int (*encrypt_block)(struct netfs_io_request *wreq,
+			     unsigned long long start,
+			     struct scatterlist *src_sg,
+			     struct scatterlist *dst_sg,
+			     gfp_t gfp);
 };
 
 /*
