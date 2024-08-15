@@ -6,6 +6,7 @@
  */
 
 #include <linux/bvecq.h>
+#include <linux/scatterlist.h>
 #include "internal.h"
 
 void bvecq_dump(const struct bvecq *bq)
@@ -868,3 +869,236 @@ int bvecq_append_page(struct bvecq_pos *pos, struct page *page,
 	return 0;
 }
 EXPORT_SYMBOL(bvecq_append_page);
+
+/*
+ * Allocate pages and append them to the specified buffer.
+ */
+int bvecq_buffer_add_space(struct bvecq_pos *pos,
+			   uoff_t *start, uoff_t to, uoff_t end,
+			   gfp_t gfp, bool for_writeback)
+{
+	struct bvecq *bq = pos->bvecq, *new_bq = NULL;
+	int orig_nr_slots = bq->nr_slots;
+
+	while (*start < to) {
+		struct page *page;
+		size_t nr_pages = DIV_ROUND_UP(end - *start, PAGE_SIZE);
+		int order = 0;
+
+		if (bvecq_is_full(bq)) {
+			struct bvecq *p;
+
+			p = bvecq_alloc_one(nr_pages, gfp, for_writeback);
+			if (!p)
+				goto nomem;
+			p->mem_type = BVECQ_MEM_ALLOCED;
+			p->prev = bq;
+
+			/* We don't attach new bvecqs to the chain until we've
+			 * avoided getting ENOMEM.
+			 */
+			if (!new_bq)
+				new_bq = p;
+			else
+				bq->next = p;
+			bq = p;
+		}
+
+		if (nr_pages > 1)
+			order = umin(ilog2(nr_pages), MAX_PAGECACHE_ORDER);
+
+		page = alloc_pages(gfp | __GFP_COMP, order);
+		if (!page && order > 0) {
+			order = 0;
+			if (!for_writeback)
+				page = alloc_pages(gfp | __GFP_COMP, order);
+			else
+				page = mempool_alloc(&netfs_page_pool, gfp | __GFP_COMP);
+		}
+		if (!page)
+			goto nomem;
+
+		bvec_set_page(&bq->bv[bq->nr_slots++], page, PAGE_SIZE << order, 0);
+		*start += PAGE_SIZE << order;
+	}
+
+	if (new_bq)
+		pos->bvecq->next = new_bq;
+	pos->slot = bq->nr_slots;
+	bvecq_pos_move(pos, bq);
+	return 0;
+
+nomem:
+	/* Free the pages we just allocated. */
+	bq = pos->bvecq;
+	for (int i = orig_nr_slots; i < bq->nr_slots; i++)
+		bvecq_free_slot(bq, i);
+	bvecq_put(new_bq);
+	return -ENOMEM;
+}
+
+/*
+ * Copy data from a bvecq chain into a destination iterator.
+ */
+int bvecq_copy_to_iter(struct bvecq_pos *pos, struct iov_iter *dst, size_t amount)
+{
+	struct bvecq *bq;
+	size_t offset = pos->offset;
+	size_t copied = 0;
+	int slot = pos->slot;
+
+	amount = umin(amount, iov_iter_count(dst));
+
+	for (bq = pos->bvecq; bq; bq = bq->next) {
+		for (; slot < bq->nr_slots; slot++) {
+			struct bio_vec *bv = &bq->bv[slot];
+			size_t part = umin(amount - copied, bv->bv_len - offset);
+			size_t did;
+
+			if (part) {
+				did = copy_page_to_iter(bv->bv_page, bv->bv_offset + offset,
+							part, dst);
+				if (!did) {
+					if (!copied)
+						return -EFAULT;
+					break;
+				}
+				copied += did;
+				if (copied < part || copied >= amount)
+					break;
+			}
+			offset = 0;
+		}
+		if (!bq->next)
+			break;
+		slot = 0;
+	}
+
+	pos->offset = offset;
+	pos->slot = slot;
+	bvecq_pos_move(pos, bq);
+	return amount;
+}
+
+static inline void memcpy_bvec(struct bio_vec *dst, size_t dst_off,
+			       struct bio_vec *src, size_t src_off,
+			       size_t len)
+{
+	if (WARN_ON(dst_off + len > dst->bv_len) ||
+	    WARN_ON(src_off + len > src->bv_len))
+		return;
+
+	do {
+		const char *s = kmap_local_page(src->bv_page + src_off / PAGE_SIZE);
+		char *d	      = kmap_local_page(dst->bv_page + dst_off / PAGE_SIZE);
+		size_t chunk = len;
+
+		s += src_off % PAGE_SIZE;
+		d += dst_off % PAGE_SIZE;
+
+		if (PageHighMem(dst->bv_page) &&
+		    chunk > PAGE_SIZE - offset_in_page(dst_off))
+			chunk = PAGE_SIZE - offset_in_page(dst_off);
+		if (PageHighMem(src->bv_page) &&
+		    chunk > PAGE_SIZE - offset_in_page(src_off))
+			chunk = PAGE_SIZE - offset_in_page(src_off);
+		memcpy(d, s, chunk);
+		kunmap_local(s);
+		kunmap_local(d);
+
+		dst_off += chunk;
+		src_off += chunk;
+		len -= chunk;
+	} while (len > 0);
+}
+
+/*
+ * Copy data from the source bvecq chain into the destination bvecq chain.
+ */
+size_t bvecq_copy_to_bvecq(struct bvecq_pos *src, struct bvecq_pos *dst, size_t amount)
+{
+	size_t copied = 0;
+
+	while (copied < amount) {
+		struct bio_vec *sv, *dv;
+		size_t part;
+
+		if (!bvecq_pos_nudge(src) || !bvecq_pos_nudge(dst)) {
+			kdebug("nudge fail");
+			break;
+		}
+
+		_debug("amount %zx/%zx", copied, amount);
+		_debug("src %u/%u %x", src->slot, src->bvecq->nr_slots, src->offset);
+		_debug("dst %u/%u %x", dst->slot, dst->bvecq->nr_slots, dst->offset);
+
+		sv = &src->bvecq->bv[src->slot];
+		dv = &dst->bvecq->bv[dst->slot];
+
+		part = min3(sv->bv_len - src->offset,
+			    dv->bv_len - dst->offset,
+			    amount);
+
+		memcpy_bvec(dv, dst->offset, sv, src->offset, part);
+		src->offset += part;
+		dst->offset += part;
+		copied += part;
+	}
+
+	return copied;
+}
+
+/*
+ * Extract up to sg_max folios from a bvecq and add them to the scatterlist.
+ * The pages are not pinned.
+ */
+size_t bvecq_extract_to_sg(struct bvecq_pos *pos, size_t maxsize,
+			   struct sg_table *sgtable, unsigned int sg_max)
+{
+	struct bvecq *bvecq = pos->bvecq;
+	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+	unsigned int slot = pos->slot;
+	size_t extracted = 0;
+	size_t offset = pos->offset;
+
+	if (slot >= bvecq->nr_slots) {
+		bvecq = bvecq->next;
+		if (WARN_ON_ONCE(!bvecq))
+			return 0;
+		slot = 0;
+	}
+
+	do {
+		const struct bio_vec *bv = &bvecq->bv[slot];
+		size_t blen = bv->bv_len;
+
+		if (offset < blen) {
+			size_t part = umin(maxsize - extracted, blen - offset);
+
+			sg_set_page(sg, bv->bv_page, part, bv->bv_offset + offset);
+			sgtable->nents++;
+			sg++;
+			sg_max--;
+			offset += part;
+			extracted += part;
+		}
+
+		if (offset >= blen) {
+			offset = 0;
+			slot++;
+			if (slot >= bvecq->nr_slots) {
+				if (!bvecq->next) {
+					WARN_ON_ONCE(extracted < maxsize);
+					break;
+				}
+				bvecq = bvecq->next;
+				slot = 0;
+			}
+		}
+	} while (sg_max > 0 && extracted < maxsize);
+
+	pos->bvecq  = bvecq;
+	pos->slot   = slot;
+	pos->offset = offset;
+	return extracted;
+}
