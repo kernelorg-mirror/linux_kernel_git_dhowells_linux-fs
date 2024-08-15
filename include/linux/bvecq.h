@@ -10,6 +10,8 @@
 
 #include <linux/bvec.h>
 
+struct sg_table;
+
 /*
  * The type of memory retention used by the elements in bvecq->bv[] and how to
  * clean it up.
@@ -89,6 +91,15 @@ size_t bvecq_slice(struct bvecq_pos *pos, size_t max_size,
 ssize_t bvecq_extract(struct bvecq_pos *pos, size_t max_size,
 		      unsigned int max_slots, struct bvecq **to);
 ssize_t bvecq_load_from_ra(struct bvecq_pos *pos, struct readahead_control *ractl);
+int bvecq_buffer_add_space(struct bvecq_pos *pos, unsigned long long *start,
+			   unsigned long long to, unsigned long long end,
+			   bool discontig, gfp_t gfp);
+int bvecq_copy_to_iter(struct bvecq_pos *pos, struct iov_iter *dst, size_t amount);
+size_t bvecq_copy_to_bvecq(struct bvecq_pos *pos, struct bvecq_pos *to, size_t amount);
+size_t bvecq_extract_to_sg(struct bvecq_pos *pos, size_t maxsize,
+			   struct sg_table *sgtable, unsigned int sg_max);
+int bvecq_append_page(struct bvecq_pos *pos, struct page *page,
+		      size_t offset, size_t len, gfp_t gfp);
 
 /**
  * bvecq_alloc_buffer - Allocate a bvecq chain and populate with buffers
