@@ -56,6 +56,10 @@ static void netfs_unlock_read_folio(struct netfs_io_request *rreq,
 		goto just_unlock;
 	}
 
+	/* Decrypt the folio in place. */
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags)))
+		netfs_decrypt_folio(rreq, folio);
+
 	flush_dcache_folio(folio);
 	folio_mark_uptodate(folio);
 
