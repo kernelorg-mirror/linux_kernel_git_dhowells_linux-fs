@@ -383,6 +383,25 @@ static inline bool netfs_are_all_subreqs_queued(const struct netfs_io_request *r
 }
 
 /*
+ * Check to see if a buffer aligns with the crypto block size.  If it doesn't
+ * the crypto layer is going to copy all the data - in which case relying on
+ * the crypto op for a free copy is pointless.
+ */
+static inline bool netfs_is_crypto_aligned(struct netfs_io_request *rreq,
+					   struct iov_iter *iter)
+{
+	unsigned long align;
+	size_t bsize = rreq->crypto_bsize;
+
+	if (!bsize)
+		return true;
+	if ((rreq->start | rreq->len) & (bsize - 1))
+		return false;
+	align = iov_iter_alignment(iter);
+	return (align & (bsize - 1)) == 0;
+}
+
+/*
  * fscache-cache.c
  */
 #ifdef CONFIG_PROC_FS
