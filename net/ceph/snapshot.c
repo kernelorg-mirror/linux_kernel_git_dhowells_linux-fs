@@ -17,6 +17,11 @@
  * the entire structure is freed.
  */
 
+static void ceph_snap_context_kfree(struct netfs_group *group)
+{
+	kfree(group);
+}
+
 /*
  * Create a new ceph snapshot context large enough to hold the
  * indicated number of snapshot ids (which can be 0).  Caller has
@@ -36,8 +41,9 @@ struct ceph_snap_context *ceph_create_snap_context(u32 snap_count,
 	if (!snapc)
 		return NULL;
 
-	refcount_set(&snapc->nref, 1);
-	snapc->num_snaps = snap_count;
+	refcount_set(&snapc->group.ref, 1);
+	snapc->group.free = ceph_snap_context_kfree;
+	snapc->num_snaps  = snap_count;
 
 	return snapc;
 }
@@ -46,18 +52,14 @@ EXPORT_SYMBOL(ceph_create_snap_context);
 struct ceph_snap_context *ceph_get_snap_context(struct ceph_snap_context *sc)
 {
 	if (sc)
-		refcount_inc(&sc->nref);
+		netfs_get_group(&sc->group);
 	return sc;
 }
 EXPORT_SYMBOL(ceph_get_snap_context);
 
 void ceph_put_snap_context(struct ceph_snap_context *sc)
 {
-	if (!sc)
-		return;
-	if (refcount_dec_and_test(&sc->nref)) {
-		/*printk(" deleting snap_context %p\n", sc);*/
-		kfree(sc);
-	}
+	if (sc)
+		netfs_put_group(&sc->group);
 }
 EXPORT_SYMBOL(ceph_put_snap_context);

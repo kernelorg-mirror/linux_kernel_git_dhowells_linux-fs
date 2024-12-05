@@ -2540,7 +2540,7 @@ int ceph_write_inode(struct inode *inode, struct writeback_control *wbc)
 	int wait = (wbc->sync_mode == WB_SYNC_ALL && !wbc->for_sync);
 
 	doutc(cl, "%p %llx.%llx wait=%d\n", inode, ceph_vinop(inode), wait);
-	ceph_fscache_unpin_writeback(inode, wbc);
+	netfs_unpin_writeback(inode, wbc);
 	if (wait) {
 		err = ceph_wait_on_async_create(inode);
 		if (err)

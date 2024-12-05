@@ -758,6 +758,7 @@ out:
 	pos->offset = offset;
 	return extracted;
 }
+EXPORT_SYMBOL_GPL(bvecq_extract);
 
 /**
  * bvecq_load_from_ra - Allocate a bvecq chain and load from readahead

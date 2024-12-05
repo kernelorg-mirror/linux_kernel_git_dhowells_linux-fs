@@ -2450,11 +2450,9 @@ static int fill_fscrypt_truncate(struct inode *inode,
 	struct iov_iter iter;
 	struct ceph_fscrypt_truncate_size_header *header;
 	void *p;
-	int retry_op = 0;
 	int len = CEPH_FSCRYPT_BLOCK_SIZE;
 	loff_t i_size = i_size_read(inode);
 	int got, ret, issued;
-	u64 objver;
 
 	ret = __ceph_get_caps(inode, NULL, CEPH_CAP_FILE_RD, 0, -1, &got);
 	if (ret < 0)
@@ -2466,16 +2464,6 @@ static int fill_fscrypt_truncate(struct inode *inode,
 	      i_size, attr->ia_size, ceph_cap_string(got),
 	      ceph_cap_string(issued));
 
-	/* Try to writeback the dirty pagecaches */
-	if (issued & (CEPH_CAP_FILE_BUFFER)) {
-		loff_t lend = orig_pos + CEPH_FSCRYPT_BLOCK_SIZE - 1;
-
-		ret = filemap_write_and_wait_range(inode->i_mapping,
-						   orig_pos, lend);
-		if (ret < 0)
-			goto out;
-	}
-
 	ret = -ENOMEM;
 	dbuf = bvecq_alloc_chain(2, GFP_KERNEL, false);
 	if (!dbuf)
@@ -2486,10 +2474,8 @@ static int fill_fscrypt_truncate(struct inode *inode,
 		goto out;
 
 	iov_iter_bvec_queue(&iter, ITER_DEST, dbuf, 1, 0, len);
-
-	pos = orig_pos;
-	ret = __ceph_sync_read(inode, &pos, &iter, &retry_op, &objver);
-	if (ret < 0)
+	ret = netfs_unbuffered_read_from_inode(inode, orig_pos, dbuf, len, true);
+	if (ret < 0 && ret != -ENODATA)
 		goto out;
 
 	header = kmap_local_bvecq(dbuf, 0);
@@ -2506,16 +2492,14 @@ static int fill_fscrypt_truncate(struct inode *inode,
 	header->block_size = cpu_to_le32(CEPH_FSCRYPT_BLOCK_SIZE);
 
 	/*
-	 * If we hit a hole here, we should just skip filling
-	 * the fscrypt for the request, because once the fscrypt
-	 * is enabled, the file will be split into many blocks
-	 * with the size of CEPH_FSCRYPT_BLOCK_SIZE, if there
-	 * has a hole, the hole size should be multiple of block
-	 * size.
+	 * If we hit a hole here, we should just skip filling the fscrypt for
+	 * the request, because once the fscrypt is enabled, the file will be
+	 * split into many blocks with the size of CEPH_FSCRYPT_BLOCK_SIZE.  If
+	 * there was a hole, the hole size should be multiple of block size.
 	 *
 	 * If the Rados object doesn't exist, it will be set to 0.
 	 */
-	if (!objver) {
+	if (ret != -ENODATA) {
 		doutc(cl, "hit hole, ppos %lld < size %lld\n", pos, i_size);
 
 		header->data_len = cpu_to_le32(8 + 8 + 4);

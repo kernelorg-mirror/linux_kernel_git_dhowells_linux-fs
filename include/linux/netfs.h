@@ -28,6 +28,14 @@ struct netfs_io_request;
 struct netfs_io_subrequest;
 struct fscache_occupancy;
 
+/*
+ * Size of allocations for default netfs_io_(sub)request object slabs and
+ * mempools.  If a filesystem's request and subrequest objects fit within this
+ * size, they can use these otherwise they must provide their own.
+ */
+#define NETFS_DEF_IO_REQUEST_SIZE (sizeof(struct netfs_io_request) + 24)
+#define NETFS_DEF_IO_SUBREQUEST_SIZE (sizeof(struct netfs_io_subrequest) + 16)
+
 /**
  * folio_start_private_2 - Start an fscache write on a folio.  [DEPRECATED]
  * @folio: The folio.

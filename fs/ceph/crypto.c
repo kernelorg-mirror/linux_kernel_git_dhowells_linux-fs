@@ -557,6 +557,60 @@ int ceph_fscrypt_decrypt_extents(struct inode *inode, struct page **page,
 	return ret;
 }
 
+#if 0
+int ceph_decrypt_block(struct netfs_io_request *rreq, loff_t pos, size_t len,
+		       struct scatterlist *source_sg, unsigned int n_source,
+		       struct scatterlist *dest_sg, unsigned int n_dest)
+{
+	struct ceph_sparse_extent *map = op->extent.sparse_ext;
+	struct ceph_inode_info *ci = ceph_inode(inode);
+	size_t xlen;
+	u64 objno, objoff;
+	u32 ext_cnt = op->extent.sparse_ext_cnt;
+	int i, ret = 0;
+
+	/* Nothing to do for empty array */
+	if (ext_cnt == 0) {
+		dout("%s: empty array, ret 0\n", __func__);
+		return 0;
+	}
+
+	ceph_calc_file_object_mapping(&ci->i_layout, pos, map[0].len,
+				      &objno, &objoff, &xlen);
+
+	for (i = 0; i < ext_cnt; ++i) {
+		struct ceph_sparse_extent *ext = &map[i];
+		int pgsoff = ext->off - objoff;
+		int pgidx = pgsoff >> PAGE_SHIFT;
+		int fret;
+
+		if ((ext->off | ext->len) & ~CEPH_FSCRYPT_BLOCK_MASK) {
+			pr_warn("%s: bad encrypted sparse extent idx %d off %llx len %llx\n",
+				__func__, i, ext->off, ext->len);
+			return -EIO;
+		}
+		fret = ceph_fscrypt_decrypt_pages(inode, &page[pgidx],
+						 off + pgsoff, ext->len);
+		dout("%s: [%d] 0x%llx~0x%llx fret %d\n", __func__, i,
+				ext->off, ext->len, fret);
+		if (fret < 0) {
+			if (ret == 0)
+				ret = fret;
+			break;
+		}
+		ret = pgsoff + fret;
+	}
+	dout("%s: ret %d\n", __func__, ret);
+	return ret;
+}
+
+int ceph_encrypt_block(struct netfs_io_request *wreq, loff_t pos, size_t len,
+		       struct scatterlist *source_sg, unsigned int n_source,
+		       struct scatterlist *dest_sg, unsigned int n_dest)
+{
+}
+#endif
+
 /**
  * ceph_fscrypt_encrypt_pages - encrypt an array of pages
  * @inode: pointer to inode associated with these pages

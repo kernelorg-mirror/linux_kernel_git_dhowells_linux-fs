@@ -43,6 +43,8 @@ static inline void ceph_fscache_resize(struct inode *inode, loff_t to)
 	}
 }
 
+#if 0 // TODO: Remove after netfs conversion
+
 static inline int ceph_fscache_unpin_writeback(struct inode *inode,
 						struct writeback_control *wbc)
 {
@@ -50,6 +52,7 @@ static inline int ceph_fscache_unpin_writeback(struct inode *inode,
 }
 
 #define ceph_fscache_dirty_folio netfs_dirty_folio
+#endif // TODO: Remove after netfs conversion
 
 static inline bool ceph_is_cache_enabled(struct inode *inode)
 {
@@ -100,6 +103,7 @@ static inline void ceph_fscache_resize(struct inode *inode, loff_t to)
 {
 }
 
+#if 0 // TODO: Remove after netfs conversion
 static inline int ceph_fscache_unpin_writeback(struct inode *inode,
 					       struct writeback_control *wbc)
 {
@@ -107,6 +111,7 @@ static inline int ceph_fscache_unpin_writeback(struct inode *inode,
 }
 
 #define ceph_fscache_dirty_folio filemap_dirty_folio
+#endif // TODO: Remove after netfs conversion
 
 static inline bool ceph_is_cache_enabled(struct inode *inode)
 {

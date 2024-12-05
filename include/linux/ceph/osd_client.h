@@ -249,6 +249,7 @@ struct ceph_osd_request {
 	struct completion r_completion;       /* private to osd_client.c */
 	ceph_osdc_callback_t r_callback;
 
+	struct netfs_io_subrequest *r_subreq;
 	struct inode *r_inode;         	      /* for use by callbacks */
 	struct list_head r_private_item;      /* ditto */
 	void *r_priv;			      /* ditto */

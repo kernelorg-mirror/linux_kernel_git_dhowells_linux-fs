@@ -146,7 +146,7 @@ static int __init netfs_init(void)
 		goto error_page_pool;
 
 	netfs_request_slab = kmem_cache_create("netfs_request",
-					       sizeof(struct netfs_io_request), 0,
+					       NETFS_DEF_IO_REQUEST_SIZE, 0,
 					       SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT,
 					       NULL);
 	if (!netfs_request_slab)
@@ -156,7 +156,7 @@ static int __init netfs_init(void)
 		goto error_reqpool;
 
 	netfs_subrequest_slab = kmem_cache_create("netfs_subrequest",
-						  sizeof(struct netfs_io_subrequest) + 16, 0,
+						  NETFS_DEF_IO_SUBREQUEST_SIZE, 0,
 						  SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT,
 						  NULL);
 	if (!netfs_subrequest_slab)

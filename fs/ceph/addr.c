@@ -65,27 +65,30 @@
 	(CONGESTION_ON_THRESH(congestion_kb) -				\
 	 (CONGESTION_ON_THRESH(congestion_kb) >> 2))
 
+#if 0 // TODO: Remove after netfs conversion
 static int ceph_netfs_check_write_begin(struct file *file, uoff_t pos, unsigned int len,
 					struct folio **foliop, void **_fsdata);
 
-static inline struct ceph_snap_context *page_snap_context(struct page *page)
+static struct ceph_snap_context *page_snap_context(struct page *page)
 {
 	if (PagePrivate(page))
 		return (void *)page->private;
 	return NULL;
 }
+#endif // TODO: Remove after netfs conversion
 
 /*
  * Dirty a page.  Optimistically adjust accounting, on the assumption
  * that we won't race with invalidate.  If we do, readjust.
  */
-static bool ceph_dirty_folio(struct address_space *mapping, struct folio *folio)
+bool ceph_dirty_folio(struct address_space *mapping, struct folio *folio)
 {
 	struct inode *inode = mapping->host;
 	struct ceph_client *cl = ceph_inode_to_client(inode);
 	struct ceph_mds_client *mdsc = ceph_sb_to_mdsc(inode->i_sb);
 	struct ceph_inode_info *ci;
 	struct ceph_snap_context *snapc;
+	struct netfs_group *group;
 
 	if (folio_test_dirty(folio)) {
 		doutc(cl, "%llx.%llx %p idx %lu -- already dirty\n",
@@ -102,16 +105,28 @@ static bool ceph_dirty_folio(struct address_space *mapping, struct folio *folio)
 	spin_lock(&ci->i_ceph_lock);
 	if (__ceph_have_pending_cap_snap(ci)) {
 		struct ceph_cap_snap *capsnap =
-				list_last_entry(&ci->i_cap_snaps,
-						struct ceph_cap_snap,
-						ci_item);
-		snapc = ceph_get_snap_context(capsnap->context);
+			list_last_entry(&ci->i_cap_snaps,
+					struct ceph_cap_snap,
+					ci_item);
+		snapc = capsnap->context;
 		capsnap->dirty_pages++;
 	} else {
-		BUG_ON(!ci->i_head_snapc);
-		snapc = ceph_get_snap_context(ci->i_head_snapc);
+		snapc = ci->i_head_snapc;
+		BUG_ON(!snapc);
 		++ci->i_wrbuffer_ref_head;
 	}
+
+	/* Attach a reference to the snap/group to the folio. */
+	group = netfs_folio_group(folio);
+	if (group != &snapc->group) {
+		netfs_set_group(folio, &snapc->group);
+		if (group) {
+			doutc(cl, "Different group %p != %p\n",
+			      group, &snapc->group);
+			netfs_put_group(group);
+		}
+	}
+
 	if (ci->i_wrbuffer_ref == 0)
 		ihold(inode);
 	++ci->i_wrbuffer_ref;
@@ -123,16 +138,10 @@ static bool ceph_dirty_folio(struct address_space *mapping, struct folio *folio)
 	      snapc, snapc->seq, snapc->num_snaps);
 	spin_unlock(&ci->i_ceph_lock);
 
-	/*
-	 * Reference snap context in folio->private.  Also set
-	 * PagePrivate so that we get invalidate_folio callback.
-	 */
-	VM_WARN_ON_FOLIO(folio->private, folio);
-	folio_attach_private(folio, snapc);
-
-	return ceph_fscache_dirty_folio(mapping, folio);
+	return netfs_dirty_folio(mapping, folio);
 }
 
+#if 0 // TODO: Remove after netfs conversion
 /*
  * If we are truncating the full folio (i.e. offset == 0), adjust the
  * dirty folio counters appropriately.  Only called if there is private
@@ -1274,6 +1283,7 @@ bool is_num_ops_too_big(struct ceph_writeback_ctl *ceph_wbc)
 	return ceph_wbc->num_ops >=
 		(ceph_wbc->from_pool ?  CEPH_OSD_SLAB_OPS : CEPH_OSD_MAX_OPS);
 }
+#endif // TODO: Remove after netfs conversion
 
 static inline
 bool is_write_congestion_happened(struct ceph_fs_client *fsc)
@@ -1282,6 +1292,7 @@ bool is_write_congestion_happened(struct ceph_fs_client *fsc)
 		CONGESTION_ON_THRESH(fsc->mount_options->congestion_kb);
 }
 
+#if 0 // TODO: Remove after netfs conversion
 static inline int move_dirty_folio_in_page_array(struct address_space *mapping,
 		struct writeback_control *wbc,
 		struct ceph_writeback_ctl *ceph_wbc, struct folio *folio)
@@ -1974,6 +1985,7 @@ const struct address_space_operations ceph_aops = {
 	.direct_IO = noop_direct_IO,
 	.migrate_folio = filemap_migrate_folio,
 };
+#endif // TODO: Remove after netfs conversion
 
 static void ceph_block_sigs(sigset_t *oldset)
 {
@@ -2078,6 +2090,7 @@ out_restore:
 	return ret;
 }
 
+#if 0 // TODO: Remove after netfs conversion
 static vm_fault_t ceph_page_mkwrite(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -2181,6 +2194,7 @@ out_free:
 		ret = vmf_error(err);
 	return ret;
 }
+#endif // TODO: Remove after netfs conversion
 
 void ceph_fill_inline_data(struct inode *inode, struct page *locked_page,
 			   char	*data, size_t len)

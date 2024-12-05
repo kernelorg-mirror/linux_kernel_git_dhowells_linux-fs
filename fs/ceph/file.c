@@ -96,6 +96,7 @@ static __le32 ceph_flags_sys2wire(struct ceph_mds_client *mdsc, u32 flags)
  * need to wait for MDS acknowledgement.
  */
 
+#if 0 // TODO: Remove after netfs conversion
 static void ceph_dirty_pages(struct bvecq *dbuf)
 {
 	for (; dbuf; dbuf = dbuf->next) {
@@ -104,6 +105,7 @@ static void ceph_dirty_pages(struct bvecq *dbuf)
 				set_page_dirty_lock(dbuf->bv[i].bv_page);
 	}
 }
+#endif // TODO: Remove after netfs conversion
 
 /*
  * Prepare an open request.  Preallocate ceph_cap to avoid an
@@ -960,6 +962,7 @@ int ceph_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+#if 0 // TODO: Remove after netfs conversion
 enum {
 	HAVE_RETRIED = 1,
 	CHECK_EOF =    2,
@@ -2216,6 +2219,7 @@ again:
 
 	return ret;
 }
+#endif // TODO: Remove after netfs conversion
 
 /*
  * Wrap filemap_splice_read with checks for cap bits on the inode.
@@ -2278,6 +2282,7 @@ out_end:
 	return ret;
 }
 
+#if 0 // TODO: Remove after netfs conversion
 /*
  * Take cap references to avoid releasing caps to MDS mid-write.
  *
@@ -2472,6 +2477,7 @@ out_unlocked:
 	ceph_free_cap_flush(prealloc_cf);
 	return written ? written : err;
 }
+#endif // TODO: Remove after netfs conversion
 
 /*
  * llseek.  be sure to verify file size on SEEK_END.
@@ -3159,6 +3165,10 @@ static int ceph_fadvise(struct file *file, loff_t offset, loff_t len, int advice
 	if (fi->fmode & CEPH_FILE_MODE_LAZY)
 		return -EACCES;
 
+	ret = netfs_start_io_read(inode);
+	if (ret < 0)
+		return ret;
+
 	ret = ceph_get_caps(file, CEPH_CAP_FILE_RD, want, -1, &got);
 	if (ret < 0) {
 		doutc(cl, "%llx.%llx, error getting cap\n", ceph_vinop(inode));
@@ -3179,6 +3189,7 @@ static int ceph_fadvise(struct file *file, loff_t offset, loff_t len, int advice
 	      inode, ceph_vinop(inode), ceph_cap_string(got), ret);
 	ceph_put_cap_refs(ceph_inode(inode), got);
 out:
+	netfs_end_io_read(inode);
 	return ret;
 }
 
@@ -3186,8 +3197,8 @@ const struct file_operations ceph_file_fops = {
 	.open = ceph_open,
 	.release = ceph_release,
 	.llseek = ceph_llseek,
-	.read_iter = ceph_read_iter,
-	.write_iter = ceph_write_iter,
+	.read_iter = ceph_netfs_read_iter,
+	.write_iter = ceph_netfs_write_iter,
 	.mmap_prepare = ceph_mmap_prepare,
 	.fsync = ceph_fsync,
 	.lock = ceph_lock,

@@ -470,7 +470,7 @@ static DEFINE_IDA(rbd_dev_id_ida);
 static struct workqueue_struct *rbd_wq;
 
 static struct ceph_snap_context rbd_empty_snapc = {
-	.nref = REFCOUNT_INIT(1),
+	.group.ref = REFCOUNT_INIT(1),
 };
 
 /*

@@ -858,7 +858,8 @@ int netfs_writepages_group(struct address_space *mapping,
 		if (netfs_folio_group(folio) != NETFS_FOLIO_COPY_TO_CACHE &&
 		    unlikely(!test_bit(NETFS_RREQ_UPLOAD_TO_SERVER, &wreq->flags))) {
 			set_bit(NETFS_RREQ_UPLOAD_TO_SERVER, &wreq->flags);
-			wreq->netfs_ops->begin_writeback(wreq);
+			if (wreq->netfs_ops->begin_writeback)
+				wreq->netfs_ops->begin_writeback(wreq);
 			if (wreq->io_streams[0].avail) {
 				params.notes |= NOTE_UPLOAD_AVAIL;
 				/* Order setting the active flag after other fields. */

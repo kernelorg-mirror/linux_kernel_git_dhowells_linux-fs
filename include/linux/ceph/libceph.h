@@ -16,6 +16,7 @@
 #include <linux/writeback.h>
 #include <linux/slab.h>
 #include <linux/refcount.h>
+#include <linux/netfs.h>
 
 #include <linux/ceph/types.h>
 #include <linux/ceph/messenger.h>
@@ -161,7 +162,7 @@ static inline bool ceph_msgr2(struct ceph_client *client)
  * dirtied.
  */
 struct ceph_snap_context {
-	refcount_t nref;
+	struct netfs_group group;
 	u64 seq;
 	u32 num_snaps;
 	u64 snaps[];
