@@ -500,18 +500,16 @@ static int ceph_init_request(struct netfs_io_request *rreq, struct file *file)
 	if (!priv)
 		return -ENOMEM;
 
+	/*
+	 * If we are doing readahead triggered by a read, fault-in or
+	 * MADV/FADV_WILLNEED, someone higher up the stack must be holding the
+	 * FILE_CACHE and/or LAZYIO caps.
+	 */
 	if (file) {
-		struct ceph_rw_context *rw_ctx;
-		struct ceph_file_info *fi = file->private_data;
-
 		priv->file_ra_pages = file->f_ra.ra_pages;
 		priv->file_ra_disabled = file->f_mode & FMODE_RANDOM;
-
-		rw_ctx = ceph_find_rw_context(fi);
-		if (rw_ctx) {
-			rreq->netfs_priv = priv;
-			return 0;
-		}
+		rreq->netfs_priv = priv;
+		return 0;
 	}
 
 	/*
@@ -2026,10 +2024,7 @@ static vm_fault_t ceph_filemap_fault(struct vm_fault *vmf)
 
 	if ((got & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO)) ||
 	    !ceph_has_inline_data(ci)) {
-		CEPH_DEFINE_RW_CONTEXT(rw_ctx, got);
-		ceph_add_rw_context(fi, &rw_ctx);
 		ret = filemap_fault(vmf);
-		ceph_del_rw_context(fi, &rw_ctx);
 		doutc(cl, "%llx.%llx %llu drop cap refs %s ret %x\n",
 		      ceph_vinop(inode), off, ceph_cap_string(got), ret);
 	} else

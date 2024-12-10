@@ -168,8 +168,6 @@ static int ceph_init_file_info(struct inode *inode, struct file *file,
 	ceph_get_fmode(ci, fmode, 1);
 	fi->fmode = fmode;
 
-	spin_lock_init(&fi->rw_contexts_lock);
-	INIT_LIST_HEAD(&fi->rw_contexts);
 	fi->filp_gen = READ_ONCE(ceph_inode_to_fs_client(inode)->filp_gen);
 
 	if ((file->f_mode & FMODE_WRITE) && ceph_has_inline_data(ci)) {
@@ -938,7 +936,6 @@ int ceph_release(struct inode *inode, struct file *file)
 		struct ceph_dir_file_info *dfi = file->private_data;
 		doutc(cl, "%p %llx.%llx dir file %p\n", inode,
 		      ceph_vinop(inode), file);
-		WARN_ON(!list_empty(&dfi->file_info.rw_contexts));
 
 		ceph_put_fmode(ci, dfi->file_info.fmode, 1);
 
@@ -951,7 +948,6 @@ int ceph_release(struct inode *inode, struct file *file)
 		struct ceph_file_info *fi = file->private_data;
 		doutc(cl, "%p %llx.%llx regular file %p\n", inode,
 		      ceph_vinop(inode), file);
-		WARN_ON(!list_empty(&fi->rw_contexts));
 
 		ceph_fscache_unuse_cookie(inode, file->f_mode & FMODE_WRITE);
 		ceph_put_fmode(ci, fi->fmode, 1);
@@ -2136,13 +2132,10 @@ again:
 			retry_op = READ_INLINE;
 		}
 	} else {
-		CEPH_DEFINE_RW_CONTEXT(rw_ctx, got);
 		doutc(cl, "async %p %llx.%llx %llu~%u got cap refs on %s\n",
 		      inode, ceph_vinop(inode), iocb->ki_pos, (unsigned)len,
 		      ceph_cap_string(got));
-		ceph_add_rw_context(fi, &rw_ctx);
 		ret = generic_file_read_iter(iocb, to);
-		ceph_del_rw_context(fi, &rw_ctx);
 	}
 
 	doutc(cl, "%p %llx.%llx dropping cap refs on %s = %d\n",
@@ -2238,7 +2231,6 @@ static ssize_t ceph_splice_read(struct file *in, loff_t *ppos,
 	struct ceph_inode_info *ci = ceph_inode(inode);
 	ssize_t ret;
 	int want = 0, got = 0;
-	CEPH_DEFINE_RW_CONTEXT(rw_ctx, 0);
 
 	dout("splice_read %p %llx.%llx %llu~%zu trying to get caps on %p\n",
 	     inode, ceph_vinop(inode), *ppos, len, inode);
@@ -2275,10 +2267,7 @@ static ssize_t ceph_splice_read(struct file *in, loff_t *ppos,
 	dout("splice_read %p %llx.%llx %llu~%zu got cap refs on %s\n",
 	     inode, ceph_vinop(inode), *ppos, len, ceph_cap_string(got));
 
-	rw_ctx.caps = got;
-	ceph_add_rw_context(fi, &rw_ctx);
 	ret = filemap_splice_read(in, ppos, pipe, len, flags);
-	ceph_del_rw_context(fi, &rw_ctx);
 
 	dout("splice_read %p %llx.%llx dropping cap refs on %s = %zd\n",
 	     inode, ceph_vinop(inode), ceph_cap_string(got), ret);
@@ -3176,7 +3165,7 @@ static int ceph_fadvise(struct file *file, loff_t offset, loff_t len, int advice
 		goto out;
 	}
 
-	if ((got & want) == want) {
+	if (got & want) {
 		doutc(cl, "fadvise(WILLNEED) %p %llx.%llx %llu~%llu got cap refs on %s\n",
 		      inode, ceph_vinop(inode), offset, len,
 		      ceph_cap_string(got));
