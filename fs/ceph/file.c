@@ -13,6 +13,7 @@
 #include <linux/iversion.h>
 #include <linux/ktime.h>
 #include <linux/splice.h>
+#include <linux/fadvise.h>
 
 #include "super.h"
 #include "mds_client.h"
@@ -3149,6 +3150,49 @@ static ssize_t ceph_copy_file_range(struct file *src_file, loff_t src_off,
 	return ret;
 }
 
+/*
+ * If the user wants to manually trigger readahead, we have to get a cap to
+ * allow that.
+ */
+static int ceph_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
+{
+	struct inode *inode = file_inode(file);
+	struct ceph_file_info *fi = file->private_data;
+	struct ceph_client *cl = ceph_inode_to_client(inode);
+	int want = CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO, got = 0;
+	int ret;
+
+	if (advice != POSIX_FADV_WILLNEED)
+		return generic_fadvise(file, offset, len, advice);
+
+	if (!(fi->flags & CEPH_F_SYNC))
+		return -EACCES;
+	if (fi->fmode & CEPH_FILE_MODE_LAZY)
+		return -EACCES;
+
+	ret = ceph_get_caps(file, CEPH_CAP_FILE_RD, want, -1, &got);
+	if (ret < 0) {
+		doutc(cl, "%llx.%llx, error getting cap\n", ceph_vinop(inode));
+		goto out;
+	}
+
+	if ((got & want) == want) {
+		doutc(cl, "fadvise(WILLNEED) %p %llx.%llx %llu~%llu got cap refs on %s\n",
+		      inode, ceph_vinop(inode), offset, len,
+		      ceph_cap_string(got));
+		ret = generic_fadvise(file, offset, len, advice);
+	} else {
+		doutc(cl, "%llx.%llx, no cache cap\n", ceph_vinop(inode));
+		ret = -EACCES;
+	}
+
+	doutc(cl, "%p %llx.%llx dropping cap refs on %s = %d\n",
+	      inode, ceph_vinop(inode), ceph_cap_string(got), ret);
+	ceph_put_cap_refs(ceph_inode(inode), got);
+out:
+	return ret;
+}
+
 const struct file_operations ceph_file_fops = {
 	.open = ceph_open,
 	.release = ceph_release,
@@ -3165,4 +3209,5 @@ const struct file_operations ceph_file_fops = {
 	.compat_ioctl = compat_ptr_ioctl,
 	.fallocate	= ceph_fallocate,
 	.copy_file_range = ceph_copy_file_range,
+	.fadvise	= ceph_fadvise,
 };
