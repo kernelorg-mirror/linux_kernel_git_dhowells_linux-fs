@@ -514,19 +514,6 @@ struct ceph_inode_info {
 #endif
 };
 
-struct ceph_netfs_request_data { // TODO: Remove
-	int caps;
-
-	/*
-	 * Maximum size of a file readahead request.
-	 * The fadvise could update the bdi's default ra_pages.
-	 */
-	unsigned int file_ra_pages;
-
-	/* Set it if fadvise disables file readahead entirely */
-	bool file_ra_disabled;
-};
-
 struct ceph_io_request {
 	struct netfs_io_request rreq;
 	u64 rmw_assert_version;
@@ -1307,9 +1294,6 @@ extern void __ceph_touch_fmode(struct ceph_inode_info *ci,
 			       struct ceph_mds_client *mdsc, int fmode);
 
 /* addr.c */
-#if 0 // TODO: Remove after netfs conversion
-extern const struct netfs_request_ops ceph_netfs_ops;
-#endif // TODO: Remove after netfs conversion
 bool ceph_dirty_folio(struct address_space *mapping, struct folio *folio);
 int ceph_mmap_prepare(struct vm_area_desc *desc);
 extern int ceph_uninline_data(struct file *file);
@@ -1340,11 +1324,6 @@ extern int ceph_renew_caps(struct inode *inode, int fmode);
 extern int ceph_open(struct inode *inode, struct file *file);
 extern int ceph_atomic_open(struct inode *dir, struct dentry *dentry,
 			    struct file *file, unsigned flags, umode_t mode);
-#if 0 // TODO: Remove after netfs conversion
-extern ssize_t __ceph_sync_read(struct inode *inode, loff_t *ki_pos,
-				struct iov_iter *to, int *retry_op,
-				u64 *last_objver);
-#endif
 extern int ceph_release(struct inode *inode, struct file *filp);
 extern void ceph_fill_inline_data(struct inode *inode, struct page *locked_page,
 				  char *data, size_t len);
