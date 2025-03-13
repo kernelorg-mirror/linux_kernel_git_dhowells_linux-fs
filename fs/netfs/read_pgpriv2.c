@@ -121,7 +121,7 @@ static struct netfs_io_request *netfs_pgpriv2_begin_copy_to_cache(
 		goto cancel;
 
 	creq = netfs_create_write_req(rreq->mapping, NULL, folio_pos(folio),
-				      NETFS_PGPRIV2_COPY_TO_CACHE);
+				      NULL, NETFS_PGPRIV2_COPY_TO_CACHE);
 	if (IS_ERR(creq))
 		goto cancel;
 

@@ -116,6 +116,7 @@ void netfs_wait_for_put_ra_refs(struct netfs_io_request *rreq);
 struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 					     struct file *file,
 					     uoff_t start, size_t len,
+					     void *netfs_priv2,
 					     enum netfs_io_origin origin);
 void netfs_get_request(struct netfs_io_request *rreq, enum netfs_rreq_ref_trace what);
 void netfs_clear_subrequests(struct netfs_io_request *rreq);
@@ -272,6 +273,7 @@ struct netfs_writethrough;
 struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 						struct file *file,
 						uoff_t start,
+						void *netfs_priv2,
 						enum netfs_io_origin origin);
 struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wreq,
 						     struct netfs_io_stream *stream);

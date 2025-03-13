@@ -130,6 +130,7 @@ static void netfs_kill_dirty_pages(struct address_space *mapping,
 struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 						struct file *file,
 						uoff_t start,
+						void *netfs_priv2,
 						enum netfs_io_origin origin)
 {
 	struct netfs_io_request *wreq;
@@ -138,7 +139,7 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 			     origin == NETFS_WRITEBACK_SINGLE ||
 			     origin == NETFS_PGPRIV2_COPY_TO_CACHE);
 
-	wreq = netfs_alloc_request(mapping, file, start, 0, origin);
+	wreq = netfs_alloc_request(mapping, file, start, 0, netfs_priv2, origin);
 	if (IS_ERR(wreq))
 		return wreq;
 
@@ -797,14 +798,18 @@ cancel_folio:
  * @mapping: The file to flush from
  * @wbc: Details of what should be flushed
  * @group: The write grouping to flush (or NULL)
+ * @netfs_priv2: Private data specific to the netfs (or NULL)
  *
  * Start asynchronous write back operations to flush dirty data belonging to a
  * particular group in a file's pagecache back to the server and to the local
  * cache.
+ *
+ * If not NULL, @netfs_priv2 will be set on wreq->netfs_priv2
  */
 int netfs_writepages_group(struct address_space *mapping,
 			   struct writeback_control *wbc,
-			   struct netfs_group *group)
+			   struct netfs_group *group,
+			   void *netfs_priv2)
 {
 	struct netfs_inode *ictx = netfs_inode(mapping->host);
 	struct netfs_io_request *wreq = NULL;
@@ -821,7 +826,7 @@ int netfs_writepages_group(struct address_space *mapping,
 		goto out;
 
 	wreq = netfs_create_write_req(mapping, NULL, folio_pos(folio),
-				      NETFS_WRITEBACK);
+				      netfs_priv2, NETFS_WRITEBACK);
 	if (IS_ERR(wreq)) {
 		error = PTR_ERR(wreq);
 		goto couldnt_start;
@@ -903,7 +908,7 @@ EXPORT_SYMBOL(netfs_writepages_group);
 int netfs_writepages(struct address_space *mapping,
 		     struct writeback_control *wbc)
 {
-	return netfs_writepages_group(mapping, wbc, NULL);
+	return netfs_writepages_group(mapping, wbc, NULL, NULL);
 }
 EXPORT_SYMBOL(netfs_writepages);
 
@@ -966,7 +971,7 @@ int netfs_writeback_single(struct address_space *mapping,
 		return 1;
 	}
 
-	wreq = netfs_create_write_req(mapping, NULL, 0, NETFS_WRITEBACK_SINGLE);
+	wreq = netfs_create_write_req(mapping, NULL, 0, NULL, NETFS_WRITEBACK_SINGLE);
 	if (IS_ERR(wreq)) {
 		ret = PTR_ERR(wreq);
 		goto couldnt_start;

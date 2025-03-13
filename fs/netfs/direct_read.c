@@ -244,7 +244,7 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	file_accessed(iocb->ki_filp);
 
 	rreq = netfs_alloc_request(iocb->ki_filp->f_mapping, iocb->ki_filp,
-				   iocb->ki_pos, orig_count,
+				   iocb->ki_pos, orig_count, NULL,
 				   iocb->ki_flags & IOCB_DIRECT ?
 				   NETFS_DIO_READ : NETFS_UNBUFFERED_READ);
 	if (IS_ERR(rreq))

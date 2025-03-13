@@ -17,6 +17,7 @@ static void netfs_free_request(struct work_struct *work);
 struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 					     struct file *file,
 					     uoff_t start, size_t len,
+					     void *netfs_priv2,
 					     enum netfs_io_origin origin)
 {
 	static atomic_t debug_ids;
@@ -50,6 +51,7 @@ struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 	rreq->progress_at	= 0;
 	rreq->origin		= origin;
 	rreq->netfs_ops		= ctx->ops;
+	rreq->netfs_priv2	= netfs_priv2;
 	rreq->mapping		= mapping;
 	rreq->inode		= inode;
 	rreq->i_size		= i_size_read(inode);

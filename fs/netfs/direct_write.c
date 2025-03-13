@@ -67,7 +67,7 @@ static ssize_t netfs_rmw_read(struct netfs_io_request *wreq, struct bvecq *bq,
 
 	_enter("RMW:R=%x %llx", wreq->debug_id, fpos1);
 
-	rreq = netfs_alloc_request(wreq->mapping, NULL, fpos1, 0, NETFS_RMW_READ);
+	rreq = netfs_alloc_request(wreq->mapping, NULL, fpos1, 0, NULL, NETFS_RMW_READ);
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
 	stream = &rreq->io_streams[0];
@@ -485,7 +485,7 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 
 	_debug("uw %llx-%llx", start, end);
 
-	wreq = netfs_create_write_req(iocb->ki_filp->f_mapping, iocb->ki_filp, start,
+	wreq = netfs_create_write_req(iocb->ki_filp->f_mapping, iocb->ki_filp, start, NULL,
 				      iocb->ki_flags & IOCB_DIRECT ?
 				      NETFS_DIO_WRITE : NETFS_UNBUFFERED_WRITE);
 	if (IS_ERR(wreq))

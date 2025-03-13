@@ -494,7 +494,8 @@ int netfs_write_begin(struct netfs_inode *, struct file *,
 		      struct folio **, void **fsdata);
 int netfs_writepages_group(struct address_space *mapping,
 			   struct writeback_control *wbc,
-			   struct netfs_group *group);
+			   struct netfs_group *group,
+			   void *netfs_priv2);
 int netfs_writepages(struct address_space *mapping,
 		     struct writeback_control *wbc);
 bool netfs_dirty_folio(struct address_space *mapping, struct folio *folio);

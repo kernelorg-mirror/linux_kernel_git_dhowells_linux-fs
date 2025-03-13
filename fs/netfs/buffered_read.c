@@ -511,7 +511,7 @@ void netfs_readahead(struct readahead_control *ractl)
 	_enter("");
 
 	rreq = netfs_alloc_request(ractl->mapping, ractl->file, start, size,
-				   NETFS_READAHEAD);
+				   NULL, NETFS_READAHEAD);
 	if (IS_ERR(rreq))
 		return;
 
@@ -599,7 +599,8 @@ static int netfs_read_gaps(struct file *file, struct folio *folio)
 
 	_enter("%lx", folio->index);
 
-	rreq = netfs_alloc_request(mapping, file, folio_pos(folio), flen, NETFS_READ_GAPS);
+	rreq = netfs_alloc_request(mapping, file, folio_pos(folio), flen,
+				   NULL, NETFS_READ_GAPS);
 	if (IS_ERR(rreq)) {
 		ret = PTR_ERR(rreq);
 		goto alloc_error;
@@ -719,7 +720,7 @@ int netfs_read_folio(struct file *file, struct folio *folio)
 
 	rreq = netfs_alloc_request(mapping, file,
 				   folio_pos(folio), folio_size(folio),
-				   NETFS_READPAGE);
+				   NULL, NETFS_READPAGE);
 	if (IS_ERR(rreq)) {
 		ret = PTR_ERR(rreq);
 		goto alloc_error;
@@ -875,7 +876,7 @@ retry:
 
 	rreq = netfs_alloc_request(mapping, file,
 				   folio_pos(folio), folio_size(folio),
-				   NETFS_READ_FOR_WRITE);
+				   NULL, NETFS_READ_FOR_WRITE);
 	if (IS_ERR(rreq)) {
 		ret = PTR_ERR(rreq);
 		goto error;
@@ -940,7 +941,7 @@ int netfs_prefetch_for_write(struct file *file, struct folio *folio,
 	ret = -ENOMEM;
 
 	rreq = netfs_alloc_request(mapping, file, start, flen,
-				   NETFS_READ_FOR_WRITE);
+				   NULL, NETFS_READ_FOR_WRITE);
 	if (IS_ERR(rreq)) {
 		ret = PTR_ERR(rreq);
 		goto error;

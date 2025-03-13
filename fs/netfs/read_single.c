@@ -194,7 +194,7 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 	ssize_t ret;
 
 	rreq = netfs_alloc_request(inode->i_mapping, file, 0, iov_iter_count(iter),
-				   NETFS_READ_SINGLE);
+				   NULL, NETFS_READ_SINGLE);
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
 
