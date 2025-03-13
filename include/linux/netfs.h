@@ -342,6 +342,9 @@ struct netfs_io_request {
 #define NETFS_RREQ_USE_BOUNCE_BUFFER	18	/* Use bounce buffer */
 #define NETFS_RREQ_CONTENT_ENCRYPTION	19	/* Content encryption is in use */
 #define NETFS_RREQ_CRYPT_IN_PLACE	20	/* Do decryption in place */
+#define NETFS_RREQ_RMW			21	/* Performing RMW cycle */
+#define NETFS_RREQ_REPEAT_RMW		22	/* Need to perform an RMW cycle */
+#define NETFS_RREQ_NO_READ_HOLE		23	/* Give short read/error if hole encountered */
 #ifdef CONFIG_NETFS_PGPRIV2
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */
@@ -370,6 +373,7 @@ struct netfs_request_ops {
 	/* Modification handling */
 	void (*update_i_size)(struct inode *inode, uoff_t i_size);
 	void (*post_modify)(struct inode *inode, void *fs_priv);
+	void (*rmw_read_done)(struct netfs_io_request *wreq, struct netfs_io_request *rreq);
 
 	/* Write request handling */
 	void (*begin_writeback)(struct netfs_io_request *wreq);
@@ -468,6 +472,9 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 ssize_t netfs_unbuffered_read_iter(struct kiocb *iocb, struct iov_iter *iter);
 ssize_t netfs_buffered_read_iter(struct kiocb *iocb, struct iov_iter *iter);
 ssize_t netfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter);
+ssize_t netfs_unbuffered_read_from_inode(struct inode *inode, loff_t pos,
+					 struct bvecq *buf, size_t len,
+					 bool nohole);
 
 /* High-level write API */
 ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,

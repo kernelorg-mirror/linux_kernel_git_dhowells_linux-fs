@@ -87,6 +87,9 @@ static ssize_t netfs_rmw_read(struct netfs_io_request *wreq, struct bvecq *bq,
 		netfs_rmw_read_one(rreq, bq->next, fpos2);
 
 	ret = netfs_wait_for_read(rreq);
+	if (ret == 0 && rreq->netfs_ops->rmw_read_done)
+		rreq->netfs_ops->rmw_read_done(wreq, rreq);
+
 	netfs_put_request(rreq, netfs_rreq_trace_put_return);
 	return ret;
 }
@@ -105,6 +108,8 @@ static ssize_t netfs_unbuffered_rmw(struct netfs_io_request *wreq,
 	int ret;
 
 	_enter("%llx,%llx", to, end);
+
+	set_bit(NETFS_RREQ_RMW, &wreq->flags);
 
 	/* Build a buffer chain to cover the gaps.  If we have two gaps, they
 	 * must be discontiguous and so we will need two separate bvecqs for

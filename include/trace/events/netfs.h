@@ -23,6 +23,7 @@
 	EM(netfs_read_trace_read_gaps,		"READ-GAPS")	\
 	EM(netfs_read_trace_read_single,	"READ-SNGL")	\
 	EM(netfs_read_trace_prefetch_for_write,	"PREFETCHW")	\
+	EM(netfs_read_trace_unbuffered_read_from_inode, "READ-INOD") \
 	E_(netfs_read_trace_write_begin,	"WRITEBEGN")
 
 #define netfs_write_traces					\
@@ -128,6 +129,7 @@
 	EM(netfs_sreq_trace_io_retry_needed,	"I-RTR")	\
 	EM(netfs_sreq_trace_limited,		"LIMIT")	\
 	EM(netfs_sreq_trace_need_clear,		"N-CLR")	\
+	EM(netfs_sreq_trace_need_rmw,		"N-RMW")	\
 	EM(netfs_sreq_trace_partial_read,	"PARTR")	\
 	EM(netfs_sreq_trace_need_retry,		"ND-RT")	\
 	EM(netfs_sreq_trace_prepare,		"PREP ")	\

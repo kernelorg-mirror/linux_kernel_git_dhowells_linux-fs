@@ -376,3 +376,83 @@ ssize_t netfs_unbuffered_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	return ret;
 }
 EXPORT_SYMBOL(netfs_unbuffered_read_iter);
+
+/**
+ * netfs_unbuffered_read_from_inode - Perform an unbuffered sync I/O read
+ * @inode: The inode being accessed
+ * @pos: The file position to read from
+ * @buf: The output buffer
+ * @len: The read length
+ * @nohole: True to return short/ENODATA if hole encountered
+ *
+ * Perform a synchronous unbuffered I/O from the inode to the output buffer.
+ * No use is made of the pagecache.  The output buffer must be suitably aligned
+ * if content encryption is to be used.  If @nohole is true then the read will
+ * stop short if a hole is encountered and return -ENODATA if the read begins
+ * with a hole.
+ *
+ * The caller must hold any appropriate locks.
+ */
+ssize_t netfs_unbuffered_read_from_inode(struct inode *inode, loff_t pos,
+					 struct bvecq *buf, size_t len,
+					 bool nohole)
+{
+	struct netfs_io_request *rreq;
+	struct netfs_io_stream *stream;
+	ssize_t ret;
+
+	_enter("");
+
+	if (!len)
+		return 0; /* Don't update atime */
+
+	ret = filemap_write_and_wait_range(inode->i_mapping, pos, len);
+	if (ret < 0)
+		return ret;
+	inode_update_time(inode, FS_UPD_ATIME, 0);
+
+	rreq = netfs_alloc_request(inode->i_mapping, NULL, pos, len,
+				   NULL, NETFS_UNBUFFERED_READ);
+	if (IS_ERR(rreq))
+		return PTR_ERR(rreq);
+	stream = &rreq->io_streams[0];
+
+	ret = -EIO;
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags)) {
+		struct iov_iter tmp_iter;
+
+		iov_iter_bvec_queue(&tmp_iter, ITER_DEST, buf, 0, 0, len);
+		if (WARN_ON(!netfs_is_crypto_aligned(rreq, &tmp_iter)))
+			goto out;
+	}
+
+	netfs_stat(&netfs_n_rh_dio_read);
+	trace_netfs_read(rreq, rreq->start, rreq->len,
+			 netfs_read_trace_unbuffered_read_from_inode);
+
+
+	rreq->len		= len;
+	stream->buffered	= len;
+	stream->issue_from	= rreq->start;
+	bvecq_pos_transfer(&stream->dispatch_cursor, &rreq->collect_cursor);
+
+	if (nohole)
+		__set_bit(NETFS_RREQ_NO_READ_HOLE, &rreq->flags);
+
+	/* We're going to do the crypto in place in the destination buffer. */
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags))
+		__set_bit(NETFS_RREQ_CRYPT_IN_PLACE, &rreq->flags);
+
+	ret = netfs_unbuffered_read(rreq, true);
+
+	if (!rreq->submitted) {
+		netfs_put_request(rreq, netfs_rreq_trace_put_no_submit);
+		goto out;
+	}
+
+	ret = netfs_wait_for_read(rreq);
+out:
+	netfs_put_request(rreq, netfs_rreq_trace_put_return);
+	return ret;
+}
+EXPORT_SYMBOL(netfs_unbuffered_read_from_inode);
