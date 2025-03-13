@@ -514,7 +514,7 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 
 	if (folio_lock_killable(folio) < 0)
 		goto out;
-	if (folio->mapping != mapping)
+	if (folio_mkwrite_check_truncate(folio, inode) < 0)
 		goto unlock;
 	if (folio_wait_writeback_killable(folio) < 0)
 		goto unlock;
