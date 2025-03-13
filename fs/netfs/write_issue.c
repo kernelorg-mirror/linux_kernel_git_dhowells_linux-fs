@@ -712,7 +712,7 @@ static void netfs_writeback_folio(struct netfs_io_request *wreq,
 		trace_netfs_folio(folio, netfs_folio_trace_store_copy);
 	} else if (fgroup != wreq->group) {
 		/* We can't write this page to the server yet. */
-		kdebug("wrong group");
+		kdebug("wrong group %p != %p", fgroup, wreq->group);
 		goto skip_folio;
 	} else if (!(params->notes & (NOTE_UPLOAD_AVAIL | NOTE_CACHE_AVAIL))) {
 		trace_netfs_folio(folio, netfs_folio_trace_cancel_store);
@@ -792,11 +792,19 @@ cancel_folio:
 	goto out;
 }
 
-/*
- * Write some of the pending data back to the server
+/**
+ * netfs_writepages_group - Flush data from the pagecache for a file
+ * @mapping: The file to flush from
+ * @wbc: Details of what should be flushed
+ * @group: The write grouping to flush (or NULL)
+ *
+ * Start asynchronous write back operations to flush dirty data belonging to a
+ * particular group in a file's pagecache back to the server and to the local
+ * cache.
  */
-int netfs_writepages(struct address_space *mapping,
-		     struct writeback_control *wbc)
+int netfs_writepages_group(struct address_space *mapping,
+			   struct writeback_control *wbc,
+			   struct netfs_group *group)
 {
 	struct netfs_inode *ictx = netfs_inode(mapping->host);
 	struct netfs_io_request *wreq = NULL;
@@ -812,7 +820,8 @@ int netfs_writepages(struct address_space *mapping,
 	if (!folio)
 		goto out;
 
-	wreq = netfs_create_write_req(mapping, NULL, folio_pos(folio), NETFS_WRITEBACK);
+	wreq = netfs_create_write_req(mapping, NULL, folio_pos(folio),
+				      NETFS_WRITEBACK);
 	if (IS_ERR(wreq)) {
 		error = PTR_ERR(wreq);
 		goto couldnt_start;
@@ -821,6 +830,8 @@ int netfs_writepages(struct address_space *mapping,
 	bvecq_buffer_init(&wreq->load_cursor, GFP_NOFS, true);
 
 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &wreq->flags);
+	wreq->group = netfs_get_group(group);
+
 	trace_netfs_write(wreq, netfs_write_trace_writeback);
 	netfs_stat(&netfs_n_wh_writepages);
 
@@ -878,6 +889,21 @@ out:
 	netfs_wb_end(ictx);
 	_leave(" = %d", error);
 	return error;
+}
+EXPORT_SYMBOL(netfs_writepages_group);
+
+/**
+ * netfs_writepages - Flush data from the pagecache for a file
+ * @mapping: The file to flush from
+ * @wbc: Details of what should be flushed
+ *
+ * Start asynchronous write back operations to flush dirty data in a file's
+ * pagecache back to the server and to the local cache.
+ */
+int netfs_writepages(struct address_space *mapping,
+		     struct writeback_control *wbc)
+{
+	return netfs_writepages_group(mapping, wbc, NULL);
 }
 EXPORT_SYMBOL(netfs_writepages);
 

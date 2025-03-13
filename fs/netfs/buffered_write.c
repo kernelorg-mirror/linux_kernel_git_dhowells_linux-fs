@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
+#include <linux/delay.h>
 #include "internal.h"
 
 /*
@@ -93,6 +94,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 	struct address_space *mapping = inode->i_mapping;
 	struct netfs_inode *ctx = netfs_inode(inode);
 	struct folio *folio = NULL;
+	unsigned int flush_counter = 0;
 	unsigned int bdp_flags = (iocb->ki_flags & IOCB_NOWAIT) ? BDP_ASYNC : 0;
 	ssize_t written = 0, ret;
 	uoff_t pos = iocb->ki_pos;
@@ -170,7 +172,7 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		 */
 		if (unlikely(group != netfs_group) &&
 		    group != NETFS_FOLIO_COPY_TO_CACHE &&
-		    group) {
+		    (group || folio_test_dirty(folio))) {
 			WARN_ON_ONCE(!netfs_group);
 			goto flush_content;
 		}
@@ -318,6 +320,8 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		trace_netfs_folio(folio, netfs_flush_content);
 		folio_unlock(folio);
 		folio_put(folio);
+		if ((++flush_counter & 0xf) == 0xf)
+			msleep(10);
 		ret = filemap_write_and_wait_range(mapping, fpos, fpos + flen - 1);
 		if (ret < 0)
 			goto out;

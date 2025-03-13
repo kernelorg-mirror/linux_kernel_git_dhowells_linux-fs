@@ -153,6 +153,8 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 		rreq->netfs_ops->free_request(rreq);
 	if (rreq->cache_resources.ops)
 		rreq->cache_resources.ops->end_operation(&rreq->cache_resources);
+
+	netfs_put_group(rreq->group);
 	bvecq_pos_unset(&rreq->load_cursor);
 	bvecq_pos_unset(&rreq->copy_cursor);
 	bvecq_pos_unset(&rreq->collect_cursor);

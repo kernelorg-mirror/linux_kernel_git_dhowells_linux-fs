@@ -492,6 +492,9 @@ int netfs_read_folio(struct file *, struct folio *);
 int netfs_write_begin(struct netfs_inode *, struct file *,
 		      struct address_space *, uoff_t pos, unsigned int len,
 		      struct folio **, void **fsdata);
+int netfs_writepages_group(struct address_space *mapping,
+			   struct writeback_control *wbc,
+			   struct netfs_group *group);
 int netfs_writepages(struct address_space *mapping,
 		     struct writeback_control *wbc);
 bool netfs_dirty_folio(struct address_space *mapping, struct folio *folio);
@@ -892,6 +895,62 @@ static inline void netfs_wait_for_outstanding_io(struct inode *inode)
 	struct netfs_inode *ictx = netfs_inode(inode);
 
 	wait_var_event(&ictx->io_count, atomic_read(&ictx->io_count) == 0);
+}
+
+/*
+ * Get a ref on a netfs group attached to a dirty page (e.g. a ceph snap).
+ */
+static inline struct netfs_group *netfs_get_group(struct netfs_group *netfs_group)
+{
+	if (netfs_group && netfs_group != NETFS_FOLIO_COPY_TO_CACHE)
+		refcount_inc(&netfs_group->ref);
+	return netfs_group;
+}
+
+/*
+ * Dispose of a netfs group attached to a dirty page (e.g. a ceph snap).
+ */
+static inline void netfs_put_group(struct netfs_group *netfs_group)
+{
+	if (netfs_group &&
+	    netfs_group != NETFS_FOLIO_COPY_TO_CACHE &&
+	    refcount_dec_and_test(&netfs_group->ref))
+		netfs_group->free(netfs_group);
+}
+
+/*
+ * Dispose of a netfs group attached to a dirty page (e.g. a ceph snap).
+ */
+static inline void netfs_put_group_many(struct netfs_group *netfs_group, int nr)
+{
+	if (netfs_group &&
+	    netfs_group != NETFS_FOLIO_COPY_TO_CACHE &&
+	    refcount_sub_and_test(nr, &netfs_group->ref))
+		netfs_group->free(netfs_group);
+}
+
+/*
+ * Set the group pointer directly on a folio.
+ */
+static inline void __netfs_set_group(struct folio *folio, struct netfs_group *netfs_group)
+{
+	if (netfs_group)
+		folio_attach_private(folio, netfs_get_group(netfs_group));
+}
+
+/*
+ * Set the group pointer on a folio or the folio info record.
+ */
+static inline void netfs_set_group(struct folio *folio, struct netfs_group *netfs_group)
+{
+	void *priv = folio_get_private(folio);
+
+	if (unlikely(priv != netfs_group)) {
+		if (netfs_group && (!priv || priv == NETFS_FOLIO_COPY_TO_CACHE))
+			folio_attach_private(folio, netfs_get_group(netfs_group));
+		else if (!netfs_group && priv == NETFS_FOLIO_COPY_TO_CACHE)
+			folio_detach_private(folio);
+	}
 }
 
 #endif /* _LINUX_NETFS_H */
