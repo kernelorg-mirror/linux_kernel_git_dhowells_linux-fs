@@ -74,7 +74,8 @@ void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
  * netfs_perform_write - Copy data into the pagecache.
  * @iocb: The operation parameters
  * @iter: The source buffer
- * @netfs_group: Grouping for dirty folios (eg. ceph snaps).
+ * @netfs_group: Grouping for dirty folios (eg. ceph snaps)
+ * @fs_priv: Private data to be passed to ->post_modify()
  *
  * Copy data into pagecache folios attached to the inode specified by @iocb.
  * The caller must hold appropriate inode locks.
@@ -85,7 +86,7 @@ void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
  * a new one is started.
  */
 ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
-			    struct netfs_group *netfs_group)
+			    struct netfs_group *netfs_group, void *fs_priv)
 {
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
@@ -381,7 +382,7 @@ out:
 		 */
 		set_bit(NETFS_ICTX_MODIFIED_ATTR, &ctx->flags);
 		if (unlikely(ctx->ops->post_modify))
-			ctx->ops->post_modify(inode);
+			ctx->ops->post_modify(inode, fs_priv);
 	}
 
 	iocb->ki_pos += written;
@@ -401,7 +402,8 @@ EXPORT_SYMBOL(netfs_perform_write);
  * netfs_buffered_write_iter_locked - write data to a file
  * @iocb:	IO state structure (file, offset, etc.)
  * @from:	iov_iter with data to write
- * @netfs_group: Grouping for dirty folios (eg. ceph snaps).
+ * @netfs_group: Grouping for dirty folios (eg. ceph snaps)
+ * @fs_priv: Private data to be passed to ->post_modify()
  *
  * This function does all the work needed for actually writing data to a
  * file. It does all basic checks, removes SUID from the file, updates
@@ -421,7 +423,7 @@ EXPORT_SYMBOL(netfs_perform_write);
  * * negative error code if no data has been written at all
  */
 ssize_t netfs_buffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *from,
-					 struct netfs_group *netfs_group)
+					 struct netfs_group *netfs_group, void *fs_priv)
 {
 	struct file *file = iocb->ki_filp;
 	ssize_t ret;
@@ -436,7 +438,7 @@ ssize_t netfs_buffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *fr
 	if (ret)
 		return ret;
 
-	return netfs_perform_write(iocb, from, netfs_group);
+	return netfs_perform_write(iocb, from, netfs_group, fs_priv);
 }
 EXPORT_SYMBOL(netfs_buffered_write_iter_locked);
 
@@ -475,7 +477,7 @@ ssize_t netfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	ret = generic_write_checks(iocb, from);
 	if (ret > 0)
-		ret = netfs_buffered_write_iter_locked(iocb, from, NULL);
+		ret = netfs_buffered_write_iter_locked(iocb, from, NULL, NULL);
 	netfs_end_io_write(inode);
 	if (ret > 0)
 		ret = generic_write_sync(iocb, ret);
@@ -489,7 +491,8 @@ EXPORT_SYMBOL(netfs_file_write_iter);
  * we only track group on a per-folio basis, so we block more often than
  * we might otherwise.
  */
-vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_group)
+vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_group,
+			      void *fs_priv)
 {
 	struct netfs_group *group;
 	struct folio *folio = page_folio(vmf->page);
@@ -559,7 +562,7 @@ vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_gr
 	file_update_time(file);
 	set_bit(NETFS_ICTX_MODIFIED_ATTR, &ictx->flags);
 	if (ictx->ops->post_modify)
-		ictx->ops->post_modify(inode);
+		ictx->ops->post_modify(inode, fs_priv);
 	ret = VM_FAULT_LOCKED;
 out:
 	sb_end_pagefault(inode->i_sb);

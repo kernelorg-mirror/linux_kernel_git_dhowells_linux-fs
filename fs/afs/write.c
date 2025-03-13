@@ -294,7 +294,7 @@ vm_fault_t afs_page_mkwrite(struct vm_fault *vmf)
 
 	if (afs_validate(AFS_FS_I(file_inode(file)), afs_file_key(file)) < 0)
 		return VM_FAULT_SIGBUS;
-	return netfs_page_mkwrite(vmf, NULL);
+	return netfs_page_mkwrite(vmf, NULL, NULL);
 }
 
 /*

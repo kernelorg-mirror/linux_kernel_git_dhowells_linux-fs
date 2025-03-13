@@ -369,7 +369,7 @@ struct netfs_request_ops {
 
 	/* Modification handling */
 	void (*update_i_size)(struct inode *inode, uoff_t i_size);
-	void (*post_modify)(struct inode *inode);
+	void (*post_modify)(struct inode *inode, void *fs_priv);
 
 	/* Write request handling */
 	void (*begin_writeback)(struct netfs_io_request *wreq);
@@ -471,9 +471,9 @@ ssize_t netfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter);
 
 /* High-level write API */
 ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
-			    struct netfs_group *netfs_group);
+			    struct netfs_group *netfs_group, void *fs_priv);
 ssize_t netfs_buffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *from,
-					 struct netfs_group *netfs_group);
+					 struct netfs_group *netfs_group, void *fs_priv);
 ssize_t netfs_unbuffered_write_iter(struct kiocb *iocb, struct iov_iter *from);
 ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *iter,
 					   struct netfs_group *netfs_group);
@@ -501,7 +501,8 @@ void netfs_invalidate_folio(struct folio *folio, size_t offset, size_t length);
 bool netfs_release_folio(struct folio *folio, gfp_t gfp);
 
 /* VMA operations API. */
-vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_group);
+vm_fault_t netfs_page_mkwrite(struct vm_fault *vmf, struct netfs_group *netfs_group,
+			      void *fs_priv);
 
 /* (Sub)request management API. */
 void netfs_read_subreq_progress(struct netfs_io_subrequest *subreq);

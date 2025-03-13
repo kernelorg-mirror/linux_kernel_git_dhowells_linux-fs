@@ -2974,7 +2974,7 @@ cifs_writev(struct kiocb *iocb, struct iov_iter *from)
 		goto out;
 	}
 
-	rc = netfs_buffered_write_iter_locked(iocb, from, NULL);
+	rc = netfs_buffered_write_iter_locked(iocb, from, NULL, NULL);
 	cifs_update_i_blocks_after_write(iocb, rc);
 
 out:
@@ -3164,7 +3164,7 @@ out:
 
 static vm_fault_t cifs_page_mkwrite(struct vm_fault *vmf)
 {
-	return netfs_page_mkwrite(vmf, NULL);
+	return netfs_page_mkwrite(vmf, NULL, NULL);
 }
 
 static const struct vm_operations_struct cifs_file_vm_ops = {

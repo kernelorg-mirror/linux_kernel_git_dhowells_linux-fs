@@ -483,7 +483,7 @@ v9fs_file_mmap_prepare(struct vm_area_desc *desc)
 static vm_fault_t
 v9fs_vm_page_mkwrite(struct vm_fault *vmf)
 {
-	return netfs_page_mkwrite(vmf, NULL);
+	return netfs_page_mkwrite(vmf, NULL, NULL);
 }
 
 static void v9fs_mmap_vm_close(struct vm_area_struct *vma)
