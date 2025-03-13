@@ -1261,6 +1261,7 @@ int ceph_fill_inode(struct inode *inode, struct page *locked_page,
 	case S_IFREG:
 		inode->i_op = &ceph_file_iops;
 		inode->i_fop = &ceph_file_fops;
+		mapping_set_large_folios(inode->i_mapping);
 		break;
 	case S_IFLNK:
 		if (!ci->i_symlink) {

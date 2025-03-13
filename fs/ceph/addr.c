@@ -155,7 +155,6 @@ static void ceph_invalidate_folio(struct folio *folio, size_t offset,
 	struct ceph_inode_info *ci = ceph_inode(inode);
 	struct ceph_snap_context *snapc;
 
-
 	if (offset != 0 || length != folio_size(folio)) {
 		doutc(cl, "%llx.%llx idx %lu partial dirty page %zu~%zu\n",
 		      ceph_vinop(inode), folio->index, offset, length);
