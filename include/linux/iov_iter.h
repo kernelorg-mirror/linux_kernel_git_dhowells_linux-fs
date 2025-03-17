@@ -17,6 +17,9 @@ typedef size_t (*iov_step_f)(void *iter_base, size_t progress, size_t len,
 typedef size_t (*iov_ustep_f)(void __user *iter_base, size_t progress, size_t len,
 			      void *priv, void *priv2);
 
+size_t __iterate_and_advance2(struct iov_iter *iter, size_t len, void *priv,
+			      void *priv2, iov_ustep_f ustep, iov_step_f step);
+
 /*
  * Handle ITER_UBUF.
  */
@@ -195,72 +198,6 @@ size_t iterate_folioq(struct iov_iter *iter, size_t len, void *priv, void *priv2
 	return progress;
 }
 
-/*
- * Handle ITER_XARRAY.
- */
-static __always_inline
-size_t iterate_xarray(struct iov_iter *iter, size_t len, void *priv, void *priv2,
-		      iov_step_f step)
-{
-	struct folio *folio;
-	size_t progress = 0;
-	loff_t start = iter->xarray_start + iter->iov_offset;
-	pgoff_t index = start / PAGE_SIZE;
-	XA_STATE(xas, iter->xarray, index);
-
-	rcu_read_lock();
-	xas_for_each(&xas, folio, ULONG_MAX) {
-		size_t remain, consumed, offset, part, flen;
-
-		if (xas_retry(&xas, folio))
-			continue;
-		if (WARN_ON(xa_is_value(folio)))
-			break;
-		if (WARN_ON(folio_test_hugetlb(folio)))
-			break;
-
-		offset = offset_in_folio(folio, start + progress);
-		flen = min(folio_size(folio) - offset, len);
-
-		while (flen) {
-			void *base = kmap_local_folio(folio, offset);
-
-			part = min_t(size_t, flen,
-				     PAGE_SIZE - offset_in_page(offset));
-			remain = step(base, progress, part, priv, priv2);
-			kunmap_local(base);
-
-			consumed = part - remain;
-			progress += consumed;
-			len -= consumed;
-
-			if (remain || len == 0)
-				goto out;
-			flen -= consumed;
-			offset += consumed;
-		}
-	}
-
-out:
-	rcu_read_unlock();
-	iter->iov_offset += progress;
-	iter->count -= progress;
-	return progress;
-}
-
-/*
- * Handle ITER_DISCARD.
- */
-static __always_inline
-size_t iterate_discard(struct iov_iter *iter, size_t len, void *priv, void *priv2,
-		      iov_step_f step)
-{
-	size_t progress = len;
-
-	iter->count -= progress;
-	return progress;
-}
-
 /**
  * iterate_and_advance2 - Iterate over an iterator
  * @iter: The iterator to iterate over.
@@ -306,9 +243,7 @@ size_t iterate_and_advance2(struct iov_iter *iter, size_t len, void *priv,
 		return iterate_kvec(iter, len, priv, priv2, step);
 	if (iov_iter_is_folioq(iter))
 		return iterate_folioq(iter, len, priv, priv2, step);
-	if (iov_iter_is_xarray(iter))
-		return iterate_xarray(iter, len, priv, priv2, step);
-	return iterate_discard(iter, len, priv, priv2, step);
+	return __iterate_and_advance2(iter, len, priv, priv2, ustep, step);
 }
 
 /**
@@ -370,9 +305,7 @@ size_t iterate_and_advance_kernel(struct iov_iter *iter, size_t len, void *priv,
 		return iterate_kvec(iter, len, priv, priv2, step);
 	if (iov_iter_is_folioq(iter))
 		return iterate_folioq(iter, len, priv, priv2, step);
-	if (iov_iter_is_xarray(iter))
-		return iterate_xarray(iter, len, priv, priv2, step);
-	return iterate_discard(iter, len, priv, priv2, step);
+	return __iterate_and_advance2(iter, len, priv, priv2, NULL, step);
 }
 
 #endif /* _LINUX_IOV_ITER_H */

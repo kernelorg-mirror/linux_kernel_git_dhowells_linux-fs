@@ -1928,3 +1928,84 @@ ssize_t iov_iter_extract_pages(struct iov_iter *i,
 	return -EFAULT;
 }
 EXPORT_SYMBOL_GPL(iov_iter_extract_pages);
+
+/*
+ * Handle ITER_XARRAY.
+ */
+static __always_inline
+size_t iterate_xarray(struct iov_iter *iter, size_t len, void *priv, void *priv2,
+		      iov_step_f step)
+{
+	struct folio *folio;
+	size_t progress = 0;
+	loff_t start = iter->xarray_start + iter->iov_offset;
+	pgoff_t index = start / PAGE_SIZE;
+	XA_STATE(xas, iter->xarray, index);
+
+	rcu_read_lock();
+	xas_for_each(&xas, folio, ULONG_MAX) {
+		size_t remain, consumed, offset, part, flen;
+
+		if (xas_retry(&xas, folio))
+			continue;
+		if (WARN_ON(xa_is_value(folio)))
+			break;
+		if (WARN_ON(folio_test_hugetlb(folio)))
+			break;
+
+		offset = offset_in_folio(folio, start + progress);
+		flen = min(folio_size(folio) - offset, len);
+
+		while (flen) {
+			void *base = kmap_local_folio(folio, offset);
+
+			part = min_t(size_t, flen,
+				     PAGE_SIZE - offset_in_page(offset));
+			remain = step(base, progress, part, priv, priv2);
+			kunmap_local(base);
+
+			consumed = part - remain;
+			progress += consumed;
+			len -= consumed;
+
+			if (remain || len == 0)
+				goto out;
+			flen -= consumed;
+			offset += consumed;
+		}
+	}
+
+out:
+	rcu_read_unlock();
+	iter->iov_offset += progress;
+	iter->count -= progress;
+	return progress;
+}
+
+/*
+ * Handle ITER_DISCARD.
+ */
+static __always_inline
+size_t iterate_discard(struct iov_iter *iter, size_t len, void *priv, void *priv2,
+		      iov_step_f step)
+{
+	size_t progress = len;
+
+	iter->count -= progress;
+	return progress;
+}
+
+/*
+ * Out of line iteration for iterator types that don't need such fast handling.
+ */
+size_t __iterate_and_advance2(struct iov_iter *iter, size_t len, void *priv,
+			      void *priv2, iov_ustep_f ustep, iov_step_f step)
+{
+	if (iov_iter_is_discard(iter))
+		return iterate_discard(iter, len, priv, priv2, step);
+	if (iov_iter_is_xarray(iter))
+		return iterate_xarray(iter, len, priv, priv2, step);
+	WARN_ON(1);
+	return 0;
+}
+EXPORT_SYMBOL(__iterate_and_advance2);
