@@ -298,4 +298,17 @@ static inline phys_addr_t bvec_phys(const struct bio_vec *bvec)
 	return page_to_phys(bvec->bv_page) + bvec->bv_offset;
 }
 
+/*
+ * Segmented bio_vec queue.  These can be linked together to form messages of
+ * indefinite length and iterated over with an ITER_BVECQ iterator.
+ */
+struct bvecq {
+	struct bvecq	*next;		/* Next bvec in the list or NULL */
+	struct bvecq	*prev;		/* Prev bvec in the list or NULL */
+	u16		max_segs;	/* Number of elements allocated in bv[] */
+	u16		nr_segs;	/* Number of elements in bv[] used */
+	u16		cleared;	/* Number of elements used in bv[] cleared */
+	struct bio_vec	bv[] __counted_by(max_segs);
+};
+
 #endif /* __LINUX_BVEC_H */
