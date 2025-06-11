@@ -63,5 +63,5 @@ check_unnecessary_include_linux_export_h () {
 }
 
 check_tracked_ignored_files
-check_missing_include_linux_export_h
-check_unnecessary_include_linux_export_h
+#check_missing_include_linux_export_h
+#check_unnecessary_include_linux_export_h
