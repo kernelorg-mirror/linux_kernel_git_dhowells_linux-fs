@@ -123,7 +123,7 @@ typedef struct _CHALLENGE_MESSAGE {
 	   do not set the version is present flag */
 } __packed CHALLENGE_MESSAGE, *PCHALLENGE_MESSAGE;
 
-typedef struct _AUTHENTICATE_MESSAGE {
+struct ntlmssp_authenticate_message {
 	__u8 Signature[sizeof(NTLMSSP_SIGNATURE)];
 	__le32 MessageType;  /* NtLmsAuthenticate = 3 */
 	SECURITY_BUFFER LmChallengeResponse;
@@ -136,7 +136,7 @@ typedef struct _AUTHENTICATE_MESSAGE {
 	struct	ntlmssp_version Version;
 	/* SECURITY_BUFFER */
 	char UserString[];
-} __packed AUTHENTICATE_MESSAGE, *PAUTHENTICATE_MESSAGE;
+} __packed;
 
 /*
  * Size of the session key (crypto key encrypted with the password
@@ -148,11 +148,11 @@ int build_ntlmssp_negotiate_blob(unsigned char **pbuffer, u16 *buflen,
 				 struct cifs_ses *ses,
 				 struct TCP_Server_Info *server,
 				 const struct nls_table *nls_cp);
-int build_ntlmssp_smb3_negotiate_blob(unsigned char **pbuffer, u16 *buflen,
+int build_ntlmssp_smb3_negotiate_blob(struct smb_message *smb,
 				      struct cifs_ses *ses,
 				      struct TCP_Server_Info *server,
 				      const struct nls_table *nls_cp);
-int build_ntlmssp_auth_blob(unsigned char **pbuffer, u16 *buflen,
+int build_ntlmssp_auth_blob(struct smb_message *smb,
 			    struct cifs_ses *ses,
 			    struct TCP_Server_Info *server,
 			    const struct nls_table *nls_cp);

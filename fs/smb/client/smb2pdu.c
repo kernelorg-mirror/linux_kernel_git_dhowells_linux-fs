@@ -1831,33 +1831,30 @@ struct SMB2_sess_data {
 	void (*func)(struct SMB2_sess_data *);
 	int result;
 	u64 previous_session;
-
-	/* we will send the SMB in three pieces:
-	 * a fixed length beginning part, an optional
-	 * SPNEGO blob (which can be zero length), and a
-	 * last part which will include the strings
-	 * and rest of bcc area. This allows us to avoid
-	 * a large buffer 17K allocation
-	 */
-	int buf0_type;
-	struct kvec iov[2];
 };
 
-static int
-SMB2_sess_alloc_buffer(struct SMB2_sess_data *sess_data)
+static struct smb_message *
+SMB2_create_session_request(struct SMB2_sess_data *sess_data)
 {
-	int rc;
+	struct smb_message *smb;
 	struct cifs_ses *ses = sess_data->ses;
 	struct TCP_Server_Info *server = sess_data->server;
 	struct smb2_sess_setup_req *req;
-	unsigned int total_len;
 	bool is_binding = false;
 
-	rc = smb2_plain_req_init(SMB2_SESSION_SETUP, NULL, server,
-				 (void **) &req,
-				 &total_len);
-	if (rc)
-		return rc;
+	/* We will send the SMB in three pieces:
+	 * - a fixed length beginning part,
+	 * - an optional SPNEGO blob (which can be zero length), and
+	 * - a last part which will include the strings and rest of bcc area.
+	 * This allows us to avoid a large buffer 17K allocation
+	 */
+	smb = smb2_create_request(SMB2_SESSION_SETUP, server, NULL,
+				  sizeof(*req), sizeof(*req), 0,
+				  SMB2_REQ_DYNAMIC |
+				  SMB2_REQ_SENSITIVE);
+	if (!smb)
+		return NULL;
+	req = smb->request;
 
 	spin_lock(&ses->ses_lock);
 	is_binding = (ses->ses_status == SES_GOOD);
@@ -1906,55 +1903,29 @@ SMB2_sess_alloc_buffer(struct SMB2_sess_data *sess_data)
 
 	req->Channel = 0; /* MBZ */
 
-	sess_data->iov[0].iov_base = (char *)req;
-	/* 1 for pad */
-	sess_data->iov[0].iov_len = total_len;
-	/*
-	 * This variable will be used to clear the buffer
-	 * allocated above in case of any error in the calling function.
-	 */
-	sess_data->buf0_type = CIFS_SMALL_BUFFER;
-
-	return 0;
-}
-
-static void
-SMB2_sess_free_buffer(struct SMB2_sess_data *sess_data)
-{
-	struct kvec *iov = sess_data->iov;
-
-	/* iov[1] is already freed by caller */
-	if (sess_data->buf0_type != CIFS_NO_BUFFER && iov[0].iov_base)
-		memzero_explicit(iov[0].iov_base, iov[0].iov_len);
-
-	free_rsp_buf(sess_data->buf0_type, iov[0].iov_base);
-	sess_data->buf0_type = CIFS_NO_BUFFER;
+	/* Testing shows that buffer offset must be at location of Buffer[0] */
+	req->SecurityBufferOffset = cpu_to_le16(sizeof(*req));
+	req->SecurityBufferLength = 0;
+	return smb;
 }
 
 static int
-SMB2_sess_sendreceive(struct SMB2_sess_data *sess_data)
+SMB2_sess_sendreceive(struct SMB2_sess_data *sess_data,
+		      struct smb_message *smb)
 {
 	int rc;
-	struct smb_rqst rqst;
-	struct smb2_sess_setup_req *req = sess_data->iov[0].iov_base;
-	struct kvec rsp_iov = { NULL, 0 };
+	struct smb2_sess_setup_req *req = smb->request;
 
-	/* Testing shows that buffer offset must be at location of Buffer[0] */
-	req->SecurityBufferOffset =
-		cpu_to_le16(sizeof(struct smb2_sess_setup_req));
-	req->SecurityBufferLength = cpu_to_le16(sess_data->iov[1].iov_len);
+	req->SecurityBufferLength = cpu_to_le16(smb->total_len - sizeof(*req));
+	smb->sr_flags = CIFS_LOG_ERROR | CIFS_SESS_OP;
 
-	memset(&rqst, 0, sizeof(struct smb_rqst));
-	rqst.rq_iov = sess_data->iov;
-	rqst.rq_nvec = 2;
+	iov_iter_bvec_queue(&smb->req_iter, ITER_SOURCE, &smb->bvecq, 0, 0,
+			    smb->total_len);
 
 	/* BB add code to build os and lm fields */
-	rc = cifs_send_recv(sess_data->xid, sess_data->ses,
-			    sess_data->server,
-			    &rqst,
-			    &sess_data->buf0_type,
-			    CIFS_LOG_ERROR | CIFS_SESS_OP, &rsp_iov);
-	cifs_small_buf_release(sess_data->iov[0].iov_base);
+	rc = smb_send_recv_messages(sess_data->xid, sess_data->ses, sess_data->server,
+				    smb, CIFS_LOG_ERROR | CIFS_SESS_OP);
+	smb_clear_request(smb);
 	if (rc == 0)
 		sess_data->ses->expired_pwd = false;
 	else if ((rc == -EACCES) || (rc == -EKEYEXPIRED) || (rc == -EKEYREVOKED)) {
@@ -1965,8 +1936,6 @@ SMB2_sess_sendreceive(struct SMB2_sess_data *sess_data)
 					       &sess_data->server->dstaddr, rc);
 		sess_data->ses->expired_pwd = true;
 	}
-
-	memcpy(&sess_data->iov[0], &rsp_iov, sizeof(struct kvec));
 
 	return rc;
 }
@@ -2002,16 +1971,18 @@ SMB2_sess_establish_session(struct SMB2_sess_data *sess_data)
 static void
 SMB2_auth_kerberos(struct SMB2_sess_data *sess_data)
 {
-	int rc;
-	struct cifs_ses *ses = sess_data->ses;
+	struct smb2_sess_setup_rsp *rsp = NULL;
 	struct TCP_Server_Info *server = sess_data->server;
 	struct cifs_spnego_msg *msg;
+	struct smb_message *smb = NULL;
+	struct cifs_ses *ses = sess_data->ses;
 	struct key *spnego_key = NULL;
-	struct smb2_sess_setup_rsp *rsp = NULL;
+	void *key_buf = NULL;
 	bool is_binding = false;
+	int rc = -ENOMEM;
 
-	rc = SMB2_sess_alloc_buffer(sess_data);
-	if (rc)
+	smb = SMB2_create_session_request(sess_data);
+	if (!smb)
 		goto out;
 
 	spnego_key = cifs_get_spnego_key(ses, server);
@@ -2062,14 +2033,21 @@ SMB2_auth_kerberos(struct SMB2_sess_data *sess_data)
 	}
 	memcpy(ses->auth_key.response, msg->data, msg->sesskey_len);
 
-	sess_data->iov[1].iov_base = msg->data + msg->sesskey_len;
-	sess_data->iov[1].iov_len = msg->secblob_len;
+	/* Copy the key data here so that we can pass it to MSG_SPLICE_PAGES
+	 * and the need to copy the whole message.
+	 */
+	key_buf = cifs_allocate_tx_buf(server, msg->secblob_len);
+	if (!key_buf)
+		goto out;
 
-	rc = SMB2_sess_sendreceive(sess_data);
+	memcpy(key_buf, msg->data + msg->sesskey_len, msg->secblob_len);
+	smb_add_segment_to_tx_buf(smb, key_buf, msg->secblob_len);
+
+	rc = SMB2_sess_sendreceive(sess_data, smb);
 	if (rc)
 		goto out_put_spnego_key;
 
-	rsp = (struct smb2_sess_setup_rsp *)sess_data->iov[0].iov_base;
+	rsp = (struct smb2_sess_setup_rsp *)smb->response;
 	/* keep session id and flags if binding */
 	if (!is_binding) {
 		ses->Suid = le64_to_cpu(rsp->hdr.SessionId);
@@ -2085,10 +2063,11 @@ out_put_spnego_key:
 		ses->auth_key.response = NULL;
 		ses->auth_key.len = 0;
 	}
+
 out:
+	smb_put_messages(smb);
 	sess_data->result = rc;
 	sess_data->func = NULL;
-	SMB2_sess_free_buffer(sess_data);
 }
 #else
 static void
@@ -2106,14 +2085,13 @@ SMB2_sess_auth_rawntlmssp_authenticate(struct SMB2_sess_data *sess_data);
 static void
 SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 {
-	int rc;
-	struct cifs_ses *ses = sess_data->ses;
-	struct TCP_Server_Info *server = sess_data->server;
 	struct smb2_sess_setup_rsp *rsp = NULL;
-	unsigned char *ntlmssp_blob = NULL;
+	struct TCP_Server_Info *server = sess_data->server;
+	struct smb_message *smb = NULL;
+	struct cifs_ses *ses = sess_data->ses;
 	bool use_spnego = false; /* else use raw ntlmssp */
-	u16 blob_length = 0;
 	bool is_binding = false;
+	int rc = -ENOMEM;
 
 	/*
 	 * If memory allocation is successful, caller of this function
@@ -2126,13 +2104,12 @@ SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 	}
 	ses->ntlmssp->sesskey_per_smbsess = true;
 
-	rc = SMB2_sess_alloc_buffer(sess_data);
-	if (rc)
+	smb = SMB2_create_session_request(sess_data);
+	if (!smb)
 		goto out_err;
 
-	rc = build_ntlmssp_smb3_negotiate_blob(&ntlmssp_blob,
-					  &blob_length, ses, server,
-					  sess_data->nls_cp);
+	rc = build_ntlmssp_smb3_negotiate_blob(smb, ses, server,
+					       sess_data->nls_cp);
 	if (rc)
 		goto out;
 
@@ -2142,19 +2119,21 @@ SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 		rc = -EOPNOTSUPP;
 		goto out;
 	}
-	sess_data->iov[1].iov_base = ntlmssp_blob;
-	sess_data->iov[1].iov_len = blob_length;
 
-	rc = SMB2_sess_sendreceive(sess_data);
-	rsp = (struct smb2_sess_setup_rsp *)sess_data->iov[0].iov_base;
+	rc = SMB2_sess_sendreceive(sess_data, smb);
+	rsp = (struct smb2_sess_setup_rsp *)smb->response;
 
 	/* If true, rc here is expected and not an error */
-	if (sess_data->buf0_type != CIFS_NO_BUFFER &&
-		rsp->hdr.Status == STATUS_MORE_PROCESSING_REQUIRED)
+	if (smb->status == STATUS_MORE_PROCESSING_REQUIRED)
 		rc = 0;
 
 	if (rc)
 		goto out;
+
+	if (WARN_ON(!rsp)) {
+		rc = -EINVAL;
+		goto out_err;
+	}
 
 	u16 boff = le16_to_cpu(rsp->SecurityBufferOffset);
 
@@ -2181,14 +2160,13 @@ SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 	}
 
 out:
-	kfree_sensitive(ntlmssp_blob);
-	SMB2_sess_free_buffer(sess_data);
 	if (!rc) {
 		sess_data->result = 0;
 		sess_data->func = SMB2_sess_auth_rawntlmssp_authenticate;
 		return;
 	}
 out_err:
+	smb_put_messages(smb);
 	kfree_sensitive(ses->ntlmssp);
 	ses->ntlmssp = NULL;
 	sess_data->result = rc;
@@ -2198,26 +2176,23 @@ out_err:
 static void
 SMB2_sess_auth_rawntlmssp_authenticate(struct SMB2_sess_data *sess_data)
 {
-	int rc;
+	struct smb_message *smb;
 	struct cifs_ses *ses = sess_data->ses;
 	struct TCP_Server_Info *server = sess_data->server;
 	struct smb2_sess_setup_req *req;
 	struct smb2_sess_setup_rsp *rsp = NULL;
-	unsigned char *ntlmssp_blob = NULL;
 	bool use_spnego = false; /* else use raw ntlmssp */
-	u16 blob_length = 0;
 	bool is_binding = false;
+	int rc = -ENOMEM;
 
-	rc = SMB2_sess_alloc_buffer(sess_data);
-	if (rc)
+	smb = SMB2_create_session_request(sess_data);
+	if (!smb)
 		goto out;
 
-	req = (struct smb2_sess_setup_req *) sess_data->iov[0].iov_base;
+	req = smb->request;
 	req->hdr.SessionId = cpu_to_le64(ses->Suid);
 
-	rc = build_ntlmssp_auth_blob(&ntlmssp_blob, &blob_length,
-				     ses, server,
-				     sess_data->nls_cp);
+	rc = build_ntlmssp_auth_blob(smb, ses, server, sess_data->nls_cp);
 	if (rc) {
 		cifs_dbg(FYI, "build_ntlmssp_auth_blob failed %d\n", rc);
 		goto out;
@@ -2229,14 +2204,12 @@ SMB2_sess_auth_rawntlmssp_authenticate(struct SMB2_sess_data *sess_data)
 		rc = -EOPNOTSUPP;
 		goto out;
 	}
-	sess_data->iov[1].iov_base = ntlmssp_blob;
-	sess_data->iov[1].iov_len = blob_length;
 
-	rc = SMB2_sess_sendreceive(sess_data);
+	rc = SMB2_sess_sendreceive(sess_data, smb);
 	if (rc)
 		goto out;
 
-	rsp = (struct smb2_sess_setup_rsp *)sess_data->iov[0].iov_base;
+	rsp = (struct smb2_sess_setup_rsp *)smb->response;
 
 	spin_lock(&ses->ses_lock);
 	is_binding = (ses->ses_status == SES_GOOD);
@@ -2265,8 +2238,6 @@ SMB2_sess_auth_rawntlmssp_authenticate(struct SMB2_sess_data *sess_data)
 	}
 #endif
 out:
-	kfree_sensitive(ntlmssp_blob);
-	SMB2_sess_free_buffer(sess_data);
 	kfree_sensitive(ses->ntlmssp);
 	ses->ntlmssp = NULL;
 	sess_data->result = rc;
@@ -2324,7 +2295,6 @@ SMB2_sess_setup(const unsigned int xid, struct cifs_ses *ses,
 	sess_data->xid = xid;
 	sess_data->ses = ses;
 	sess_data->server = server;
-	sess_data->buf0_type = CIFS_NO_BUFFER;
 	sess_data->nls_cp = (struct nls_table *) nls_cp;
 	sess_data->previous_session = ses->Suid;
 

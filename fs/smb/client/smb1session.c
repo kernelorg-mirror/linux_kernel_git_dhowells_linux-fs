@@ -835,9 +835,7 @@ sess_auth_rawntlmssp_authenticate(struct sess_data *sess_data)
 	/* Build security blob before we assemble the request */
 	pSMB = (SESSION_SETUP_ANDX *)sess_data->iov[0].iov_base;
 	smb_buf = (struct smb_hdr *)pSMB;
-	rc = build_ntlmssp_auth_blob(&ntlmsspblob,
-					&blob_len, ses, server,
-					sess_data->nls_cp);
+	rc = build_ntlmssp_auth_blob(smb, ses, server, sess_data->nls_cp);
 	if (rc)
 		goto out_free_ntlmsspblob;
 	sess_data->iov[1].iov_len = blob_len;
