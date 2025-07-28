@@ -2322,15 +2322,10 @@ out:
 int
 SMB2_logoff(const unsigned int xid, struct cifs_ses *ses)
 {
-	struct smb_rqst rqst;
-	struct smb2_logoff_req *req; /* response is also trivial struct */
-	int rc = 0;
 	struct TCP_Server_Info *server;
-	int flags = 0;
-	unsigned int total_len;
-	struct kvec iov[1];
-	struct kvec rsp_iov;
-	int resp_buf_type;
+	struct smb2_logoff_req *req; /* response is also trivial struct */
+	struct smb_message *smb = NULL;
+	int rc = 0, flags = 0;
 
 	cifs_dbg(FYI, "disconnect session %p\n", ses);
 
@@ -2346,10 +2341,11 @@ SMB2_logoff(const unsigned int xid, struct cifs_ses *ses)
 	}
 	spin_unlock(&ses->chan_lock);
 
-	rc = smb2_plain_req_init(SMB2_LOGOFF, NULL, ses->server,
-				 (void **) &req, &total_len);
-	if (rc)
-		return rc;
+	smb = smb2_create_request(SMB2_LOGOFF, server, NULL,
+				  sizeof(*req), sizeof(*req), 0, 0);
+	if (!smb)
+		return -ENOMEM;
+	req = smb->request;
 
 	 /* since no tcon, smb2_init can not do this, so do here */
 	req->hdr.SessionId = cpu_to_le64(ses->Suid);
@@ -2359,23 +2355,17 @@ SMB2_logoff(const unsigned int xid, struct cifs_ses *ses)
 	else if (server->sign)
 		req->hdr.Flags |= SMB2_FLAGS_SIGNED;
 
-	flags |= CIFS_NO_RSP_BUF;
+	iov_iter_bvec_queue(&smb->req_iter, ITER_SOURCE, &smb->bvecq, 0, 0,
+			    smb->data_offset);
 
-	iov[0].iov_base = (char *)req;
-	iov[0].iov_len = total_len;
-
-	memset(&rqst, 0, sizeof(struct smb_rqst));
-	rqst.rq_iov = iov;
-	rqst.rq_nvec = 1;
-
-	rc = cifs_send_recv(xid, ses, ses->server,
-			    &rqst, &resp_buf_type, flags, &rsp_iov);
-	cifs_small_buf_release(req);
+	smb->sr_flags = flags;
+	rc = smb_send_recv_messages(xid, ses, ses->server, smb, flags);
 	/*
 	 * No tcon so can't do
 	 * cifs_stats_inc(&tcon->stats.smb2_stats.smb2_com_fail[SMB2...]);
 	 */
 
+	smb_put_messages(smb);
 smb2_session_already_dead:
 	return rc;
 }
