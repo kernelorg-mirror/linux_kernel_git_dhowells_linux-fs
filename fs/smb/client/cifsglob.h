@@ -1674,6 +1674,7 @@ struct smb_message {
 	struct cifs_credits	credits;	/* Credit requirements for this message */
 	void			*request;	/* Pointer to request message body */
 	refcount_t		ref;
+	unsigned int		debug_id;	/* Debugging ID for tracing */
 	bool			sensitive;	/* Request contains sensitive data */
 	bool			cancelled;	/* T if cancelled */
 	unsigned int		sr_flags;	/* Flags passed to send_recv() */

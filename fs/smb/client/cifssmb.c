@@ -744,7 +744,7 @@ CIFSSMBEcho(struct TCP_Server_Info *server)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
 	cifs_small_buf_release(req);
-	smb_put_message(smb);
+	smb_put_message(smb, smb_message_trace_put_end);
 	return rc;
 }
 
@@ -1614,7 +1614,7 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_reads);
 put_smb:
-	smb_put_message(smb);
+	smb_put_message(smb, smb_message_trace_put_end);
 	return rc;
 }
 
@@ -2029,7 +2029,7 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 async_writev_out:
 	cifs_small_buf_release(req);
 out_put:
-	smb_put_message(smb);
+	smb_put_message(smb, smb_message_trace_put_end);
 out:
 	if (rc) {
 		add_credits_and_wake_if(wdata->server, &wdata->credits, 0);

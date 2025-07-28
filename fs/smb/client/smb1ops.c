@@ -236,7 +236,7 @@ cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr)
 		if (smb->mid == mid &&
 		    smb->mid_state == MID_REQUEST_SUBMITTED &&
 		    smb->command == shdr->Command) {
-			smb_get_message(smb);
+			smb_get_message(smb, smb_message_trace_get_find_mid);
 			spin_unlock(&server->mid_queue_lock);
 			return smb;
 		}

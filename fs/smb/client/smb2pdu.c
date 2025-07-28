@@ -4432,7 +4432,7 @@ SMB2_echo(struct TCP_Server_Info *server)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
 	cifs_small_buf_release(req);
-	smb_put_message(smb);
+	smb_put_messages(smb);
 	return rc;
 }
 
@@ -4701,8 +4701,8 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 
 			rc = smb2_verify_signature(smb, server);
 			if (rc) {
-				cifs_tcon_dbg(VFS, "SMB signature verification returned error = %d\n",
-					      rc);
+				cifs_tcon_dbg(VFS, "SMB signature verification returned error = %d (MSG=%x)\n",
+					 rc, smb->debug_id);
 				rdata->subreq.error = rc;
 				rdata->result = rc;
 
@@ -4926,7 +4926,7 @@ out:
 		__set_bit(NETFS_SREQ_NEED_RETRY, &rdata->subreq.flags);
 	}
 
-	smb_put_message(smb);
+	smb_put_messages(smb);
 	return rc;
 }
 
@@ -5328,7 +5328,7 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 
 async_writev_out:
 	cifs_small_buf_release(req);
-	smb_put_message(smb);
+	smb_put_messages(smb);
 out:
 	/* if the send error is retryable, let netfs know about it */
 	if (is_replayable_error(rc) &&

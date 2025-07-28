@@ -439,7 +439,7 @@ smb2_find_mid(struct TCP_Server_Info *server, struct smb2_hdr *shdr, bool dequeu
 		if ((smb->mid == wire_mid) &&
 		    (smb->mid_state == MID_REQUEST_SUBMITTED) &&
 		    (smb->command == shdr->Command)) {
-			smb_get_message(smb);
+			smb_get_message(smb, smb_message_trace_get_find_mid);
 			if (dequeue) {
 				list_del_init(&smb->qhead);
 				smb->deleted_from_q = true;

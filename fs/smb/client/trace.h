@@ -178,6 +178,50 @@
 	EM(smb_eio_trace_write_rsp_malformed,		"write_rsp_malformed") \
 	E_(smb_eio_trace_write_too_far,			"write_too_far")
 
+#define smb_message_traces \
+	EM(smb_message_trace_alloc_cancel,		"AL Cancel    ") \
+	EM(smb_message_trace_alloc_change_notify,	"AL Change-Nfy") \
+	EM(smb_message_trace_alloc_close,		"AL Close     ") \
+	EM(smb_message_trace_alloc_create,		"AL Create    ") \
+	EM(smb_message_trace_alloc_echo,		"AL Echo      ") \
+	EM(smb_message_trace_alloc_flush,		"AL Flush     ") \
+	EM(smb_message_trace_alloc_ioctl,		"AL Ioctl     ") \
+	EM(smb_message_trace_alloc_lock,		"AL Lock      ") \
+	EM(smb_message_trace_alloc_logoff,		"AL Logoff    ") \
+	EM(smb_message_trace_alloc_negotiate,		"AL Negotiate ") \
+	EM(smb_message_trace_alloc_oplock_break,	"AL Oplock-Brk") \
+	EM(smb_message_trace_alloc_query_directory,	"AL Query-Dir ") \
+	EM(smb_message_trace_alloc_query_info,		"AL Query-Info") \
+	EM(smb_message_trace_alloc_read,		"AL Read      ") \
+	EM(smb_message_trace_alloc_session_setup,	"AL Sess-setup") \
+	EM(smb_message_trace_alloc_set_info,		"AL Set-Info  ") \
+	EM(smb_message_trace_alloc_srv_to_cln_notif,	"AL s2c-Notify") \
+	EM(smb_message_trace_alloc_tree_connect,	"AL Tree-conn ") \
+	EM(smb_message_trace_alloc_tree_disconnect,	"AL Tree-disc ") \
+	EM(smb_message_trace_alloc_write,		"AL Write     ") \
+	EM(smb_message_trace_free,			"FREE         ") \
+	EM(smb_message_trace_get_call_async,		"GET call-asyn") \
+	EM(smb_message_trace_get_enqueue_sync,		"GET enq-sync ") \
+	EM(smb_message_trace_get_find_mid,		"GET find-mid ") \
+	EM(smb_message_trace_put_abort_conn,		"PUT abrt-conn") \
+	EM(smb_message_trace_put_clean_demux,		"PUT cln-demux") \
+	EM(smb_message_trace_put_decrypt_offload,	"PUT decrypt-o") \
+	EM(smb_message_trace_put_delivered,		"PUT delivered") \
+	EM(smb_message_trace_put_demux,			"PUT demux    ") \
+	EM(smb_message_trace_put_demux_cb,		"PUT demux-cb ") \
+	EM(smb_message_trace_put_dequeue_mid,		"SEE deque-mid") \
+	EM(smb_message_trace_put_discard_message,	"PUT disc-msg ") \
+	EM(smb_message_trace_put_end,			"PUT end      ") \
+	EM(smb_message_trace_put_incomplete,		"PUT incomplet") \
+	EM(smb_message_trace_put_is_smb_resp,		"PUT is-s-resp") \
+	EM(smb_message_trace_put_messages,		"PUT messages ") \
+	EM(smb_message_trace_put_pending,		"PUT pending  ") \
+	EM(smb_message_trace_put_session_expired,	"PUT sess-exp ") \
+	EM(smb_message_trace_see_abort_conn,		"SEE abrt-conn") \
+	EM(smb_message_trace_see_clean_demux,		"SEE cln-demux") \
+	EM(smb_message_trace_see_is_smb_resp,		"SEE is-s-resp") \
+	E_(smb_message_trace_see_wake_up_task,		"SEE wake-task")
+
 #define smb3_rw_credits_traces \
 	EM(cifs_trace_rw_credits_call_readv_adjust,	"rd-call-adj") \
 	EM(cifs_trace_rw_credits_call_writev_adjust,	"wr-call-adj") \
@@ -243,6 +287,7 @@
 
 enum smb_command_trace		{ smb_command_traces } __mode(byte);
 enum smb_eio_trace		{ smb_eio_traces } __mode(byte);
+enum smb_message_trace		{ smb_message_traces } __mode(byte);
 enum smb3_rw_credits_trace	{ smb3_rw_credits_traces } __mode(byte);
 enum smb3_tcon_ref_trace	{ smb3_tcon_ref_traces } __mode(byte);
 
@@ -258,6 +303,7 @@ enum smb3_tcon_ref_trace	{ smb3_tcon_ref_traces } __mode(byte);
 
 smb_command_traces;
 smb_eio_traces;
+smb_message_traces;
 smb3_rw_credits_traces;
 smb3_tcon_ref_traces;
 
@@ -2032,24 +2078,45 @@ TRACE_EVENT(smb3_reply,
 	    TP_ARGS(smb, recv),
 	    TP_STRUCT__entry(
 		    __field(unsigned int,	msg_id)
-		    __field(unsigned int,	cmd)
+		    __field(enum smb_command_trace, cmd)
 		    __field(unsigned int,	doff)
 		    __field(unsigned int,	dlen)
 		    __field(unsigned int,	len)
 		    __field(unsigned int,	extr)
 			     ),
 	    TP_fast_assign(
-		    __entry->msg_id	= 0; /* TODO: fill in */
-		    __entry->cmd	= smb->command;
+		    __entry->msg_id	= smb->debug_id;
+		    __entry->cmd	= smb->command_trace;
 		    __entry->doff	= recv->data_offset;
 		    __entry->dlen	= recv->data_len;
 		    __entry->len	= recv->msg_len;
 		    __entry->extr	= recv->extracted;
 			   ),
-	    TP_printk("MSG=%08x cmd=%x d=%x-%x l=%x/%x",
-		      __entry->msg_id, __entry->cmd,
+	    TP_printk("MSG=%08x cmd=%s d=%x-%x l=%x/%x",
+		      __entry->msg_id,
+		      __print_symbolic(__entry->cmd, smb_command_traces),
 		      __entry->doff, __entry->doff + __entry->dlen,
 		      __entry->extr, __entry->len)
+	    );
+
+TRACE_EVENT(smb3_message,
+	    TP_PROTO(unsigned int smb_message_debug_id, int ref,
+		     enum smb_message_trace trace),
+	    TP_ARGS(smb_message_debug_id, ref, trace),
+	    TP_STRUCT__entry(
+		    __field(unsigned int,		smb_message)
+		    __field(int,			ref)
+		    __field(enum smb_message_trace,	trace)
+			     ),
+	    TP_fast_assign(
+		    __entry->smb_message = smb_message_debug_id;
+		    __entry->ref	= ref;
+		    __entry->trace	= trace;
+			   ),
+	    TP_printk("MSG=%08x %s r=%d",
+		      __entry->smb_message,
+		      __print_symbolic(__entry->trace, smb_message_traces),
+		      __entry->ref)
 	    );
 
 #undef EM

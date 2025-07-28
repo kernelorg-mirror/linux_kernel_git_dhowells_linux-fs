@@ -581,13 +581,12 @@ int smb2_verify_signature(struct smb_message *smb, struct TCP_Server_Info *serve
 	if (rc)
 		return rc;
 
-	if (crypto_memneq(server_response_sig, shdr->Signature,
-			  SMB2_SIGNATURE_SIZE)) {
-		cifs_dbg(VFS, "sign fail cmd 0x%x message id 0x%llx\n",
-			shdr->Command, shdr->MessageId);
-		return -EACCES;
-	} else
+	if (crypto_memneq(server_response_sig, shdr->Signature, SMB2_SIGNATURE_SIZE))
 		return 0;
+
+	cifs_dbg(VFS, "sign fail cmd 0x%x message id 0x%llx MSG=%x\n",
+		 shdr->Command, shdr->MessageId, smb->debug_id);
+	return -EACCES;
 }
 
 /*
@@ -664,7 +663,7 @@ smb2_get_mid_entry(struct cifs_ses *ses, struct TCP_Server_Info *server,
 
 	smb2_init_mid(smb, server);
 
-	smb_get_message(smb);
+	smb_get_message(smb, smb_message_trace_get_enqueue_sync);
 	spin_lock(&server->mid_queue_lock);
 	list_add_tail(&smb->qhead, &server->pending_mid_q);
 	spin_unlock(&server->mid_queue_lock);
@@ -684,8 +683,8 @@ smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 
 		rc = smb2_verify_signature(smb, server);
 		if (rc)
-			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
-					rc);
+			cifs_server_dbg(VFS, "SMB signature verification returned error = %d (MSG=%x)\n",
+					rc, smb->debug_id);
 	}
 
 	return smb->error;
@@ -1302,7 +1301,7 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 			 __func__, le64_to_cpu(shdr->MessageId));
 		rxq->msg_id = 0;
 	} else {
-		rxq->msg_id = 0; /* TODO: smb->debug_id */
+		rxq->msg_id = smb->debug_id;
 		smb->decrypted = decrypted;
 	}
 
@@ -1337,12 +1336,12 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 				       le64_to_cpu(shdr->MessageId));
 		cifs_dbg(FYI, "Session expired or deleted\n");
 		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_session_expired);
 		return;
 	case STATUS_PENDING:
 		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
 		smb2_status_pending(shdr, server);
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_pending);
 		return;
 	case STATUS_IO_TIMEOUT:
 		int iotimo = atomic_inc_return(&server->num_io_timeout);
@@ -1436,7 +1435,7 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 		dequeue_mid(server, smb, recv->malformed);
 		mid_execute_callback(server, smb);
 
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_delivered);
 	} else if (shdr->Command == cpu_to_le32(SMB2_OPLOCK_BREAK)) {
 		smb2_is_valid_oplock_break(server, h);
 		smb2_add_credits_from_hdr(shdr, server);

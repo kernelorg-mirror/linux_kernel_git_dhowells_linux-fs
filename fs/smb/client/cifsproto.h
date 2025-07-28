@@ -83,8 +83,9 @@ char *cifs_build_path_to_root(struct smb3_fs_context *ctx,
 char *cifs_build_devname(char *nodename, const char *prepath);
 void delete_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp);
-void smb_get_message(struct smb_message *smb);
-void smb_put_message(struct smb_message *smb);
+void smb_see_message(struct smb_message *smb, enum smb_message_trace trace);
+void smb_get_message(struct smb_message *smb, enum smb_message_trace trace);
+void smb_put_message(struct smb_message *smb, enum smb_message_trace trace);
 void smb_put_messages(struct smb_message *smb);
 void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 void cifs_wake_up_task(struct TCP_Server_Info *server,

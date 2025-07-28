@@ -365,6 +365,7 @@ cifs_abort_connection(struct TCP_Server_Info *server)
 	cifs_dbg(FYI, "%s: moving mids to private list\n", __func__);
 	spin_lock(&server->mid_queue_lock);
 	list_for_each_entry_safe(smb, nsmb, &server->pending_mid_q, qhead) {
+		smb_see_message(smb, smb_message_trace_see_abort_conn);
 		if (smb->mid_state == MID_REQUEST_SUBMITTED)
 			smb->mid_state = MID_RETRY_NEEDED;
 		list_move(&smb->qhead, &retry_list);
@@ -377,7 +378,7 @@ cifs_abort_connection(struct TCP_Server_Info *server)
 	list_for_each_entry_safe(smb, nsmb, &retry_list, qhead) {
 		list_del_init(&smb->qhead);
 		mid_execute_callback(server, smb);
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_abort_conn);
 	}
 }
 
@@ -822,6 +823,7 @@ static bool smb_decode_rfc1002(struct TCP_Server_Info *server, u32 rfc1002_hdr)
 			 */
 			spin_lock(&server->mid_queue_lock);
 			list_for_each_entry_safe(smb, nsmb, &server->pending_mid_q, qhead) {
+				smb_see_message(smb, smb_message_trace_see_is_smb_resp);
 				list_move(&smb->qhead, &dispose_list);
 				smb->deleted_from_q = true;
 			}
@@ -855,7 +857,7 @@ static bool smb_decode_rfc1002(struct TCP_Server_Info *server, u32 rfc1002_hdr)
 				smb->mid_rc = mid_rc;
 				smb->mid_state = MID_RC;
 				mid_execute_callback(server, smb);
-				smb_put_message(smb);
+				smb_put_message(smb, smb_message_trace_put_is_smb_resp);
 			}
 
 			/*
@@ -909,7 +911,7 @@ dequeue_mid(struct TCP_Server_Info *server, struct smb_message *smb, bool malfor
 		spin_unlock(&server->mid_queue_lock);
 		pr_warn_once("trying to dequeue a deleted mid\n");
 	} else {
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_dequeue_mid);
 		list_del_init(&smb->qhead);
 		smb->deleted_from_q = true;
 		spin_unlock(&server->mid_queue_lock);
@@ -1016,6 +1018,7 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 		spin_lock(&server->mid_queue_lock);
 		list_for_each_entry_safe(smb, smb2, &server->pending_mid_q, qhead) {
 			cifs_dbg(FYI, "Clearing mid %llu\n", smb->mid);
+			smb_see_message(smb, smb_message_trace_see_clean_demux);
 			smb->mid_state = MID_SHUTDOWN;
 			list_move(&smb->qhead, &dispose_list);
 			smb->deleted_from_q = true;
@@ -1027,7 +1030,7 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 			cifs_dbg(FYI, "Callback mid %llu\n", smb->mid);
 			list_del_init(&smb->qhead);
 			mid_execute_callback(server, smb);
-			smb_put_message(smb);
+			smb_put_message(smb, smb_message_trace_put_clean_demux);
 		}
 		/* 1/8th of sec is more than enough time for them to exit */
 		msleep(125);

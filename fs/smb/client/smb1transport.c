@@ -58,7 +58,7 @@ static int allocate_mid(struct cifs_ses *ses, struct smb_message *smb)
 	}
 	spin_unlock(&ses->ses_lock);
 
-	smb_get_message(smb);
+	smb_get_message(smb, smb_message_trace_get_enqueue_sync);
 	spin_lock(&ses->server->mid_queue_lock);
 	list_add_tail(&smb->qhead, &ses->server->pending_mid_q);
 	spin_unlock(&ses->server->mid_queue_lock);
@@ -85,7 +85,7 @@ cifs_setup_async_request(struct TCP_Server_Info *server, struct smb_message *smb
 
 	rc = cifs_sign_rqst(&smb->rqst, server, &smb->sequence_number);
 	if (rc) {
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_end);
 		return rc;
 	}
 
@@ -905,7 +905,7 @@ static void smb1_parse_one_message(struct TCP_Server_Info *server,
 			 __func__, le16_to_cpu(shdr->Mid));
 		rxq->msg_id = 0;
 	} else {
-		rxq->msg_id = 0; /* TODO: smb->debug_id */
+		rxq->msg_id = smb->debug_id;
 	}
 
 	/* No session expiry check. */
@@ -935,7 +935,7 @@ static void smb1_parse_one_message(struct TCP_Server_Info *server,
 			/* Handle multipart trans2-class messages. */
 			rc = smb1_trans2_receive(server, smb, recv, rxq);
 			if (rc == 1) {
-				smb_put_message(smb);
+				smb_put_message(smb, smb_message_trace_put_incomplete);
 				return; /* Multipart, incomplete. */
 			}
 			if (rc < 0)
@@ -1009,7 +1009,7 @@ static void smb1_parse_one_message(struct TCP_Server_Info *server,
 		dequeue_mid(server, smb, recv->malformed);
 		mid_execute_callback(server, smb);
 
-		smb_put_message(smb);
+		smb_put_message(smb, smb_message_trace_put_delivered);
 	} else if (smb1_is_valid_oplock_break(h, recv->msg_len, server)) {
 		cifs_dbg(FYI, "Received oplock break\n");
 		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);

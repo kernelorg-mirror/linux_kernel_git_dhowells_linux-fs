@@ -35,6 +35,7 @@
 
 struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 {
+	static atomic_t debug_ids;
 	struct smb_message *smb;
 
 	smb = mempool_alloc(&smb_message_pool, gfp);
@@ -42,6 +43,7 @@ struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 		memset(smb, 0, sizeof(*smb));
 		refcount_set(&smb->ref, 1);
 		spin_lock_init(&smb->mid_lock);
+		smb->debug_id	= atomic_inc_return(&debug_ids);
 		smb->command_trace = cmd;
 		smb->when_alloc	= jiffies;
 		smb->pid	= current->pid;
@@ -53,22 +55,44 @@ struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 		smb->callback		= cifs_wake_up_task;
 		smb->callback_data	= current;
 		smb->mid_state		= MID_REQUEST_ALLOCATED;
+		trace_smb3_message(smb->debug_id, 1, (enum smb_message_trace)cmd);
 	}
 	return smb;
 }
 
-void smb_get_message(struct smb_message *smb)
+void smb_see_message(struct smb_message *smb, enum smb_message_trace trace)
 {
-	refcount_inc(&smb->ref);
+	trace_smb3_message(smb->debug_id, refcount_read(&smb->ref), trace);
+}
+
+void smb_get_message(struct smb_message *smb, enum smb_message_trace trace)
+{
+	int r;
+
+	__refcount_inc(&smb->ref, &r);
+	trace_smb3_message(smb->debug_id, r + 1, trace);
+}
+
+static void smb_free_message(struct smb_message *smb)
+{
+	trace_smb3_message(smb->debug_id, refcount_read(&smb->ref),
+			   smb_message_trace_free);
+	mempool_free(smb, &smb_message_pool);
 }
 
 /*
  * Drop a ref on a message.  This does not touch the chained messages.
  */
-void smb_put_message(struct smb_message *smb)
+void smb_put_message(struct smb_message *smb, enum smb_message_trace trace)
 {
-	if (refcount_dec_and_test(&smb->ref))
-		mempool_free(smb, &smb_message_pool);
+	unsigned int debug_id = smb->debug_id;
+	bool dead;
+	int r;
+
+	dead = __refcount_dec_and_test(&smb->ref, &r);
+	trace_smb3_message(debug_id, r - 1, trace);
+	if (dead)
+		smb_free_message(smb);
 }
 
 /*
@@ -80,8 +104,15 @@ void smb_put_messages(struct smb_message *smb)
 	struct smb_message *next;
 
 	for (; smb; smb = next) {
+		unsigned int debug_id = smb->debug_id;
+		bool dead;
+		int r;
+
 		next = smb->next;
-		smb_put_message(smb);
+		dead = __refcount_dec_and_test(&smb->ref, &r);
+		trace_smb3_message(debug_id, r - 1, smb_message_trace_put_messages);
+		if (dead)
+			smb_free_message(smb);
 	}
 }
 
@@ -90,6 +121,7 @@ cifs_wake_up_task(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	if (smb->mid_state == MID_RESPONSE_RECEIVED)
 		smb->mid_state = MID_RESPONSE_READY;
+	smb_see_message(smb, smb_message_trace_see_wake_up_task);
 	wake_up_process(smb->callback_data);
 }
 
@@ -193,7 +225,7 @@ static void smb_discard_messages(struct TCP_Server_Info *server, struct smb_mess
 	for (smb = head_smb; smb; smb = next) {
 		next = smb->next;
 		if (discard_message(server, smb))
-			smb_put_message(smb);
+			smb_put_message(smb, smb_message_trace_put_discard_message);
 	}
 }
 
@@ -930,7 +962,7 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_message *smb,
 	smb->mid_state = MID_REQUEST_SUBMITTED;
 
 	/* put it on the pending_mid_q */
-	smb_get_message(smb);
+	smb_get_message(smb, smb_message_trace_get_call_async);
 	spin_lock(&server->mid_queue_lock);
 	list_add_tail(&smb->qhead, &server->pending_mid_q);
 	spin_unlock(&server->mid_queue_lock);
@@ -946,7 +978,7 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_message *smb,
 		revert_current_mid(server, smb->credits_consumed);
 		server->sequence_number -= 2;
 		if (discard_message(server, smb))
-			smb_put_message(smb);
+			smb_put_message(smb, smb_message_trace_put_discard_message);
 	}
 
 	cifs_server_unlock(server);
