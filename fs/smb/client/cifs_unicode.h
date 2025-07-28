@@ -61,6 +61,8 @@ int cifs_utf16_bytes(const __le16 *from, int maxbytes,
 		     const struct nls_table *codepage);
 int cifs_strtoUTF16(__le16 *to, const char *from, int len,
 		    const struct nls_table *codepage);
+size_t cifs_size_strtoUTF16(const char *from, int len,
+			    const struct nls_table *codepage);
 char *cifs_strndup_from_utf16(const char *src, const int maxlen,
 			      const bool is_unicode,
 			      const struct nls_table *codepage);

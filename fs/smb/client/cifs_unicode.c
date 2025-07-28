@@ -277,6 +277,45 @@ success:
 }
 
 /*
+ * Work out how long a string will be once converted to UTF16 in bytes.  This
+ * does not include a NUL terminator.
+ */
+size_t cifs_size_strtoUTF16(const char *from, int len,
+			    const struct nls_table *codepage)
+{
+	wchar_t wchar_to; /* needed to quiet sparse */
+	ssize_t out_len = 0;
+	int charlen;
+
+	/* special case for utf8 to handle no plane0 chars */
+	if (strcmp(codepage->charset, "utf8") == 0) {
+		out_len = utf8s_to_len_utf16s(from, len);
+		if (out_len >= 0)
+			goto success;
+		/*
+		 * On failure, fall back to UCS encoding as this function
+		 * should not return negative values currently can fail only if
+		 * source contains invalid encoded characters
+		 */
+	}
+
+	for (; len && *from; len -= charlen) {
+		charlen = codepage->char2uni(from, len, &wchar_to);
+		if (charlen < 1) {
+			cifs_dbg(VFS, "strtoUTF16: char2uni of 0x%x returned %d\n",
+				 *from, charlen);
+			/* Replace with a question mark */
+			charlen = 1;
+		}
+		from += charlen;
+		out_len += 2;
+	}
+
+success:
+	return out_len;
+}
+
+/*
  * cifs_utf16_bytes - how long will a string be after conversion?
  * @utf16 - pointer to input string
  * @maxbytes - don't go past this many bytes of input string

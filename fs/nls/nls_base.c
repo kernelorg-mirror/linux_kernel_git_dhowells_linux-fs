@@ -174,6 +174,39 @@ int utf8s_to_utf16s(const u8 *s, int inlen, enum utf16_endian endian,
 }
 EXPORT_SYMBOL(utf8s_to_utf16s);
 
+/**
+ * utf8s_to_len_utf16s - Determine the length of a conversion of UTF8 to UTF16.
+ * @s: The source utf8 string
+ * @inlen: The length of the string
+ */
+ssize_t utf8s_to_len_utf16s(const u8 *s, int inlen)
+{
+	unicode_t u;
+	size_t outcount = 0;
+	int size;
+
+	while (inlen > 0 && *s) {
+		if (*s & 0x80) {
+			size = utf8_to_utf32(s, inlen, &u);
+			if (size < 0)
+				return -EINVAL;
+			s += size;
+			inlen -= size;
+
+			if (u >= PLANE_SIZE)
+				outcount += 2;
+			else
+				outcount++;
+		} else {
+			s++;
+			outcount++;
+			inlen--;
+		}
+	}
+	return outcount * sizeof(wchar_t);
+}
+EXPORT_SYMBOL(utf8s_to_len_utf16s);
+
 static inline unsigned long get_utf16(unsigned c, enum utf16_endian endian)
 {
 	switch (endian) {
