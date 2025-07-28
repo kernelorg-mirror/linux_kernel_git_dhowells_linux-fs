@@ -45,7 +45,7 @@ alloc_mid(const struct smb_hdr *smb_buffer, struct TCP_Server_Info *server)
 
 	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
 	memset(smb, 0, sizeof(struct smb_message));
-	refcount_set(&smb->refcount, 1);
+	refcount_set(&smb->ref, 1);
 	spin_lock_init(&smb->mid_lock);
 	smb->mid = get_mid(smb_buffer);
 	smb->pid = current->pid;

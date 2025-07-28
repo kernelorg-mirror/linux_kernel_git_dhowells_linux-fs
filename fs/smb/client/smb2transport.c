@@ -621,10 +621,10 @@ smb2_mid_entry_alloc(const struct smb2_hdr *shdr,
 
 	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
 	memset(smb, 0, sizeof(*smb));
-	refcount_set(&smb->refcount, 1);
+	refcount_set(&smb->ref, 1);
 	spin_lock_init(&smb->mid_lock);
 	smb->mid = le64_to_cpu(shdr->MessageId);
-	smb->credits = credits > 0 ? credits : 1;
+	smb->credits_consumed = credits > 0 ? credits : 1;
 	smb->pid = current->pid;
 	smb->command = shdr->Command; /* Always LE */
 	smb->when_alloc = jiffies;

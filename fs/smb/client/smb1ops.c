@@ -254,7 +254,7 @@ cifs_find_mid(struct TCP_Server_Info *server, char *buffer)
 		if (compare_mid(smb->mid, buf) &&
 		    smb->mid_state == MID_REQUEST_SUBMITTED &&
 		    le16_to_cpu(smb->command) == buf->Command) {
-			smb_get_mid(smb);
+			smb_get_message(smb);
 			spin_unlock(&server->mid_queue_lock);
 			return smb;
 		}

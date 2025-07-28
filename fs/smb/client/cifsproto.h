@@ -82,6 +82,10 @@ char *cifs_build_path_to_root(struct smb3_fs_context *ctx,
 			      struct cifs_tcon *tcon, int add_treename);
 char *cifs_build_devname(char *nodename, const char *prepath);
 void delete_mid(struct TCP_Server_Info *server, struct smb_message *smb);
+struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp);
+void smb_get_message(struct smb_message *smb);
+void smb_put_message(struct smb_message *smb);
+void smb_put_messages(struct smb_message *smb);
 void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 void cifs_wake_up_task(struct TCP_Server_Info *server,
 		       struct smb_message *smb);
@@ -471,14 +475,9 @@ static inline bool dfs_src_pathname_equal(const char *s1, const char *s2)
 	return true;
 }
 
-static inline void smb_get_mid(struct smb_message *smb)
-{
-	refcount_inc(&smb->refcount);
-}
-
 static inline void release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	if (refcount_dec_and_test(&smb->refcount))
+	if (refcount_dec_and_test(&smb->ref))
 		__release_mid(server, smb);
 }
 

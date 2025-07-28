@@ -1706,40 +1706,83 @@ typedef void (*mid_callback_t)(struct TCP_Server_Info *srv, struct smb_message *
 typedef int (*mid_handle_t)(struct TCP_Server_Info *server,
 			    struct smb_message *smb);
 
-/* one of these for every pending CIFS request to the server */
+/*
+ * Definition of an SMB request message to be transmitted.  These may be
+ * chained together and will automatically be turned into compound messages if
+ * they are.
+ *
+ *	+-----------------------+
+ *	| NetBIOS/padding	|
+ *	+-----------------------+ <--- smb->request + pre_offset
+ *	| (Transform header)	|
+ *	+-----------------------+ <--- smb->request
+ *	| SMB2 Header		| }				 }
+ *	+-----------------------+ } header_size			 }
+ *	| Req/Rsp struct	| }				 }
+ *	+-----------------------+ <--- smb->request + ext_offset } protocol_size
+ *	|			|				 }
+ *	| Extra protocol data	|				 }
+ *	|			|				 }
+ *	+-----------------------+ <--- smb->request + smb->data_offset
+ *	|			|
+ *	| Data Payload		|  data_size
+ *	|			|
+ *	+-----------------------+
+ *
+ *
+ * If the data is to be RDMA'd, it will be kept separate from the protocol.
+ */
 struct smb_message {
-	struct list_head qhead;	/* mids waiting on reply from this server */
-	refcount_t refcount;
-	__u64 mid;		/* multiplex id */
-	__u16 credits;		/* number of credits consumed by this mid */
-	__u16 credits_received;	/* number of credits from the response */
-	__u32 pid;		/* process id */
-	__u32 sequence_number;  /* for CIFS signing */
-	unsigned int sr_flags;	/* Flags passed to send_recv() */
-	unsigned long when_alloc;  /* when mid was created */
+	struct smb_message	*next;		/* Next message in compound */
+	struct cifs_credits	credits;	/* Credit requirements for this message */
+	void			*request;	/* Pointer to request message body */
+	refcount_t		ref;
+	bool			sensitive;	/* Request contains sensitive data */
+	bool			cancelled;	/* T if cancelled */
+	unsigned int		sr_flags;	/* Flags passed to send_recv() */
+
+	/* Queue state */
+	struct list_head	qhead;		/* mids waiting on reply from this server */
+	__u64			mid;		/* multiplex id */
+	__u16			credits_consumed; /* number of credits consumed by this op */
+	__u16			credits_received; /* number of credits from the response */
+	__u32			pid;		/* process id */
+	__u32			sequence_number;  /* for CIFS signing */
+	unsigned long		when_alloc;	/* when mid was created */
 #ifdef CONFIG_CIFS_STATS2
-	unsigned long when_sent; /* time when smb send finished */
-	unsigned long when_received; /* when demux complete (taken off wire) */
+	unsigned long		when_sent;	/* time when smb send finished */
+	unsigned long		when_received;	/* when demux complete (taken off wire) */
 #endif
-	mid_receive_t receive;	/* call receive callback */
-	mid_callback_t callback; /* call completion callback */
-	mid_handle_t handle;	/* call handle mid callback */
-	void *callback_data;	  /* general purpose pointer for callback */
-	struct task_struct *creator;
-	void *resp_buf;		/* pointer to received SMB header */
-	unsigned int resp_buf_size;
-	u32 response_pdu_len;
-	int mid_state;	/* wish this were enum but can not pass to wait_event */
-	int mid_rc;		/* rc for MID_RC */
-	__le16 command;		/* smb command code */
-	unsigned int optype;	/* operation type */
-	spinlock_t mid_lock;
-	bool wait_cancelled:1;  /* Cancelled while waiting for response */
-	bool deleted_from_q:1;  /* Whether Mid has been dequeued frem pending_mid_q */
-	bool large_buf:1;	/* if valid response, is pointer to large buf */
-	bool multiRsp:1;	/* multiple trans2 responses for one request  */
-	bool multiEnd:1;	/* both received */
-	bool decrypted:1;	/* decrypted entry */
+	mid_receive_t		receive;	/* call receive callback */
+	mid_callback_t		callback;	/* call completion callback */
+	mid_handle_t		handle;		/* call handle mid callback */
+	void			*callback_data;	/* general purpose pointer for callback */
+	struct task_struct	*creator;
+	void			*resp_buf;	/* pointer to received SMB header */
+	unsigned int		resp_buf_size;
+	int			mid_state;	/* wish this were enum but can not pass to wait_event */
+	int			mid_rc;		/* rc for MID_RC */
+	unsigned int		optype;		/* operation type */
+	spinlock_t		mid_lock;
+	bool			wait_cancelled:1;  /* Cancelled while waiting for response */
+	bool			deleted_from_q:1;  /* Mid has been dequeued from pending_mid_q */
+	bool			large_buf:1;	/* if valid response, is pointer to large buf */
+	bool			multiRsp:1;	/* multiple trans2 responses for one request  */
+	bool			multiEnd:1;	/* both received */
+	bool			decrypted:1;	/* decrypted entry */
+	bool			writeback:1;	/* Performing writeback (ENOMEM workarounds) */
+
+	/* Request details */
+	u8			command_trace;	/* enum smb_command_trace - Command trace ID */
+	__le16			command;	/* smb command code */
+	s16			pre_offset;	/* Offset of pre-headers from ->body (negative) */
+	unsigned int		total_len;	/* Total length of from hdr_offset onwards */
+	/* Response */
+	u32			response_pdu_len; /* Size of response PDU */
+	/* Compat with old code */
+	struct smb_rqst		rqst;
+	int			*resp_buf_type;
+	struct kvec		*resp_iov;
 };
 
 struct close_cancelled_open {

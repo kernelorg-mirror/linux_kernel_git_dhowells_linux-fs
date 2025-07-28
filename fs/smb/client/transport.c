@@ -30,6 +30,46 @@
 #include "smbdirect.h"
 #include "compress.h"
 
+struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
+{
+	struct smb_message *smb;
+
+	smb = mempool_alloc(&smb_message_pool, gfp);
+	if (smb) {
+		memset(smb, 0, sizeof(*smb));
+		refcount_set(&smb->ref, 1);
+		smb->command_trace = cmd;
+	}
+	return smb;
+}
+
+void smb_get_message(struct smb_message *smb)
+{
+	refcount_inc(&smb->ref);
+}
+
+/*
+ * Drop a ref on a message.  This does not touch the chained messages.
+ */
+void smb_put_message(struct smb_message *smb)
+{
+	if (refcount_dec_and_test(&smb->ref))
+		mempool_free(smb, &smb_message_pool);
+}
+
+/*
+ * Dispose of a chain of compound messages.
+ */
+void smb_put_messages(struct smb_message *smb)
+{
+	struct smb_message *next;
+
+	for (; smb; smb = next) {
+		next = smb->next;
+		smb_put_message(smb);
+	}
+}
+
 void
 cifs_wake_up_task(struct TCP_Server_Info *server, struct smb_message *smb)
 {
@@ -722,7 +762,7 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 	rc = smb_send_rqst(server, 1, rqst, flags);
 
 	if (rc < 0) {
-		revert_current_mid(server, smb->credits);
+		revert_current_mid(server, smb->credits_consumed);
 		server->sequence_number -= 2;
 		delete_mid(server, smb);
 	}
