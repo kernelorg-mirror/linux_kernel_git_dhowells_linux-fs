@@ -915,10 +915,10 @@ static int smb2_get_dos_mode(struct kstat *stat, int attribute)
 static void build_preauth_ctxt(struct smb2_preauth_neg_context *pneg_ctxt,
 			       __le16 hash_id)
 {
-	pneg_ctxt->ContextType = SMB2_PREAUTH_INTEGRITY_CAPABILITIES;
-	pneg_ctxt->DataLength = cpu_to_le16(38);
+	pneg_ctxt->neg.ContextType = SMB2_PREAUTH_INTEGRITY_CAPABILITIES;
+	pneg_ctxt->neg.DataLength = cpu_to_le16(38);
+	pneg_ctxt->neg.Reserved = cpu_to_le32(0);
 	pneg_ctxt->HashAlgorithmCount = cpu_to_le16(1);
-	pneg_ctxt->Reserved = cpu_to_le32(0);
 	pneg_ctxt->SaltLength = cpu_to_le16(SMB311_SALT_SIZE);
 	get_random_bytes(pneg_ctxt->Salt, SMB311_SALT_SIZE);
 	pneg_ctxt->HashAlgorithms = hash_id;
@@ -927,9 +927,9 @@ static void build_preauth_ctxt(struct smb2_preauth_neg_context *pneg_ctxt,
 static void build_encrypt_ctxt(struct smb2_encryption_neg_context *pneg_ctxt,
 			       __le16 cipher_type)
 {
-	pneg_ctxt->ContextType = SMB2_ENCRYPTION_CAPABILITIES;
-	pneg_ctxt->DataLength = cpu_to_le16(4);
-	pneg_ctxt->Reserved = cpu_to_le32(0);
+	pneg_ctxt->neg.ContextType = SMB2_ENCRYPTION_CAPABILITIES;
+	pneg_ctxt->neg.DataLength = cpu_to_le16(4);
+	pneg_ctxt->neg.Reserved = cpu_to_le32(0);
 	pneg_ctxt->CipherCount = cpu_to_le16(1);
 	pneg_ctxt->Ciphers[0] = cipher_type;
 }
@@ -961,19 +961,19 @@ static void build_compress_ctxt(struct smb2_compression_capabilities_context *pn
 static void build_sign_cap_ctxt(struct smb2_signing_capabilities *pneg_ctxt,
 				__le16 sign_algo)
 {
-	pneg_ctxt->ContextType = SMB2_SIGNING_CAPABILITIES;
-	pneg_ctxt->DataLength =
+	pneg_ctxt->neg.ContextType = SMB2_SIGNING_CAPABILITIES;
+	pneg_ctxt->neg.DataLength =
 		cpu_to_le16((sizeof(struct smb2_signing_capabilities) + 2)
 			- sizeof(struct smb2_neg_context));
-	pneg_ctxt->Reserved = cpu_to_le32(0);
+	pneg_ctxt->neg.Reserved = cpu_to_le32(0);
 	pneg_ctxt->SigningAlgorithmCount = cpu_to_le16(1);
 	pneg_ctxt->SigningAlgorithms[0] = sign_algo;
 }
 
 static void build_posix_ctxt(struct smb2_posix_neg_context *pneg_ctxt)
 {
-	pneg_ctxt->ContextType = SMB2_POSIX_EXTENSIONS_AVAILABLE;
-	pneg_ctxt->DataLength = cpu_to_le16(POSIX_CTXT_DATA_LEN);
+	pneg_ctxt->neg.ContextType = SMB2_POSIX_EXTENSIONS_AVAILABLE;
+	pneg_ctxt->neg.DataLength = cpu_to_le16(POSIX_CTXT_DATA_LEN);
 	/* SMB2_CREATE_TAG_POSIX is "0x93AD25509CB411E7B42383DE968BCD7C" */
 	pneg_ctxt->Name[0] = 0x93;
 	pneg_ctxt->Name[1] = 0xAD;

@@ -476,9 +476,7 @@ struct smb2_neg_context {
 #define MIN_PREAUTH_CTXT_DATA_LEN 6
 
 struct smb2_preauth_neg_context {
-	__le16	ContextType; /* 1 */
-	__le16	DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	__le16	HashAlgorithmCount; /* 1 */
 	__le16	SaltLength;
 	__le16	HashAlgorithms; /* HashAlgorithms[0] since only one defined */
@@ -494,9 +492,7 @@ struct smb2_preauth_neg_context {
 /* Min encrypt context data is one cipher so 2 bytes + 2 byte count field */
 #define MIN_ENCRYPT_CTXT_DATA_LEN	4
 struct smb2_encryption_neg_context {
-	__le16	ContextType; /* 2 */
-	__le16	DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	/* CipherCount usually 2, but can be 3 when AES256-GCM enabled */
 	__le16	CipherCount; /* AES128-GCM and AES128-CCM by default */
 	__le16	Ciphers[];
@@ -518,9 +514,7 @@ struct smb2_encryption_neg_context {
 #define SMB2_COMPRESSION_CAPABILITIES_FLAG_CHAINED	cpu_to_le32(0x00000001)
 
 struct smb2_compression_capabilities_context {
-	__le16	ContextType; /* 3 */
-	__le16  DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	__le16	CompressionAlgorithmCount;
 	__le16	Padding;
 	__le32	Flags;
@@ -532,9 +526,7 @@ struct smb2_compression_capabilities_context {
  * Its struct simply contains NetName, an array of Unicode characters
  */
 struct smb2_netname_neg_context {
-	__le16	ContextType; /* 5 */
-	__le16	DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	__le16	NetName[]; /* hostname of target converted to UCS-2 */
 } __packed;
 
@@ -588,9 +580,7 @@ struct smb2_rdma_transform_capabilities_context {
 #define SIGNING_ALG_AES_GMAC_LE    cpu_to_le16(2)
 
 struct smb2_signing_capabilities {
-	__le16	ContextType; /* 8 */
-	__le16	DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	__le16	SigningAlgorithmCount;
 	__le16	SigningAlgorithms[];
 	/*  Followed by padding to 8 byte boundary (required by some servers) */
@@ -598,9 +588,7 @@ struct smb2_signing_capabilities {
 
 #define POSIX_CTXT_DATA_LEN	16
 struct smb2_posix_neg_context {
-	__le16	ContextType; /* 0x100 */
-	__le16	DataLength;
-	__le32	Reserved;
+	struct smb2_neg_context neg;
 	__u8	Name[16]; /* POSIX ctxt GUID 93AD25509CB411E7B42383DE968BCD7C */
 } __packed;
 
