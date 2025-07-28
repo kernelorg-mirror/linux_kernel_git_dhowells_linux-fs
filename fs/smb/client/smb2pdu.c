@@ -2513,16 +2513,12 @@ tcon_error_exit:
 int
 SMB2_tdis(const unsigned int xid, struct cifs_tcon *tcon)
 {
-	struct smb_rqst rqst;
 	struct smb2_tree_disconnect_req *req; /* response is trivial */
-	int rc = 0;
+	struct smb_message *smb = NULL;
 	struct cifs_ses *ses = tcon->ses;
 	struct TCP_Server_Info *server = cifs_pick_channel(ses);
 	int flags = 0;
-	unsigned int total_len;
-	struct kvec iov[1];
-	struct kvec rsp_iov;
-	int resp_buf_type;
+	int rc = 0;
 
 	cifs_dbg(FYI, "Tree Disconnect\n");
 
@@ -2540,33 +2536,29 @@ SMB2_tdis(const unsigned int xid, struct cifs_tcon *tcon)
 
 	invalidate_all_cached_dirs(tcon, true);
 
-	rc = smb2_plain_req_init(SMB2_TREE_DISCONNECT, tcon, server,
-				 (void **) &req,
-				 &total_len);
-	if (rc)
-		return rc;
+	smb = smb2_create_request(SMB2_TREE_DISCONNECT, server, tcon,
+				  sizeof(*req), sizeof(*req), 0,
+				  SMB2_REQ_DYNAMIC);
+	if (!smb)
+		return -ENOMEM;
+	req = smb->request;
 
 	if (smb3_encryption_required(tcon))
 		flags |= CIFS_TRANSFORM_REQ;
 
-	flags |= CIFS_NO_RSP_BUF;
+	iov_iter_bvec_queue(&smb->req_iter, ITER_SOURCE, &smb->bvecq, 0, 0,
+			    smb->data_offset);
 
-	iov[0].iov_base = (char *)req;
-	iov[0].iov_len = total_len;
-
-	memset(&rqst, 0, sizeof(struct smb_rqst));
-	rqst.rq_iov = iov;
-	rqst.rq_nvec = 1;
-
-	rc = cifs_send_recv(xid, ses, server,
-			    &rqst, &resp_buf_type, flags, &rsp_iov);
-	cifs_small_buf_release(req);
+	smb->sr_flags = flags;
+	rc = smb_send_recv_messages(xid, ses, server, smb, flags);
+	smb_clear_request(smb);
 	if (rc) {
 		cifs_stats_fail_inc(tcon, SMB2_TREE_DISCONNECT_HE);
 		trace_smb3_tdis_err(xid, tcon->tid, ses->Suid, rc);
 	}
 	trace_smb3_tdis_done(xid, tcon->tid, ses->Suid);
 
+	smb_put_messages(smb);
 	return rc;
 }
 
