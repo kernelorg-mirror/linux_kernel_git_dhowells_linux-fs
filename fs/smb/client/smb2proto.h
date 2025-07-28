@@ -121,6 +121,7 @@ unsigned long smb_rqst_len(struct TCP_Server_Info *server,
 void smb2_set_next_command(struct cifs_tcon *tcon, struct smb_rqst *rqst);
 void smb2_set_related(struct smb_rqst *rqst);
 void smb2_set_replay(struct TCP_Server_Info *server, struct smb_rqst *rqst);
+void smb2_set_replay_smb(struct TCP_Server_Info *server, struct smb_message *smb);
 bool smb2_should_replay(struct cifs_tcon *tcon, int *pretries,
 			int *pcur_sleep);
 void smb2_add_credits_from_hdr(struct smb2_hdr *shdr,

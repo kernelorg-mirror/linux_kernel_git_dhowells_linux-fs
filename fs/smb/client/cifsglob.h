@@ -1677,6 +1677,7 @@ struct smb_message {
 	wait_queue_head_t	waitq;		/* Wait queue for message events */
 	refcount_t		ref;
 	unsigned int		debug_id;	/* Debugging ID for tracing */
+	bool			new_style;	/* New style request (not using ->rqst) */
 	bool			sensitive;	/* Request contains sensitive data */
 	bool			cancelled;	/* T if cancelled */
 	unsigned int		sr_flags;	/* Flags passed to send_recv() */
@@ -1717,7 +1718,13 @@ struct smb_message {
 	u8			command_trace;	/* enum smb_command_trace - Command trace ID */
 	__le16			command;	/* smb command code */
 	s16			pre_offset;	/* Offset of pre-headers from ->body (negative) */
+	u16			ext_offset;	/* Offset of extensions from ->body */
+	u16			latest_record;	/* Offset of latest context record (or 0) */
+	u16			offset;		/* Running offset during assembly */
+	u16			data_offset;	/* Offset of data in message (maybe in ->body) */
 	unsigned int		total_len;	/* Total length of from hdr_offset onwards */
+	struct iov_iter		data_iter;	/* Data iterator */
+	struct iov_iter		req_iter;	/* Request iterator */
 	/* Response */
 	//u32			response_pdu_len; /* Size of response PDU */
 	void			*response;	/* Protocol part of response */
@@ -1730,6 +1737,9 @@ struct smb_message {
 	struct bvecq		*response_data;	/* Storage for response data (or NULL) */
 	/* Compat with old code */
 	struct smb_rqst		rqst;
+	/* Variable-length request fragment list - must be last! */
+	struct bvecq		bvecq;		/* List of request frags (passed to socket) */
+	struct bio_vec		__bvecq_bv[3];
 };
 
 struct close_cancelled_open {

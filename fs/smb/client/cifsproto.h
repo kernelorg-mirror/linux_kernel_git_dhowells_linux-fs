@@ -87,6 +87,7 @@ void smb_see_message(struct smb_message *smb, enum smb_message_trace trace);
 void smb_get_message(struct smb_message *smb, enum smb_message_trace trace);
 void smb_put_message(struct smb_message *smb, enum smb_message_trace trace);
 void smb_put_messages(struct smb_message *smb);
+void smb_clear_request(struct smb_message *smb);
 void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 void cifs_wake_up_task(struct TCP_Server_Info *server,
 		       struct smb_message *smb);
@@ -94,6 +95,9 @@ char *smb3_fs_context_fullpath(const struct smb3_fs_context *ctx, char dirsep);
 int smb3_parse_devname(const char *devname, struct smb3_fs_context *ctx);
 int cifs_ipaddr_cmp(struct sockaddr *srcaddr, struct sockaddr *rhs);
 bool cifs_match_ipaddr(struct sockaddr *srcaddr, struct sockaddr *rhs);
+int smb_send_recv_messages(const unsigned int xid, struct cifs_ses *ses,
+			   struct TCP_Server_Info *server,
+			   struct smb_message *head_smb, const int flags);
 int cifs_call_async(struct TCP_Server_Info *server, struct smb_message *smb,
 		    const int flags, const struct cifs_credits *exist_credits);
 struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses);
@@ -511,5 +515,19 @@ int smb_rxqueue_consume(struct TCP_Server_Info *server, struct netfs_rxqueue *rx
 			size_t amount);
 void *cifs_allocate_tx_buf(struct TCP_Server_Info *server, size_t size);
 void cifs_free_tx_buf(void *p);
+
+/*
+ * Add a segment to a message.  This should be allocated with
+ * cifs_allocate_tx_buf() so that it can be used with MSG_SPLICE_PAGES.
+ */
+static inline void smb_add_segment_to_tx_buf(struct smb_message *smb,
+					     void *buf, size_t size)
+{
+	unsigned int nr = smb->bvecq.nr_slots;
+
+	bvec_set_virt(&smb->bvecq.bv[nr], buf, size);
+	smb->bvecq.nr_slots = nr + 1;
+	smb->total_len += size;
+}
 
 #endif			/* _CIFSPROTO_H */

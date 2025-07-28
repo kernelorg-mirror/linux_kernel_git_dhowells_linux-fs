@@ -209,16 +209,24 @@ smb2_find_smb_tcon(struct TCP_Server_Info *server, __u64 ses_id, __u32  tid)
 	return tcon;
 }
 
+static inline size_t smb2_hmac_sha256_step(void *iter_base, size_t progress,
+					   size_t len, void *priv, void *priv2)
+{
+	struct hmac_sha256_ctx *hmac_ctx = priv;
+
+	hmac_sha256_update(hmac_ctx, iter_base, len);
+	return 0;
+}
+
 static int
 smb2_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
 		    bool for_recv)
 {
 	int rc;
 	unsigned char smb2_signature[SMB2_HMACSHA256_SIZE];
-	struct kvec *iov = smb->rqst.rq_iov;
 	struct smb2_hdr *shdr = for_recv ? smb->response : smb->request;
 	struct hmac_sha256_ctx hmac_ctx;
-	struct smb_rqst drqst;
+	size_t size, did;
 	__u64 sid = le64_to_cpu(shdr->SessionId);
 	u8 key[SMB2_NTLMV2_SESSKEY_SIZE];
 
@@ -234,27 +242,32 @@ smb2_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
 
 	hmac_sha256_init_usingrawkey(&hmac_ctx, key, sizeof(key));
 
-	/*
-	 * For SMB2+, __cifs_calc_signature() expects to sign only the actual
-	 * data, that is, iov[0] should not contain a rfc1002 length.
-	 *
-	 * Sign the rfc1002 length prior to passing the data (iov[1-N]) down to
-	 * __cifs_calc_signature().
-	 */
-	drqst = smb->rqst;
-	if (drqst.rq_nvec >= 2 && iov[0].iov_len == 4) {
-		hmac_sha256_update(&hmac_ctx, iov[0].iov_base, iov[0].iov_len);
-		drqst.rq_iov++;
-		drqst.rq_nvec--;
+	if (smb->new_style) {
+		struct iov_iter req_iter = smb->req_iter;
+
+		size = iov_iter_count(&req_iter);
+		did = iterate_and_advance_kernel(&req_iter, size, &hmac_ctx, NULL,
+						 smb2_hmac_sha256_step);
+		if (did != size)
+			return smb_EIO2(smb_eio_trace_sig_iter, did, size);
+	} else {
+		for (int i = 0; i < smb->rqst.rq_nvec; i++)
+			hmac_sha256_update(&hmac_ctx,
+					   smb->rqst.rq_iov[i].iov_base,
+					   smb->rqst.rq_iov[i].iov_len);
 	}
 
-	rc = __cifs_calc_signature(
-		&drqst, server, smb2_signature,
-		&(struct cifs_calc_sig_ctx){ .hmac = &hmac_ctx });
-	if (!rc)
-		memcpy(shdr->Signature, smb2_signature, SMB2_SIGNATURE_SIZE);
+	struct iov_iter data_iter = smb->data_iter;
 
-	return rc;
+	size = iov_iter_count(&data_iter);
+	did = iterate_and_advance_kernel(&data_iter, size, &hmac_ctx, NULL,
+					 smb2_hmac_sha256_step);
+	if (did != size)
+		return smb_EIO2(smb_eio_trace_sig_iter, did, size);
+
+	hmac_sha256_final(&hmac_ctx, smb2_signature);
+	memcpy(shdr->Signature, smb2_signature, SMB2_SIGNATURE_SIZE);
+	return 0;
 }
 
 static void generate_key(struct cifs_ses *ses, struct kvec label,
@@ -462,17 +475,25 @@ generate_smb311signingkey(struct cifs_ses *ses,
 	return generate_smb3signingkey(ses, server, &triplet);
 }
 
+static inline size_t smb3_aes_cmac_step(void *iter_base, size_t progress,
+					size_t len, void *priv, void *priv2)
+{
+	struct aes_cmac_ctx *cmac_ctx = priv;
+
+	aes_cmac_update(cmac_ctx, iter_base, len);
+	return 0;
+}
+
 static int
 smb3_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
 		    bool for_recv)
 {
 	int rc;
 	unsigned char smb3_signature[SMB2_CMACAES_SIZE];
-	struct kvec kv;
 	struct smb2_hdr *shdr = for_recv ? smb->response : smb->request;
 	struct aes_cmac_key cmac_key __cleanup(aes_cmac_zeroize_key);
 	struct aes_cmac_ctx cmac_ctx __cleanup(aes_cmac_zeroize_ctx);
-	struct smb_rqst drqst;
+	size_t size, did;
 	u8 key[SMB3_SIGN_KEY_SIZE];
 
 	if (server->vals->protocol_id <= SMB21_PROT_ID)
@@ -496,22 +517,55 @@ smb3_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
 	aes_cmac_init(&cmac_ctx, &cmac_key);
 
 	if (for_recv) {
-		kv.iov_base = smb->response;
-		kv.iov_len  = smb->resp_len;
-		drqst.rq_nvec = 1;
-		drqst.rq_iov  = &kv;
-		drqst.rq_iter = smb->response_iter;
-		iov_iter_truncate(&drqst.rq_iter, smb->resp_data_len);
+		struct iov_iter resp_iter = smb->response_iter;
+
+		size = smb->resp_len;
+		did = 0;
+
+		aes_cmac_update(&cmac_ctx, smb->response, size);
+		rc = -EIO;
+		size = iov_iter_count(&resp_iter);
+		did = iterate_and_advance_kernel(&resp_iter, size, &cmac_ctx,
+						  NULL, smb3_aes_cmac_step);
+		if (did != size)
+			goto eio;
 	} else {
-		drqst = smb->rqst;
+		if (smb->new_style) {
+			struct iov_iter req_iter = smb->req_iter;
+
+			size = iov_iter_count(&req_iter);
+			did = iterate_and_advance_kernel(&req_iter, size,
+							 &cmac_ctx, NULL,
+							 smb3_aes_cmac_step);
+			if (did != size)
+				goto eio;
+		} else {
+			for (int i = 0; i < smb->rqst.rq_nvec; i++) {
+				size = smb->rqst.rq_iov[i].iov_len;
+				aes_cmac_update(&cmac_ctx,
+						smb->rqst.rq_iov[i].iov_base,
+						size);
+			}
+		}
+
+		struct iov_iter data_iter = smb->data_iter;
+
+		size = iov_iter_count(&data_iter);
+		did = iterate_and_advance_kernel(&data_iter, size, &cmac_ctx,
+						 NULL, smb3_aes_cmac_step);
+		if (did != size)
+			return smb_EIO2(smb_eio_trace_sig_iter, did, size);
 	}
 
-	rc = __cifs_calc_signature(
-		&drqst, server, smb3_signature,
-		&(struct cifs_calc_sig_ctx){ .cmac = &cmac_ctx });
-	if (!rc)
-		memcpy(shdr->Signature, smb3_signature, SMB2_SIGNATURE_SIZE);
+	aes_cmac_final(&cmac_ctx, smb3_signature);
+
+	memcpy(shdr->Signature, smb3_signature, SMB2_SIGNATURE_SIZE);
+	rc = 0;
+out:
 	return rc;
+eio:
+	smb_EIO2(smb_eio_trace_sig_iter, did, size);
+	goto out;
 }
 
 /* must be called with server->srv_mutex held */

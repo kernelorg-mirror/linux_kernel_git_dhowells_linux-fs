@@ -67,6 +67,7 @@ struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 		smb->command_trace = cmd;
 		smb->when_alloc	= jiffies;
 		smb->pid	= current->pid;
+		smb->bvecq.bv	= smb->__bvecq_bv;
 
 		/*
 		 * The default is for the mid to be synchronous, so the default
@@ -97,7 +98,24 @@ static void smb_free_message(struct smb_message *smb)
 {
 	trace_smb3_message(smb->debug_id, refcount_read(&smb->ref),
 			   smb_message_trace_free);
+	if (smb->new_style)
+		cifs_free_tx_buf(smb->request + smb->pre_offset);
 	mempool_free(smb, &smb_message_pool);
+}
+
+/*
+ * Clear the request parts of a message.
+ */
+void smb_clear_request(struct smb_message *smb)
+{
+	for (; smb; smb = smb->next) {
+		if (smb->request) {
+			if (smb->sensitive)
+				memzero_explicit(smb->request, smb->data_offset);
+			cifs_free_tx_buf(smb->request);
+			smb->request = NULL;
+		}
+	}
 }
 
 /*
@@ -122,6 +140,8 @@ void smb_put_message(struct smb_message *smb, enum smb_message_trace trace)
 void smb_put_messages(struct smb_message *smb)
 {
 	struct smb_message *next;
+
+	smb_clear_request(smb);
 
 	for (; smb; smb = next) {
 		unsigned int debug_id = smb->debug_id;
@@ -561,8 +581,7 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
 
 	for (smb = head_smb; smb; smb = smb->next) {
-		size_t size = iov_iter_count(&smb->rqst.rq_iter);
-		size_t got;
+		size_t size, got;
 
 		if (offset & 7) {
 			unsigned int tmp = offset;
@@ -570,25 +589,54 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 			iov_iter_zero(offset - tmp, iter);
 		}
 
-		for (int i = 0; i < smb->rqst.rq_nvec; i++) {
-			size_t len = smb->rqst.rq_iov[i].iov_len;
-			got = copy_to_iter(smb->rqst.rq_iov[i].iov_base, len, iter);
-			if (got != len) {
-				rc = smb_EIO2(smb_eio_trace_tx_copy_to_buf, got, size);
+		if (smb->new_style) {
+			struct iov_iter req_iter = smb->req_iter;
+
+			size = iov_iter_count(&req_iter);
+			got = iterate_and_advance_kernel(&req_iter,
+							 size, iter, NULL,
+							 smb3_copy_data_iter);
+			if (got != size) {
+				rc = smb_EIO2(smb_eio_trace_tx_copy_iter_to_buf, got, size);
 				goto error;
 			}
-			offset += len;
-		}
+			offset += size;
 
-		got = iterate_and_advance_kernel(&smb->rqst.rq_iter,
-						 size, iter, NULL,
-						 smb3_copy_data_iter);
-		if (got != size) {
-			rc = smb_EIO2(smb_eio_trace_tx_copy_iter_to_buf, got, size);
-			goto error;
-		}
+			struct iov_iter data_iter = smb->data_iter;
 
-		offset += size;
+			size = iov_iter_count(&data_iter);
+			got = iterate_and_advance_kernel(&data_iter,
+							 size, iter, NULL,
+							 smb3_copy_data_iter);
+			if (got != size) {
+				rc = smb_EIO2(smb_eio_trace_tx_copy_iter_to_buf, got, size);
+				goto error;
+			}
+			offset += size;
+		} else {
+			/* Old-style with an rqst. */
+			size = iov_iter_count(&smb->rqst.rq_iter);
+
+			for (int i = 0; i < smb->rqst.rq_nvec; i++) {
+				size_t len = smb->rqst.rq_iov[i].iov_len;
+				got = copy_to_iter(smb->rqst.rq_iov[i].iov_base,
+						   len, iter);
+				if (got != len) {
+					rc = smb_EIO2(smb_eio_trace_tx_copy_to_buf, got, size);
+					goto error;
+				}
+				offset += len;
+			}
+
+			got = iterate_and_advance_kernel(&smb->rqst.rq_iter,
+							 size, iter, NULL,
+							 smb3_copy_data_iter);
+			if (got != size) {
+				rc = smb_EIO2(smb_eio_trace_tx_copy_iter_to_buf, got, size);
+				goto error;
+			}
+			offset += size;
+		}
 	}
 
 	if (WARN_ONCE(offset != total_len,
@@ -1139,9 +1187,9 @@ struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses)
 /*
  * Send a single message or a string of messages as a compound.
  */
-static int smb_send_recv_messages(const unsigned int xid, struct cifs_ses *ses,
-				  struct TCP_Server_Info *server,
-				  struct smb_message *head_smb, const int flags)
+int smb_send_recv_messages(const unsigned int xid, struct cifs_ses *ses,
+			   struct TCP_Server_Info *server,
+			   struct smb_message *head_smb, const int flags)
 {
 	unsigned int instance;
 	int nr_reqs, i, optype, rc = 0;
@@ -1384,6 +1432,7 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		smb->request		= request;
 		smb->rqst		= *rq;
 		smb->sr_flags		= flags;
+		smb->data_iter		= rq->rq_iter;
 
 		if (is_smb1(server)) {
 			smb->command = 0;

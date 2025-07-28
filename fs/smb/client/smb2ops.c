@@ -2760,6 +2760,16 @@ smb2_set_replay(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 	shdr->Flags |= SMB2_FLAGS_REPLAY_OPERATION;
 }
 
+void smb2_set_replay_smb(struct TCP_Server_Info *server, struct smb_message *smb)
+{
+	struct smb2_hdr *shdr = smb->request;
+
+	if (server->dialect < SMB30_PROT_ID)
+		return;
+
+	shdr->Flags |= SMB2_FLAGS_REPLAY_OPERATION;
+}
+
 void
 smb2_set_related(struct smb_rqst *rqst)
 {

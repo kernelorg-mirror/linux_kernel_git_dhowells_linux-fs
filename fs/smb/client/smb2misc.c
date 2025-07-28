@@ -9,6 +9,7 @@
  */
 #include <crypto/sha2.h>
 #include <linux/ctype.h>
+#include <linux/iov_iter.h>
 #include "cifsglob.h"
 #include "cifsproto.h"
 #include "smb2proto.h"
@@ -845,6 +846,15 @@ smb2_handle_cancelled_mid(struct smb_message *smb, struct TCP_Server_Info *serve
 	return rc;
 }
 
+static size_t smb_sha512_step(void *iter_base, size_t progress, size_t len,
+			      void *priv, void *priv2)
+{
+	struct sha512_ctx *ctx = priv;
+
+	sha512_update(ctx, iter_base, len);
+	return 0;
+}
+
 /**
  * smb311_update_preauth_hash - update @ses hash from the message
  * @ses:	server session structure
@@ -887,6 +897,11 @@ ok:
 
 	if (hash_resp) {
 		sha512_update(&sha_ctx,  smb->response, smb->resp_len);
+	} else if (smb->new_style) {
+		struct iov_iter tmp = smb->req_iter;
+
+		iterate_and_advance_kernel(&tmp, smb->total_len,
+					   &sha_ctx, NULL, smb_sha512_step);
 	} else {
 		struct kvec *iov = smb->rqst.rq_iov;
 

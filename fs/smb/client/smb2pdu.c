@@ -91,6 +91,208 @@ int smb3_encryption_required(const struct cifs_tcon *tcon)
 	return 0;
 }
 
+static void smb2_enc_header(struct smb_message *smb,
+			    const struct cifs_tcon *tcon,
+			    struct TCP_Server_Info *server)
+{
+	struct smb2_hdr *shdr = smb->request;
+	struct smb3_hdr_req *smb3_hdr = (struct smb3_hdr_req *)shdr;
+
+	shdr->ProtocolId	= SMB2_PROTO_NUMBER;
+	shdr->StructureSize	= cpu_to_le16(64);
+	shdr->CreditCharge	= 0;
+	shdr->Status		= 0; /* ChanSeq for smb3 */
+	shdr->Command		= smb->command;
+	shdr->CreditRequest	= cpu_to_le16(2);
+	shdr->Flags		= 0;
+	shdr->NextCommand	= 0;
+	shdr->MessageId		= 0;
+	shdr->Id.SyncId.ProcessId = cpu_to_le32((__u16)current->tgid);
+	shdr->SessionId		= 0;
+
+	if (server) {
+		/* After reconnect SMB3 must set ChannelSequence on subsequent reqs */
+		if (server->dialect >= SMB30_PROT_ID) {
+			/*
+			 * if primary channel is not set yet, use default
+			 * channel for chan sequence num
+			 */
+			if (SERVER_IS_CHAN(server))
+				smb3_hdr->ChannelSequence =
+					cpu_to_le16(server->primary_server->channel_sequence_num);
+			else
+				smb3_hdr->ChannelSequence =
+					cpu_to_le16(server->channel_sequence_num);
+		}
+		spin_lock(&server->req_lock);
+		/* Request up to 10 credits but don't go over the limit. */
+		if (server->credits >= server->max_credits)
+			shdr->CreditRequest = cpu_to_le16(0);
+		else
+			shdr->CreditRequest = cpu_to_le16(
+				min_t(int, server->max_credits -
+						server->credits, 10));
+		spin_unlock(&server->req_lock);
+	}
+
+	if (tcon) {
+		/* GLOBAL_CAP_LARGE_MTU will only be set if dialect > SMB2.02 */
+		/* See sections 2.2.4 and 3.2.4.1.5 of MS-SMB2 */
+		if (server && (server->capabilities & SMB2_GLOBAL_CAP_LARGE_MTU))
+			shdr->CreditCharge = cpu_to_le16(1);
+		/* else CreditCharge MBZ */
+
+		shdr->Id.SyncId.TreeId = cpu_to_le32(tcon->tid);
+		/* Uid is not converted */
+		if (tcon->ses)
+			shdr->SessionId = cpu_to_le64(tcon->ses->Suid);
+
+		/*
+		 * If we would set SMB2_FLAGS_DFS_OPERATIONS on open we also
+		 * would have to pass the path on the Open SMB prefixed by
+		 * \\server\share.  Not sure when we would need to do the
+		 * augmented path (if ever) and setting this flag breaks the
+		 * SMB2 open operation since it is illegal to send an empty
+		 * path name (without \\server\share prefix) when the DFS flag
+		 * is set in the SMB open header. We could consider setting the
+		 * flag on all operations other than open but it is safer to
+		 * net set it for now.
+		 */
+/*	if (tcon->share_flags & SHI1005_FLAGS_DFS)
+	shdr->Flags |= SMB2_FLAGS_DFS_OPERATIONS; */
+
+		if (server && server->sign && !smb3_encryption_required(tcon))
+			shdr->Flags |= SMB2_FLAGS_SIGNED;
+	}
+}
+
+/* Flags for smb2_create_request() */
+#define SMB2_REQ_DYNAMIC	0x01	/* Dynamic request */
+#define SMB2_REQ_HEAD		0x02	/* Head of compound */
+#define SMB2_REQ_SENSITIVE	0x04	/* May contain sensitive crypto data */
+
+/*
+ * smb2_create_request: Allocate and set up a request
+ * @command: The command type we're going to issue
+ * @server: The server the command is going to go to
+ * @header_size: The size of the base protocol structure
+ * @protocol_size: The size of the header plus extensions
+ * @data_size: The size of the data payload
+ * @head: If this is the head of a compound
+ * @flags: Mask of SMB2_REQ_* flags
+ *
+ * Create a request and allocate netmem memory to hold the netbios header (if
+ * appropriate) and the protocol part of the message.  Memory will also be
+ * allocated for the data part of the message if this is to be encrypted by the
+ * CPU.  The allocated buffers will be attached to a bvec-queue struct so that
+ * they can be chained together and passed to the socket.
+ */
+static struct smb_message *smb2_create_request(__le16 command,
+					       struct TCP_Server_Info *server,
+					       struct cifs_tcon *tcon,
+					       size_t header_size,
+					       size_t protocol_size,
+					       size_t data_size,
+					       unsigned int flags)
+{
+	struct smb_message *smb;
+	const size_t max_slots = ARRAY_SIZE(smb->__bvecq_bv); // Preallocated slots
+	size_t pre_size;
+	void *body;
+	bool encrypted = false; //, rdma = false;
+	u16 ssize;
+
+	smb = smb_message_alloc(command, GFP_NOFS);
+	if (!smb)
+		return NULL;
+
+	smb->new_style = true; /* I.e. we're not using smb->rqst. */
+	smb->command = command;
+	smb->command_trace = command;
+	smb->sensitive = flags & SMB2_REQ_SENSITIVE;
+
+	/* We allocate space for inter-SMB padding or rfc1002 header plus
+	 * transform headers (as needed), but don't add them in at this time.
+	 */
+	pre_size = 8;
+	if (encrypted)
+		pre_size += sizeof(struct smb2_transform_hdr);
+	smb->pre_offset = -pre_size;
+
+	if (encrypted)
+		/* We want the encrypted blob to be correctly aligned. */
+		pre_size = round_up(pre_size, 16);
+
+	/* Allocate space for the SMB header, the request struct (both in
+	 * header_size) plus any extension bits, bearing in mind that some bits
+	 * may follow the header directly (header_added_size) and some may have
+	 * to be padded to an 8-byte alignment first (extension_size).  The
+	 * Negotiate Request has both.
+	 */
+	smb->ext_offset	 = header_size;
+	smb->offset	 = header_size;
+	smb->data_offset = protocol_size;
+	smb->total_len	 = data_size;
+
+	body = cifs_allocate_tx_buf(server, pre_size + protocol_size);
+	if (!body) {
+		kfree(smb);
+		return NULL;
+	}
+
+	smb->bvecq.max_slots = max_slots;
+	smb_add_segment_to_tx_buf(smb, body + pre_size, protocol_size);
+	smb->request = body + pre_size;
+
+	struct smb2_pdu *spdu = smb->request;
+	memset(spdu, 0, header_size);
+
+	smb2_enc_header(smb, tcon, server);
+	ssize = header_size - sizeof(spdu->hdr);
+	if (flags & SMB2_REQ_DYNAMIC)
+		ssize |= SMB2_STRUCT_HAS_DYNAMIC_PART;
+	spdu->StructureSize2 = cpu_to_le16(ssize);
+
+	if (tcon) {
+		cifs_stats_inc(&tcon->stats.smb2_stats.smb2_com_sent[command]);
+		cifs_stats_inc(&tcon->num_smbs_sent);
+	}
+
+#if 0
+	/* Include the buffer from the start of the RFC1002 header in the
+	 * iterator, but may need to adjust it later.
+	 */
+	iov_iter_bvec_queue(&smb->iter, ITER_SOURCE, &smb->bvecq, 0,
+			    pre_size, protocol_size);
+#endif
+	return smb;
+}
+
+static void cifs_pad_to_8(struct smb_message *smb)
+{
+	size_t offset = smb->offset;
+	u8 *p = smb->request;
+
+	while (offset & 7)
+		p[offset++] = 0;
+	smb->offset = offset;
+}
+
+/*
+ * Begin adding an extension to a message.  The offset is padded to an 8-byte
+ * alignment;
+ */
+static void *cifs_begin_extension(struct smb_message *smb)
+{
+	cifs_pad_to_8(smb);
+	return smb->request + smb->offset;
+}
+
+static void cifs_end_extension(struct smb_message *smb, size_t size)
+{
+	smb->offset += size;
+}
+
 static void
 smb2_hdr_assemble(struct smb2_hdr *shdr, __le16 smb2_cmd,
 		  const struct cifs_tcon *tcon,
