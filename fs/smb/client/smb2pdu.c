@@ -2389,55 +2389,44 @@ int
 SMB2_tcon(const unsigned int xid, struct cifs_ses *ses, const char *tree,
 	  struct cifs_tcon *tcon, const struct nls_table *cp)
 {
-	struct smb_rqst rqst;
+	struct TCP_Server_Info *server = cifs_pick_channel(ses);
 	struct smb2_tree_connect_req *req;
 	struct smb2_tree_connect_rsp *rsp = NULL;
-	struct kvec iov[2];
-	struct kvec rsp_iov = { NULL, 0 };
-	int rc = 0;
-	int resp_buftype;
-	int unc_path_len;
-	__le16 *unc_path = NULL;
+	struct smb_message *smb = NULL;
+	int unc_path_size;
 	int flags = 0;
-	unsigned int total_len;
-	struct TCP_Server_Info *server = cifs_pick_channel(ses);
+	int rc = 0;
 
 	cifs_dbg(FYI, "TCON\n");
 
 	if (!server || !tree)
 		return smb_EIO(smb_eio_trace_null_pointers);
 
-	unc_path = kmalloc(MAX_SHARENAME_LENGTH * 2, GFP_KERNEL);
-	if (unc_path == NULL)
-		return -ENOMEM;
-
-	unc_path_len = cifs_strtoUTF16(unc_path, tree, strlen(tree), cp);
-	if (unc_path_len <= 0) {
-		rc = -EINVAL;
-		goto free_unc_path;
-	}
-	unc_path_len *= 2;
+	unc_path_size = cifs_size_strtoUTF16(tree, INT_MAX, cp);
 
 	/* SMB2 TREE_CONNECT request must be called with TreeId == 0 */
 	tcon->tid = 0;
 	atomic_set(&tcon->num_remote_opens, 0);
-	rc = smb2_plain_req_init(SMB2_TREE_CONNECT, tcon, server,
-				 (void **) &req, &total_len);
-	if (rc)
-		goto free_unc_path;
+
+	smb = smb2_create_request(SMB2_TREE_CONNECT, server, tcon,
+				  sizeof(*req), sizeof(*req) + unc_path_size, 0,
+				  SMB2_REQ_DYNAMIC);
+	if (!smb)
+		return -ENOMEM;
+	req = smb->request;
 
 	if (smb3_encryption_required(tcon))
 		flags |= CIFS_TRANSFORM_REQ;
 
-	iov[0].iov_base = (char *)req;
-	/* 1 for pad */
-	iov[0].iov_len = total_len;
-
 	/* Testing shows that buffer offset must be at location of Buffer[0] */
-	req->PathOffset = cpu_to_le16(sizeof(struct smb2_tree_connect_req));
-	req->PathLength = cpu_to_le16(unc_path_len);
-	iov[1].iov_base = unc_path;
-	iov[1].iov_len = unc_path_len;
+	req->PathOffset = cpu_to_le16(smb->ext_offset);
+	req->PathLength = cpu_to_le16(unc_path_size);
+
+	rc = cifs_strtoUTF16(smb->request + smb->ext_offset, tree, strlen(tree), cp);
+	if (rc <= 0) {
+		rc = -EINVAL;
+		goto tcon_exit;
+	}
 
 	/*
 	 * 3.11 tcon req must be signed if not encrypted. See MS-SMB2 3.2.4.1.1
@@ -2451,22 +2440,21 @@ SMB2_tcon(const unsigned int xid, struct cifs_ses *ses, const char *tree,
 	    ((ses->user_name != NULL) || (ses->sectype == Kerberos)))
 		req->hdr.Flags |= SMB2_FLAGS_SIGNED;
 
-	memset(&rqst, 0, sizeof(struct smb_rqst));
-	rqst.rq_iov = iov;
-	rqst.rq_nvec = 2;
-
 	/* Need 64 for max size write so ask for more in case not there yet */
 	if (server->credits >= server->max_credits)
 		req->hdr.CreditRequest = cpu_to_le16(0);
 	else
 		req->hdr.CreditRequest = cpu_to_le16(
-			min_t(int, server->max_credits -
-			      server->credits, 64));
+			min_t(int, server->max_credits - server->credits, 64));
 
-	rc = cifs_send_recv(xid, ses, server,
-			    &rqst, &resp_buftype, flags, &rsp_iov);
-	cifs_small_buf_release(req);
-	rsp = (struct smb2_tree_connect_rsp *)rsp_iov.iov_base;
+	iov_iter_bvec_queue(&smb->req_iter, ITER_SOURCE, &smb->bvecq, 0, 0,
+			    smb->data_offset);
+
+	smb->sr_flags = flags;
+	rc = smb_send_recv_messages(xid, ses, server, smb, flags);
+	smb_clear_request(smb);
+
+	rsp = (struct smb2_tree_connect_rsp *)smb->response;
 	trace_smb3_tcon(xid, tcon->tid, ses->Suid, tree, rc);
 	if ((rc != 0) || (rsp == NULL)) {
 		cifs_stats_fail_inc(tcon, SMB2_TREE_CONNECT_HE);
@@ -2513,10 +2501,7 @@ SMB2_tcon(const unsigned int xid, struct cifs_ses *ses, const char *tree,
 		if (tcon->share_flags & SMB2_SHAREFLAG_ISOLATED_TRANSPORT)
 			server->nosharesock = true;
 tcon_exit:
-
-	free_rsp_buf(resp_buftype, rsp);
-free_unc_path:
-	kfree(unc_path);
+	smb_put_messages(smb);
 	return rc;
 
 tcon_error_exit:
