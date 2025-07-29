@@ -33,6 +33,26 @@
 #include "smbdirect.h"
 #include "compress.h"
 
+/*
+ * Allocate transmission buffers for a socket.  This memory will be allocated
+ * from the netmem buffers.  It comes with a page ref that we need to drop.
+ * The networking layer can pin it by getting its own ref.
+ */
+void *cifs_allocate_tx_buf(struct TCP_Server_Info *server, size_t size)
+{
+	void *p;
+
+	mutex_lock(&server->tx_alloc_lock);
+	p = page_frag_alloc_align(&server->tx_alloc, size, GFP_NOFS, 8);
+	mutex_unlock(&server->tx_alloc_lock);
+	return p;
+}
+
+void cifs_free_tx_buf(void *p)
+{
+	page_frag_free(p);
+}
+
 struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 {
 	static atomic_t debug_ids;

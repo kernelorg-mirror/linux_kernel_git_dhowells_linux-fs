@@ -509,5 +509,7 @@ int smb_rxqueue_refill(struct TCP_Server_Info *server, struct netfs_rxqueue *rxq
 		       size_t min_size);
 int smb_rxqueue_consume(struct TCP_Server_Info *server, struct netfs_rxqueue *rxq,
 			size_t amount);
+void *cifs_allocate_tx_buf(struct TCP_Server_Info *server, size_t size);
+void cifs_free_tx_buf(void *p);
 
 #endif			/* _CIFSPROTO_H */
