@@ -41,7 +41,18 @@ struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 	if (smb) {
 		memset(smb, 0, sizeof(*smb));
 		refcount_set(&smb->ref, 1);
+		spin_lock_init(&smb->mid_lock);
 		smb->command_trace = cmd;
+		smb->when_alloc	= jiffies;
+		smb->pid	= current->pid;
+
+		/*
+		 * The default is for the mid to be synchronous, so the default
+		 * callback just wakes up the current task.
+		 */
+		smb->callback		= cifs_wake_up_task;
+		smb->callback_data	= current;
+		smb->mid_state		= MID_REQUEST_ALLOCATED;
 	}
 	return smb;
 }
@@ -61,7 +72,8 @@ void smb_put_message(struct smb_message *smb)
 }
 
 /*
- * Dispose of a chain of compound messages.
+ * Dispose of a chain of compound messages.  This should only be called by the
+ * caller of smb_send_recv_messages().
  */
 void smb_put_messages(struct smb_message *smb)
 {
@@ -81,7 +93,7 @@ cifs_wake_up_task(struct TCP_Server_Info *server, struct smb_message *smb)
 	wake_up_process(smb->callback_data);
 }
 
-void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
+static void smb_clear_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 #ifdef CONFIG_CIFS_STATS2
 	__le16 command = server->vals->lock_cmd;
@@ -156,22 +168,33 @@ void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 	}
 #endif
 	put_task_struct(smb->creator);
-
-	mempool_free(smb, &smb_message_pool);
 }
 
-void
-delete_mid(struct TCP_Server_Info *server, struct smb_message *smb)
+static bool discard_message(struct TCP_Server_Info *server, struct smb_message *smb)
 {
+	bool got_ref = false;
+
 	spin_lock(&server->mid_queue_lock);
 
 	if (!smb->deleted_from_q) {
 		list_del_init(&smb->qhead);
 		smb->deleted_from_q = true;
+		got_ref = true;
 	}
-	spin_unlock(&server->mid_queue_lock);
 
-	release_mid(server, smb);
+	spin_unlock(&server->mid_queue_lock);
+	return got_ref;
+}
+
+static void smb_discard_messages(struct TCP_Server_Info *server, struct smb_message *head_smb)
+{
+	struct smb_message *smb, *next;
+
+	for (smb = head_smb; smb; smb = next) {
+		next = smb->next;
+		if (discard_message(server, smb))
+			smb_put_message(smb);
+	}
 }
 
 /*
@@ -444,22 +467,18 @@ static size_t smb3_copy_data_iter(void *iter_from, size_t progress, size_t len,
  * TODO: In future, the buffers should be allocated by the marshalling code.
  */
 static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
-				     int num_rqst, struct smb_rqst *rqst,
+				     struct smb_message *head_smb,
 				     struct iov_iter *iter, struct bvecq **_bq,
 				     unsigned int flags)
 {
+	struct smb_message *smb;
 	struct bvecq *bq;
 	size_t total_len = 0, offset = 0;
-	bool writeback = flags & CIFS_WRITEBACK;
+	int rc;
 
-	for (int i = 0; i < num_rqst; i++) {
-		struct smb_rqst *req = &rqst[i];
-		size_t size = iov_iter_count(&req->rq_iter);
-
-		for (int j = 0; j < req->rq_nvec; j++)
-			size += req->rq_iov[j].iov_len;
+	for (smb = head_smb; smb; smb = smb->next) {
 		total_len = ALIGN8(total_len);
-		total_len += size;
+		total_len += smb->total_len;
 	}
 
 	if (total_len <= PAGE_SIZE / 2) {
@@ -468,7 +487,7 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 		size_t alen = (flags & CIFS_TRANSFORM_REQ) ?
 			round_up(total_len, align) : total_len;
 
-		bq = bvecq_alloc_chain(2, GFP_NOFS, writeback);
+		bq = bvecq_alloc_chain(2, GFP_NOFS, head_smb->writeback);
 		if (!bq)
 			return -ENOMEM;
 		mutex_lock(&server->tx_alloc_lock);
@@ -483,16 +502,16 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 		bq->nr_slots = 2;
 		bq->mem_type = BVECQ_MEM_PAGECACHE;
 	} else {
-		bq = bvecq_alloc_buffer2(total_len, 1, GFP_NOFS, writeback);
+		bq = bvecq_alloc_buffer2(total_len, 1, GFP_NOFS, head_smb->writeback);
 		if (!bq)
 			return -ENOMEM;
 	}
 
 	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
 
-	for (int i = 0; i < num_rqst; i++) {
-		struct smb_rqst *req = &rqst[i];
-		size_t size = iov_iter_count(&req->rq_iter);
+	for (smb = head_smb; smb; smb = smb->next) {
+		size_t size = iov_iter_count(&smb->rqst.rq_iter);
+		size_t got;
 
 		if (offset & 7) {
 			unsigned int tmp = offset;
@@ -500,23 +519,30 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 			iov_iter_zero(offset - tmp, iter);
 		}
 
-		for (int j = 0; j < req->rq_nvec; j++) {
-			size_t len = req->rq_iov[j].iov_len;
-			if (copy_to_iter(req->rq_iov[j].iov_base, len, iter) != len)
+		for (int i = 0; i < smb->rqst.rq_nvec; i++) {
+			size_t len = smb->rqst.rq_iov[i].iov_len;
+			got = copy_to_iter(smb->rqst.rq_iov[i].iov_base, len, iter);
+			if (got != len) {
+				rc = smb_EIO2(smb_eio_trace_tx_copy_to_buf, got, size);
 				goto error;
+			}
 			offset += len;
 		}
 
-		if (iterate_and_advance_kernel(&req->rq_iter,
-					       size, iter, NULL,
-					       smb3_copy_data_iter) != size)
+		got = iterate_and_advance_kernel(&smb->rqst.rq_iter,
+						 size, iter, NULL,
+						 smb3_copy_data_iter);
+		if (got != size) {
+			rc = smb_EIO2(smb_eio_trace_tx_copy_iter_to_buf, got, size);
 			goto error;
+		}
 
 		offset += size;
 	}
 
 	if (WARN_ONCE(offset != total_len,
 		      "offset=%zx total_len=%zx\n", offset, total_len)) {
+		rc = smb_EIO2(smb_eio_trace_tx_miscopy_to_buf, offset, total_len);
 		goto error;
 	}
 
@@ -526,12 +552,11 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 error:
 	bvecq_put(bq);
 	*_bq = NULL;
-	return -EIO;
+	return rc;
 }
 
 static int
-smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
-	      struct smb_rqst *rqst, int flags)
+smb_send_rqst(struct TCP_Server_Info *server, struct smb_message *head_smb, int flags)
 {
 	struct iov_iter iter;
 	struct bvecq *bq;
@@ -544,7 +569,7 @@ smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 		return smb_EIO(smb_eio_trace_tx_need_transform);
 	}
 
-	rc = smb_copy_data_into_buffer(server, num_rqst, rqst, &iter, &bq, flags);
+	rc = smb_copy_data_into_buffer(server, head_smb, &iter, &bq, flags);
 	if (rc)
 		return rc;
 	content_len = iov_iter_count(&iter);
@@ -587,7 +612,7 @@ smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 					/* Fall back to uncompressed. */
 				} else {
 					if (rc == 0)
-						rc = -EIO;
+						rc = smb_EIO(smb_eio_trace_tx_compress_failed);
 					goto error;
 				}
 			}
@@ -599,7 +624,7 @@ smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 			iov_iter_advance(&iter, troff);
 			tr_hdr = hdr_blob + troff;
 
-			rc = server->ops->init_transform_rq(server, num_rqst, rqst, tr_hdr, &iter);
+			rc = server->ops->init_transform_rq(server, head_smb, tr_hdr, &iter);
 			if (rc)
 				goto error;
 			content_len += sizeof(*tr_hdr);
@@ -859,16 +884,16 @@ int wait_for_response(struct TCP_Server_Info *server, struct smb_message *smb)
  * the result. Caller is responsible for dealing with timeouts.
  */
 int
-cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
-		mid_callback_t callback, void *cbdata, const int flags,
-		const struct cifs_credits *exist_credits,
-		struct iov_iter *resp_buf)
+cifs_call_async(struct TCP_Server_Info *server, struct smb_message *smb,
+		const int flags, const struct cifs_credits *exist_credits)
 {
-	int rc;
-	struct smb_message *smb;
 	struct cifs_credits credits = { .value = 0, .instance = 0 };
 	unsigned int instance;
 	int optype;
+	int rc;
+
+	if (WARN_ON_ONCE(smb->next))
+		return smb_EIO(smb_eio_trace_tx_chained_async);
 
 	optype = flags & CIFS_OP_MASK;
 
@@ -894,24 +919,18 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 		return -EAGAIN;
 	}
 
-	smb = server->ops->setup_async_request(server, rqst);
-	if (IS_ERR(smb)) {
+	rc = server->ops->setup_async_request(server, smb);
+	if (rc) {
 		cifs_server_unlock(server);
 		add_credits_and_wake_if(server, &credits, optype);
-		return PTR_ERR(smb);
+		return rc;
 	}
 
 	smb->sr_flags = flags;
-	smb->callback = callback;
-	smb->callback_data = cbdata;
 	smb->mid_state = MID_REQUEST_SUBMITTED;
-	smb->writeback = flags & CIFS_WRITEBACK;
-	if (resp_buf) {
-		smb->copy_to_bufs = true;
-		smb->response_iter = *resp_buf;
-	}
 
 	/* put it on the pending_mid_q */
+	smb_get_message(smb);
 	spin_lock(&server->mid_queue_lock);
 	list_add_tail(&smb->qhead, &server->pending_mid_q);
 	spin_unlock(&server->mid_queue_lock);
@@ -921,12 +940,13 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 	 * I/O response may come back and free the mid entry on another thread.
 	 */
 	cifs_save_when_sent(smb);
-	rc = smb_send_rqst(server, 1, rqst, flags);
+	rc = smb_send_rqst(server, smb, flags);
 
 	if (rc < 0) {
 		revert_current_mid(server, smb->credits_consumed);
 		server->sequence_number -= 2;
-		delete_mid(server, smb);
+		if (discard_message(server, smb))
+			smb_put_message(smb);
 	}
 
 	cifs_server_unlock(server);
@@ -976,19 +996,24 @@ int cifs_sync_mid_result(struct smb_message *smb, struct TCP_Server_Info *server
 	spin_unlock(&server->mid_queue_lock);
 
 sync_mid_done:
-	release_mid(server, smb);
+	smb_clear_mid(server, smb);
 	return rc;
 }
 
 static void
 cifs_compound_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_credits credits = {
-		.value = server->ops->get_credits(smb),
-		.instance = server->reconnect_instance,
-	};
+	if (server) {
+		struct cifs_credits credits = {
+			.value = 1,
+			.instance = server->reconnect_instance,
+		};
 
-	add_credits(server, &credits, smb->optype);
+		if (!is_smb1(server))
+			credits.value = server->ops->get_credits(smb);
+
+		add_credits(server, &credits, smb->optype);
+	}
 
 	if (smb->mid_state == MID_RESPONSE_RECEIVED)
 		smb->mid_state = MID_RESPONSE_READY;
@@ -1005,7 +1030,6 @@ static void
 cifs_cancelled_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	cifs_compound_callback(server, smb);
-	release_mid(server, smb);
 }
 
 /*
@@ -1061,29 +1085,27 @@ struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses)
 	return server;
 }
 
-int
-compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
-		   struct TCP_Server_Info *server,
-		   const int flags, const int num_rqst, struct smb_rqst *rqst,
-		   int *resp_buf_type, struct kvec *resp_iov)
+/*
+ * Send a single message or a string of messages as a compound.
+ */
+static int smb_send_recv_messages(const unsigned int xid, struct cifs_ses *ses,
+				  struct TCP_Server_Info *server,
+				  struct smb_message *head_smb, const int flags)
 {
-	int i, j, optype, rc = 0;
-	struct smb_message *smb[MAX_COMPOUND];
-	bool cancelled_smb[MAX_COMPOUND] = {false};
-	struct cifs_credits credits[MAX_COMPOUND] = {
-		{ .value = 0, .instance = 0 }
-	};
 	unsigned int instance;
-
-	optype = flags & CIFS_OP_MASK;
-
-	for (i = 0; i < num_rqst; i++)
-		resp_buf_type[i] = CIFS_NO_BUFFER;  /* no response buf yet */
+	int nr_reqs, i, optype, rc = 0;
 
 	if (!ses || !ses->server || !server) {
 		cifs_dbg(VFS, "Null session\n");
 		return smb_EIO(smb_eio_trace_null_pointers);
 	}
+
+	optype = flags & CIFS_OP_MASK;
+
+	/* TODO: Stitch together the messages in a compound. */
+	nr_reqs = 0;
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+		nr_reqs++;
 
 	spin_lock(&server->srv_lock);
 	if (server->tcpStatus == CifsExiting) {
@@ -1100,14 +1122,13 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 	 * other requests.
 	 * This can be handled by the eventual session reconnect.
 	 */
-	rc = wait_for_compound_request(server, num_rqst, flags,
-				       &instance);
+	rc = wait_for_compound_request(server, nr_reqs, flags, &instance);
 	if (rc)
 		return rc;
 
-	for (i = 0; i < num_rqst; i++) {
-		credits[i].value = 1;
-		credits[i].instance = instance;
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next) {
+		smb->credits.value	= 1;
+		smb->credits.instance	= instance;
 	}
 
 	/*
@@ -1127,45 +1148,46 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 	 */
 	if (instance != server->reconnect_instance) {
 		cifs_server_unlock(server);
-		for (j = 0; j < num_rqst; j++)
-			add_credits(server, &credits[j], optype);
+		for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+			add_credits(server, &smb->credits, optype);
 		return -EAGAIN;
 	}
 
-	for (i = 0; i < num_rqst; i++) {
-		smb[i] = server->ops->setup_request(ses, server, &rqst[i]);
-		if (IS_ERR(smb[i])) {
-			revert_current_mid(server, i);
-			for (j = 0; j < i; j++)
-				delete_mid(server, smb[j]);
-			cifs_server_unlock(server);
-
-			/* Update # of requests on wire to server */
-			for (j = 0; j < num_rqst; j++)
-				add_credits(server, &credits[j], optype);
-			return PTR_ERR(smb[i]);
-		}
-
-		smb[i]->sr_flags = flags;
-		smb[i]->mid_state = MID_REQUEST_SUBMITTED;
-		smb[i]->optype = optype;
+	i = 0;
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next) {
+		smb->optype = optype;
 		/*
 		 * Invoke callback for every part of the compound chain
 		 * to calculate credits properly. Wake up this thread only when
 		 * the last element is received.
 		 */
-		if (i < num_rqst - 1)
-			smb[i]->callback = cifs_compound_callback;
+		if (smb->next)
+			smb->callback = cifs_compound_callback;
 		else
-			smb[i]->callback = cifs_compound_last_callback;
-	}
-	rc = smb_send_rqst(server, num_rqst, rqst, flags);
+			smb->callback = cifs_compound_last_callback;
 
-	for (i = 0; i < num_rqst; i++)
-		cifs_save_when_sent(smb[i]);
+		rc = server->ops->setup_request(ses, server, smb);
+		if (rc) {
+			revert_current_mid(server, i);
+			smb_discard_messages(server, head_smb);
+			cifs_server_unlock(server);
+
+			/* Update # of requests on wire to server */
+			for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+				add_credits(server, &smb->credits, optype);
+			return rc;
+		}
+
+		smb->mid_state = MID_REQUEST_SUBMITTED;
+	}
+
+	rc = smb_send_rqst(server, head_smb, flags);
+
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+		cifs_save_when_sent(smb);
 
 	if (rc < 0) {
-		revert_current_mid(server, num_rqst);
+		revert_current_mid(server, nr_reqs);
 		server->sequence_number -= 2;
 	}
 
@@ -1176,8 +1198,8 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 	 * will not receive a response to - return credits back
 	 */
 	if (rc < 0 || (flags & CIFS_NO_SRV_RSP)) {
-		for (i = 0; i < num_rqst; i++)
-			add_credits(server, &credits[i], optype);
+		for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+			add_credits(server, &smb->credits, optype);
 		goto out;
 	}
 
@@ -1196,72 +1218,60 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 	if ((ses->ses_status == SES_NEW) || (optype & CIFS_NEG_OP) || (optype & CIFS_SESS_OP)) {
 		spin_unlock(&ses->ses_lock);
 
-		if (WARN_ON_ONCE(num_rqst != 1 || !resp_iov))
+		if (WARN_ON_ONCE(head_smb->next))
 			return -EINVAL;
 
 		cifs_server_lock(server);
-		smb311_update_preauth_hash(ses, server, rqst[0].rq_iov, rqst[0].rq_nvec);
+		smb311_update_preauth_hash(ses, server, head_smb, false);
 		cifs_server_unlock(server);
-
-		spin_lock(&ses->ses_lock);
+	} else {
+		spin_unlock(&ses->ses_lock);
 	}
-	spin_unlock(&ses->ses_lock);
 
-	for (i = 0; i < num_rqst; i++) {
-		rc = wait_for_response(server, smb[i]);
-		if (rc != 0)
-			break;
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next) {
+		if (!smb->next) {
+			rc = wait_for_response(server, smb);
+			if (rc != 0)
+				break;
+		}
 	}
 	if (rc != 0) {
-		for (; i < num_rqst; i++) {
+		for (struct smb_message *smb = head_smb; smb; smb = smb->next) {
 			cifs_server_dbg(FYI, "Cancelling wait for mid %llu cmd: %d\n",
-				 smb[i]->mid, le16_to_cpu(smb[i]->command));
-			send_cancel(ses, server, &rqst[i], smb[i], xid);
-			spin_lock(&smb[i]->mid_lock);
-			smb[i]->wait_cancelled = true;
-			if (smb[i]->mid_state == MID_REQUEST_SUBMITTED ||
-			    smb[i]->mid_state == MID_RESPONSE_RECEIVED) {
-				smb[i]->callback = cifs_cancelled_callback;
-				cancelled_smb[i] = true;
-				credits[i].value = 0;
+					smb->mid, le32_to_cpu(smb->command));
+			send_cancel(ses, server, smb, xid);
+			spin_lock(&smb->mid_lock);
+			smb->wait_cancelled = true;
+			if (smb->mid_state == MID_REQUEST_SUBMITTED ||
+			    smb->mid_state == MID_RESPONSE_RECEIVED) {
+				smb->callback = cifs_cancelled_callback;
+				smb->cancelled = true;
+				smb->credits.value = 0;
 			}
-			spin_unlock(&smb[i]->mid_lock);
+			spin_unlock(&smb->mid_lock);
 		}
 	}
 
-	for (i = 0; i < num_rqst; i++) {
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next) {
 		if (rc < 0)
 			goto out;
 
-		rc = cifs_sync_mid_result(smb[i], server);
+		rc = cifs_sync_mid_result(smb, server);
 		if (rc != 0) {
 			/* mark this mid as cancelled to not free it below */
-			cancelled_smb[i] = true;
+			smb->cancelled = true;
 			goto out;
 		}
 
-		if (!smb[i]->response ||
-		    smb[i]->mid_state != MID_RESPONSE_READY) {
-			rc = smb_EIO1(smb_eio_trace_rx_mid_unready, smb[i]->mid_state);
+		if (!smb->response ||
+		    smb->mid_state != MID_RESPONSE_READY) {
+			rc = smb_EIO1(smb_eio_trace_rx_mid_unready, smb->mid_state);
 			cifs_dbg(FYI, "Bad MID state?\n");
 			goto out;
 		}
 
-		rc = server->ops->check_receive(smb[i], server,
+		rc = server->ops->check_receive(smb, server,
 						flags & CIFS_LOG_ERROR);
-		if (resp_iov) {
-			resp_iov[i].iov_base = smb[i]->response;
-			resp_iov[i].iov_len = smb[i]->resp_len;
-
-			if (smb[i]->large_buf)
-				resp_buf_type[i] = CIFS_LARGE_BUFFER;
-			else
-				resp_buf_type[i] = CIFS_SMALL_BUFFER;
-
-			/* mark it so buf will not be freed by delete_mid */
-			if ((flags & CIFS_NO_RSP_BUF) == 0)
-				smb[i]->response = NULL;
-		}
 	}
 
 	/*
@@ -1269,17 +1279,13 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 	 */
 	spin_lock(&ses->ses_lock);
 	if ((ses->ses_status == SES_NEW) || (optype & CIFS_NEG_OP) || (optype & CIFS_SESS_OP)) {
-		struct kvec iov = {
-			.iov_base = resp_iov[0].iov_base,
-			.iov_len = resp_iov[0].iov_len
-		};
 		spin_unlock(&ses->ses_lock);
 		cifs_server_lock(server);
-		smb311_update_preauth_hash(ses, server, &iov, 1);
+		smb311_update_preauth_hash(ses, server, head_smb, true);
 		cifs_server_unlock(server);
-		spin_lock(&ses->ses_lock);
+	} else {
+		spin_unlock(&ses->ses_lock);
 	}
-	spin_unlock(&ses->ses_lock);
 
 out:
 	/*
@@ -1288,11 +1294,79 @@ out:
 	 * This is prevented above by using a noop callback that will not
 	 * wake this thread except for the very last PDU.
 	 */
-	for (i = 0; i < num_rqst; i++) {
-		if (!cancelled_smb[i])
-			delete_mid(server, smb[i]);
+	for (struct smb_message *smb = head_smb; smb; smb = smb->next)
+		if (!smb->cancelled)
+			discard_message(server, smb);
+
+	return rc;
+}
+
+int
+compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
+		   struct TCP_Server_Info *server,
+		   const int flags, const int num_rqst, struct smb_rqst *rqst,
+		   int *resp_buf_type, struct kvec *resp_iov)
+{
+	struct smb_message *head_smb = NULL, **ppsmb = &head_smb, *smb;
+	int rc = -ENOMEM;
+
+	if (!ses || !ses->server || !server) {
+		cifs_dbg(VFS, "Null session\n");
+		return smb_EIO(smb_eio_trace_null_pointers);
 	}
 
+	for (int i = 0; i < num_rqst; i++) {
+		struct smb_rqst *rq = &rqst[i];
+		void *request = rq->rq_iov[0].iov_base;
+		struct smb2_hdr *hdr = request;
+		enum smb_command_trace cmd = smb_command_trace_unknown;
+
+		if (!is_smb1(server))
+			cmd = le32_to_cpu(hdr->Command);
+
+		smb = smb_message_alloc(cmd, GFP_NOFS);
+		if (!smb)
+			goto error;
+
+		*ppsmb = smb;
+		ppsmb = &smb->next;
+		smb->request		= request;
+		smb->rqst		= *rq;
+		smb->sr_flags		= flags;
+
+		if (is_smb1(server)) {
+			smb->command = 0;
+			smb->command_trace = smb1_command_trace_unknown;
+		}
+
+		for (int j = 0; j < rq->rq_nvec; j++)
+			smb->total_len += rq->rq_iov[j].iov_len;
+		smb->total_len += iov_iter_count(&rq->rq_iter);
+	}
+
+	rc = smb_send_recv_messages(xid, ses, server, head_smb, flags);
+
+	smb = head_smb;
+	for (int i = 0; i < num_rqst; i++) {
+		if (smb->response && !(flags & CIFS_NO_RSP_BUF)) {
+			resp_iov[i].iov_base = smb->response;
+			resp_iov[i].iov_len  = smb->resp_len;
+			smb->response = NULL;
+
+			if (smb->large_buf)
+				resp_buf_type[i] = CIFS_LARGE_BUFFER;
+			else
+				resp_buf_type[i] = CIFS_SMALL_BUFFER;
+		} else {
+			resp_iov[i].iov_base	= NULL;
+			resp_buf_type[i]	= 0;
+			resp_buf_type[i]	= CIFS_NO_BUFFER;
+		}
+		smb = smb->next;
+	}
+
+error:
+	smb_put_messages(head_smb);
 	return rc;
 }
 

@@ -139,11 +139,10 @@ void reset_cifs_unix_caps(unsigned int xid, struct cifs_tcon *tcon,
  */
 static int
 send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-	       struct smb_rqst *rqst, struct smb_message *smb,
-	       unsigned int xid)
+	       struct smb_message *smb, unsigned int xid)
 {
 	struct iov_iter iter;
-	struct smb_hdr *in_buf = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
+	struct smb_hdr *in_buf = (struct smb_hdr *)smb->rqst.rq_iov[0].iov_base;
 	struct kvec iov[1];
 	struct smb_rqst crqst = { .rq_iov = iov, .rq_nvec = 1 };
 	int rc = 0;
@@ -189,11 +188,10 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
  */
 static int
 send_lock_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		 struct smb_rqst *rqst, struct smb_message *smb,
-		 unsigned int xid)
+		 struct smb_message *smb, unsigned int xid)
 {
-	struct smb_hdr *in_buf = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
-	unsigned int in_len = rqst->rq_iov[0].iov_len;
+	struct smb_hdr *in_buf = (struct smb_hdr *)smb->rqst.rq_iov[0].iov_base;
+	unsigned int in_len = smb->rqst.rq_iov[0].iov_len;
 	LOCK_REQ *pSMB = (LOCK_REQ *)in_buf;
 	int rc;
 
@@ -204,7 +202,6 @@ send_lock_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	 */
 	pSMB->LockType = LOCKING_ANDX_CANCEL_LOCK|LOCKING_ANDX_LARGE_FILES;
 	pSMB->Timeout = 0;
-	pSMB->hdr.Mid = get_next_mid(ses->server);
 
 	rc = SendReceive(xid, ses, in_buf, in_len, NULL, NULL, 0);
 	if (rc == -ENOLCK)
@@ -215,12 +212,11 @@ send_lock_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 }
 
 static int cifs_send_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-			    struct smb_rqst *rqst, struct smb_message *smb,
-			    unsigned int xid)
+			    struct smb_message *smb, unsigned int xid)
 {
 	if (smb->sr_flags & CIFS_WINDOWS_LOCK)
-		return send_lock_cancel(ses, server, rqst, smb, xid);
-	return send_nt_cancel(ses, server, rqst, smb, xid);
+		return send_lock_cancel(ses, server, smb, xid);
+	return send_nt_cancel(ses, server, smb, xid);
 }
 
 static bool
@@ -233,7 +229,7 @@ struct smb_message *
 cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr)
 {
 	struct smb_message *smb;
-	u16 mid = le16_to_cpu(shdr->Mid);
+	u64 mid = le16_to_cpu(shdr->Mid);
 
 	spin_lock(&server->mid_queue_lock);
 	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
@@ -302,7 +298,7 @@ cifs_get_credits(struct smb_message *smb)
  * to somewhat less than 64K-1 although it is hard to imagine
  * so many threads being in the vfs at one time.
  */
-static __u64
+u16
 cifs_get_next_mid(struct TCP_Server_Info *server)
 {
 	__u64 mid = 0;
@@ -1387,7 +1383,6 @@ struct smb_version_operations smb1_operations = {
 	.get_credits_field = cifs_get_credits_field,
 	.get_credits = cifs_get_credits,
 	.wait_mtu_credits = cifs_wait_mtu_credits,
-	.get_next_mid = cifs_get_next_mid,
 	.clear_stats = cifs_clear_stats,
 	.print_stats = cifs_print_stats,
 	.downgrade_oplock = cifs_downgrade_oplock,

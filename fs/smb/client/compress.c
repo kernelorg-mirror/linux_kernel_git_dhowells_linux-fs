@@ -281,10 +281,8 @@ out:
  *
  * Return false otherwise.
  */
-bool should_compress(const struct cifs_tcon *tcon, const struct smb_rqst *rq)
+bool should_compress(const struct cifs_tcon *tcon, const struct smb_message *smb)
 {
-	const struct smb2_hdr *shdr = rq->rq_iov->iov_base;
-
 	if (unlikely(!tcon || !tcon->ses || !tcon->ses->server))
 		return false;
 
@@ -294,8 +292,8 @@ bool should_compress(const struct cifs_tcon *tcon, const struct smb_rqst *rq)
 	if (!(tcon->share_flags & SMB2_SHAREFLAG_COMPRESS_DATA))
 		return false;
 
-	if (shdr->Command == SMB2_WRITE) {
-		const struct smb2_write_req *wreq = rq->rq_iov->iov_base;
+	if (smb->command == SMB2_WRITE) {
+		const struct smb2_write_req *wreq = smb->request;
 
 		if (le32_to_cpu(wreq->Length) < SMB_COMPRESS_MIN_LEN)
 			return false;
@@ -303,7 +301,7 @@ bool should_compress(const struct cifs_tcon *tcon, const struct smb_rqst *rq)
 		return true;
 	}
 
-	return (shdr->Command == SMB2_READ);
+	return smb->command == SMB2_READ;
 }
 
 /*
@@ -335,7 +333,7 @@ static void *vmap_bvecq(struct iov_iter *iter, pgprot_t prot)
 }
 
 int smb_compress(struct TCP_Server_Info *server, struct iov_iter *iter,
-		 struct bvecq **bq, unsigned int flags)
+		 struct bvecq **bq, bool writeback)
 {
 	struct smb2_compression_hdr *z_hdr;
 	struct smb2_write_req *w_hdr;
@@ -371,7 +369,7 @@ int smb_compress(struct TCP_Server_Info *server, struct iov_iter *iter,
 	 */
 	dlen = smb_lz77_compressed_alloc_size(slen);
 	dlen = sizeof(*z_hdr) + slen;
-	dbq = bvecq_alloc_buffer(dlen, GFP_NOFS, flags & CIFS_WRITEBACK);
+	dbq = bvecq_alloc_buffer(dlen, GFP_NOFS, writeback);
 	if (!dbq) {
 		ret = -ENOMEM;
 		goto err_free;

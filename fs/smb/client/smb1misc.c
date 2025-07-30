@@ -45,8 +45,6 @@ header_assemble(struct smb_hdr *buffer, char smb_command,
 
 			/* Uid is not converted */
 			buffer->Uid = treeCon->ses->Suid;
-			if (treeCon->ses->server)
-				buffer->Mid = get_next_mid(treeCon->ses->server);
 		}
 		if (treeCon->Flags & SMB_SHARE_IS_IN_DFS)
 			buffer->Flags2 |= SMBFLG2_DFS;

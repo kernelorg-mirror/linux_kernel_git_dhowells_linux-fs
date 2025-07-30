@@ -35,16 +35,9 @@ char *smb2_get_data_area_len(struct cifs_receive *recv);
 __le16 *cifs_convert_path_to_utf16(const char *from,
 				   struct cifs_sb_info *cifs_sb);
 
-int smb2_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
-int smb2_verify_signature(struct smb_rqst *rqst,
-			  struct TCP_Server_Info *server);
-int smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
-		       bool log_error);
-struct smb_message *smb2_setup_request(struct cifs_ses *ses,
-				       struct TCP_Server_Info *server,
-				       struct smb_rqst *rqst);
-struct smb_message *smb2_setup_async_request(struct TCP_Server_Info *server,
-					     struct smb_rqst *rqst);
+int smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
+		       struct smb_message *smb);
+int smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_message *smb);
 struct cifs_tcon *smb2_find_smb_tcon(struct TCP_Server_Info *server,
 				     __u64 ses_id, __u32  tid);
 __le32 smb2_get_lease_state(struct cifsInodeInfo *cinode, unsigned int oplock);
@@ -52,6 +45,10 @@ void smb2_is_valid_oplock_break(struct TCP_Server_Info *server,
 				union smb2_response_hdr *h);
 int smb3_handle_read_data(struct TCP_Server_Info *server,
 			  struct smb_message *smb);
+int smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
+		       bool log_error);
+int smb2_verify_signature(struct smb_message *smb, struct TCP_Server_Info *server);
+int smb2_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
 struct inode *smb2_create_reparse_inode(struct cifs_open_info_data *data,
 					struct super_block *sb,
 					const unsigned int xid,
@@ -116,7 +113,7 @@ int smb2_push_mandatory_locks(struct cifsFileInfo *cfile);
 void smb2_reconnect_server(struct work_struct *work);
 int smb3_crypto_aead_allocate(struct TCP_Server_Info *server);
 int smb3_init_transform_rq(struct TCP_Server_Info *server,
-			   int num_rqst, const struct smb_rqst *rqst,
+			   struct smb_message *head_smb,
 			   struct smb2_transform_hdr *tr_hdr,
 			   struct iov_iter *iter);
 unsigned long smb_rqst_len(struct TCP_Server_Info *server,
@@ -128,6 +125,7 @@ bool smb2_should_replay(struct cifs_tcon *tcon, int *pretries,
 			int *pcur_sleep);
 void smb2_add_credits_from_hdr(struct smb2_hdr *shdr,
 			       struct TCP_Server_Info *server);
+u64 smb2_get_next_mid(struct TCP_Server_Info *server, unsigned int count);
 struct smb_message *smb2_find_mid(struct TCP_Server_Info *server,
 				  struct smb2_hdr *shdr, bool dequeue);
 #ifdef CONFIG_CIFS_DEBUG2
@@ -278,7 +276,7 @@ void smb2_copy_fs_info_to_kstatfs(struct smb2_fs_full_size_info *pfs_inf,
 				  struct kstatfs *kst);
 void smb311_update_preauth_hash(struct cifs_ses *ses,
 				struct TCP_Server_Info *server,
-				struct kvec *iov, int nvec);
+				struct smb_message *smb, bool hash_resp);
 int smb2_query_info_compound(const unsigned int xid, struct cifs_tcon *tcon,
 			     const char *path, u32 desired_access, u32 class,
 			     u32 type, u32 output_len, struct kvec *rsp,
@@ -291,5 +289,12 @@ int posix_info_parse(const void *beg, const void *end,
 int posix_info_sid_size(const void *beg, const void *end);
 int smb2_rename_pending_delete(const char *full_path, struct dentry *dentry,
 			       const unsigned int xid);
+
+/*
+ * SMB2 Worker functions - most of protocol specific implementation details
+ * are contained within these calls.
+ */
+
+/* query path info from the server using SMB311 POSIX extensions*/
 
 #endif			/* _SMB2PROTO_H */

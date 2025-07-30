@@ -402,13 +402,14 @@ smb2_add_credits_from_hdr(struct smb2_hdr *shdr, struct TCP_Server_Info *server)
 	}
 }
 
-static __u64
-smb2_get_next_mid(struct TCP_Server_Info *server)
+u64
+smb2_get_next_mid(struct TCP_Server_Info *server, unsigned int count)
 {
-	__u64 mid;
+	u64 mid;
 	/* for SMB2 we need the current value */
 	spin_lock(&server->mid_counter_lock);
-	mid = server->current_mid++;
+	mid = server->current_mid;
+	server->current_mid = mid + umax(count, 1);
 	spin_unlock(&server->mid_counter_lock);
 	return mid;
 }
@@ -4695,7 +4696,6 @@ struct smb_version_operations smb20_operations = {
 	.get_credits_field = smb2_get_credits_field,
 	.get_credits = smb2_get_credits,
 	.wait_mtu_credits = cifs_wait_mtu_credits,
-	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
@@ -4786,7 +4786,6 @@ struct smb_version_operations smb21_operations = {
 	.get_credits = smb2_get_credits,
 	.wait_mtu_credits = smb2_wait_mtu_credits,
 	.adjust_credits = smb2_adjust_credits,
-	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
 	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,
@@ -4879,7 +4878,6 @@ struct smb_version_operations smb30_operations = {
 	.get_credits = smb2_get_credits,
 	.wait_mtu_credits = smb2_wait_mtu_credits,
 	.adjust_credits = smb2_adjust_credits,
-	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
 	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,
@@ -4982,7 +4980,6 @@ struct smb_version_operations smb311_operations = {
 	.get_credits = smb2_get_credits,
 	.wait_mtu_credits = smb2_wait_mtu_credits,
 	.adjust_credits = smb2_adjust_credits,
-	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
 	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,

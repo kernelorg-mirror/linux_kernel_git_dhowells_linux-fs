@@ -31,7 +31,7 @@
 #include "smb2glob.h"
 
 static void smb2_parse_pdu(struct TCP_Server_Info *server,
-			   struct netfs_rxqueue *rxq);
+			   struct netfs_rxqueue *rxq, bool decrypted);
 
 static
 int smb3_get_sign_key(__u64 ses_id, struct TCP_Server_Info *server, u8 *key)
@@ -210,12 +210,13 @@ smb2_find_smb_tcon(struct TCP_Server_Info *server, __u64 ses_id, __u32  tid)
 }
 
 static int
-smb2_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
+smb2_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
+		    bool for_recv)
 {
 	int rc;
 	unsigned char smb2_signature[SMB2_HMACSHA256_SIZE];
-	struct kvec *iov = rqst->rq_iov;
-	struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
+	struct kvec *iov = smb->rqst.rq_iov;
+	struct smb2_hdr *shdr = for_recv ? smb->response : smb->request;
 	struct hmac_sha256_ctx hmac_ctx;
 	struct smb_rqst drqst;
 	__u64 sid = le64_to_cpu(shdr->SessionId);
@@ -240,7 +241,7 @@ smb2_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	 * Sign the rfc1002 length prior to passing the data (iov[1-N]) down to
 	 * __cifs_calc_signature().
 	 */
-	drqst = *rqst;
+	drqst = smb->rqst;
 	if (drqst.rq_nvec >= 2 && iov[0].iov_len == 4) {
 		hmac_sha256_update(&hmac_ctx, iov[0].iov_base, iov[0].iov_len);
 		drqst.rq_iov++;
@@ -462,19 +463,20 @@ generate_smb311signingkey(struct cifs_ses *ses,
 }
 
 static int
-smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
+smb3_calc_signature(struct smb_message *smb, struct TCP_Server_Info *server,
+		    bool for_recv)
 {
 	int rc;
 	unsigned char smb3_signature[SMB2_CMACAES_SIZE];
-	struct kvec *iov = rqst->rq_iov;
-	struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
+	struct kvec kv;
+	struct smb2_hdr *shdr = for_recv ? smb->response : smb->request;
 	struct aes_cmac_key cmac_key __cleanup(aes_cmac_zeroize_key);
 	struct aes_cmac_ctx cmac_ctx __cleanup(aes_cmac_zeroize_ctx);
 	struct smb_rqst drqst;
 	u8 key[SMB3_SIGN_KEY_SIZE];
 
 	if (server->vals->protocol_id <= SMB21_PROT_ID)
-		return smb2_calc_signature(rqst, server);
+		return smb2_calc_signature(smb, server, for_recv);
 
 	rc = smb3_get_sign_key(le64_to_cpu(shdr->SessionId), server, key);
 	if (unlikely(rc)) {
@@ -493,18 +495,15 @@ smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 
 	aes_cmac_init(&cmac_ctx, &cmac_key);
 
-	/*
-	 * For SMB2+, __cifs_calc_signature() expects to sign only the actual
-	 * data, that is, iov[0] should not contain a rfc1002 length.
-	 *
-	 * Sign the rfc1002 length prior to passing the data (iov[1-N]) down to
-	 * __cifs_calc_signature().
-	 */
-	drqst = *rqst;
-	if (drqst.rq_nvec >= 2 && iov[0].iov_len == 4) {
-		aes_cmac_update(&cmac_ctx, iov[0].iov_base, iov[0].iov_len);
-		drqst.rq_iov++;
-		drqst.rq_nvec--;
+	if (for_recv) {
+		kv.iov_base = smb->response;
+		kv.iov_len  = smb->resp_len;
+		drqst.rq_nvec = 1;
+		drqst.rq_iov  = &kv;
+		drqst.rq_iter = smb->response_iter;
+		iov_iter_truncate(&drqst.rq_iter, smb->resp_data_len);
+	} else {
+		drqst = smb->rqst;
 	}
 
 	rc = __cifs_calc_signature(
@@ -517,22 +516,21 @@ smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 
 /* must be called with server->srv_mutex held */
 static int
-smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
+smb2_sign_rqst(struct smb_message *smb, struct TCP_Server_Info *server)
 {
-	struct smb2_hdr *shdr;
 	struct smb2_sess_setup_req *ssr;
+	struct smb2_hdr *shdr = smb->request;
 	bool is_binding;
 	bool is_signed;
 
-	shdr = (struct smb2_hdr *)rqst->rq_iov[0].iov_base;
 	ssr = (struct smb2_sess_setup_req *)shdr;
 
-	is_binding = shdr->Command == SMB2_SESSION_SETUP &&
+	is_binding = smb->command == SMB2_SESSION_SETUP &&
 		(ssr->Flags & SMB2_SESSION_REQ_FLAG_BINDING);
 	is_signed = shdr->Flags & SMB2_FLAGS_SIGNED;
-
 	if (!is_signed)
 		return 0;
+
 	spin_lock(&server->srv_lock);
 	if (server->ops->need_neg &&
 	    server->ops->need_neg(server)) {
@@ -545,22 +543,20 @@ smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 		return 0;
 	}
 
-	return smb3_calc_signature(rqst, server);
+	return smb3_calc_signature(smb, server, false);
 }
 
-int
-smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
+int smb2_verify_signature(struct smb_message *smb, struct TCP_Server_Info *server)
 {
-	int rc;
+	struct smb2_hdr *shdr = smb->response;
 	char server_response_sig[SMB2_SIGNATURE_SIZE];
-	struct smb2_hdr *shdr =
-			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
+	int rc;
 
-	if ((shdr->Command == SMB2_NEGOTIATE) ||
-	    (shdr->Command == SMB2_SESSION_SETUP) ||
-	    (shdr->Command == SMB2_OPLOCK_BREAK) ||
+	if (smb->command == SMB2_NEGOTIATE ||
+	    smb->command == SMB2_SESSION_SETUP ||
+	    smb->command == SMB2_OPLOCK_BREAK ||
 	    server->ignore_signature ||
-	    (!server->session_estab))
+	    !server->session_estab)
 		return 0;
 
 	/*
@@ -581,8 +577,7 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 
 	memset(shdr->Signature, 0, SMB2_SIGNATURE_SIZE);
 
-	rc = smb3_calc_signature(rqst, server);
-
+	rc = smb3_calc_signature(smb, server, true);
 	if (rc)
 		return rc;
 
@@ -601,59 +596,42 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
  */
 static inline void
 smb2_seq_num_into_buf(struct TCP_Server_Info *server,
-		      struct smb2_hdr *shdr)
+		      struct smb_message *smb)
 {
-	unsigned int i, num = le16_to_cpu(shdr->CreditCharge);
+	struct smb2_hdr *shdr = smb->request;
+	unsigned int num = le16_to_cpu(shdr->CreditCharge);
 
-	shdr->MessageId = get_next_mid64(server);
 	/* skip message numbers according to CreditCharge field */
-	for (i = 1; i < num; i++)
-		get_next_mid(server);
+	smb->mid = smb2_get_next_mid(server, num);
+	shdr->MessageId = cpu_to_le64(smb->mid);
 }
 
-static struct smb_message *
-smb2_mid_entry_alloc(const struct smb2_hdr *shdr,
-		     struct TCP_Server_Info *server)
+static void smb2_init_mid(struct smb_message *smb,
+			  struct TCP_Server_Info *server)
 {
-	struct smb_message *smb;
+	const struct smb2_hdr *shdr = smb->request;
 	unsigned int credits = le16_to_cpu(shdr->CreditCharge);
 
-	if (server == NULL) {
-		cifs_dbg(VFS, "Null TCP session in smb2_mid_entry_alloc\n");
-		return NULL;
-	}
-
-	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
-	memset(smb, 0, sizeof(*smb));
-	refcount_set(&smb->ref, 1);
-	spin_lock_init(&smb->mid_lock);
-	smb->mid = le64_to_cpu(shdr->MessageId);
 	smb->credits_consumed = credits > 0 ? credits : 1;
-	smb->pid = current->pid;
-	smb->command = shdr->Command; /* Always LE */
-	smb->when_alloc = jiffies;
 
 	/*
 	 * The default is for the mid to be synchronous, so the
 	 * default callback just wakes up the current task.
 	 */
-	get_task_struct(current);
-	smb->creator = current;
-	smb->callback = cifs_wake_up_task;
-	smb->callback_data = current;
+	smb->creator = get_task_struct(current);
 
 	atomic_inc(&mid_count);
-	smb->mid_state = MID_REQUEST_ALLOCATED;
 	trace_smb3_cmd_enter(le32_to_cpu(shdr->Id.SyncId.TreeId),
 			     le64_to_cpu(shdr->SessionId),
 			     le16_to_cpu(shdr->Command), smb->mid);
-	return smb;
 }
 
 static int
 smb2_get_mid_entry(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		   struct smb2_hdr *shdr, struct smb_message **smb)
+		   struct smb_message *smb)
 {
+	const struct smb2_hdr *shdr = smb->request;
+
 	switch (READ_ONCE(server->tcpStatus)) {
 	case CifsExiting:
 		return -ENOENT;
@@ -684,13 +662,12 @@ smb2_get_mid_entry(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		break;
 	}
 
-	*smb = smb2_mid_entry_alloc(shdr, server);
-	if (*smb == NULL)
-		return -ENOMEM;
-	spin_lock(&server->mid_queue_lock);
-	list_add_tail(&(*smb)->qhead, &server->pending_mid_q);
-	spin_unlock(&server->mid_queue_lock);
+	smb2_init_mid(smb, server);
 
+	smb_get_message(smb);
+	spin_lock(&server->mid_queue_lock);
+	list_add_tail(&smb->qhead, &server->pending_mid_q);
+	spin_unlock(&server->mid_queue_lock);
 	return 0;
 }
 
@@ -699,86 +676,66 @@ smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		   bool log_error)
 {
 	unsigned int len = smb->resp_len;
-	struct kvec iov[1];
-	struct smb_rqst rqst = { .rq_iov = iov,
-				 .rq_nvec = 1 };
-
-	iov[0].iov_base = (char *)smb->response;
-	iov[0].iov_len = len;
 
 	dump_smb(smb->response, min_t(u32, 80, len));
 	/* convert the length into a more usable form */
 	if (len > 24 && server->sign && !smb->decrypted) {
 		int rc;
 
-		rc = smb2_verify_signature(&rqst, server);
+		rc = smb2_verify_signature(smb, server);
 		if (rc)
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
 					rc);
 	}
 
-	return map_smb2_to_linux_error(smb->response, log_error);
+	return smb->error;
 }
 
-struct smb_message *
+int
 smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		   struct smb_rqst *rqst)
+		   struct smb_message *smb)
 {
+	struct smb2_hdr *shdr = smb->request;
 	int rc;
-	struct smb2_hdr *shdr =
-			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
-	struct smb_message *smb;
 
-	smb2_seq_num_into_buf(server, shdr);
+	smb2_seq_num_into_buf(server, smb);
 
-	rc = smb2_get_mid_entry(ses, server, shdr, &smb);
+	rc = smb2_get_mid_entry(ses, server, smb);
 	if (rc) {
 		revert_current_mid_from_hdr(server, shdr);
-		return ERR_PTR(rc);
+		return rc;
 	}
 
-	rc = smb2_sign_rqst(rqst, server);
-	if (rc) {
+	rc = smb2_sign_rqst(smb, server);
+	if (rc)
 		revert_current_mid_from_hdr(server, shdr);
-		delete_mid(server, smb);
-		return ERR_PTR(rc);
-	}
-
-	return smb;
+	return rc;
 }
 
-struct smb_message *
-smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
+int
+smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_message *smb)
 {
+	struct smb2_hdr *shdr = smb->request;
 	int rc;
-	struct smb2_hdr *shdr =
-			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
-	struct smb_message *smb;
 
 	spin_lock(&server->srv_lock);
 	if (server->tcpStatus == CifsNeedNegotiate &&
-	   shdr->Command != SMB2_NEGOTIATE) {
+	   smb->command != SMB2_NEGOTIATE) {
 		spin_unlock(&server->srv_lock);
-		return ERR_PTR(-EAGAIN);
+		return -EAGAIN;
 	}
 	spin_unlock(&server->srv_lock);
 
-	smb2_seq_num_into_buf(server, shdr);
+	smb2_seq_num_into_buf(server, smb);
+	smb2_init_mid(smb, server);
 
-	smb = smb2_mid_entry_alloc(shdr, server);
-	if (smb == NULL) {
-		revert_current_mid_from_hdr(server, shdr);
-		return ERR_PTR(-ENOMEM);
-	}
-
-	rc = smb2_sign_rqst(rqst, server);
+	rc = smb2_sign_rqst(smb, server);
 	if (rc) {
 		revert_current_mid_from_hdr(server, shdr);
-		release_mid(server, smb);
-		return ERR_PTR(rc);
+		return rc;
 	}
 
-	return smb;
+	return 0;
 }
 
 int
@@ -817,6 +774,33 @@ smb3_crypto_aead_allocate(struct TCP_Server_Info *server)
 	}
 
 	return 0;
+}
+
+/* We can not use the normal sg_set_buf() as we will sometimes pass a
+ * stack object as buf.
+ */
+static void cifs_sg_set_buf(struct sg_table *sgtable,
+			    const void *buf, unsigned int buflen)
+{
+	unsigned long addr = (unsigned long)buf;
+	unsigned int off = offset_in_page(addr);
+
+	addr &= PAGE_MASK;
+	if (is_vmalloc_or_module_addr((void *)addr)) {
+		do {
+			unsigned int len = min_t(unsigned int, buflen, PAGE_SIZE - off);
+
+			sg_set_page(&sgtable->sgl[sgtable->nents++],
+				    vmalloc_to_page((void *)addr), len, off);
+
+			off = 0;
+			addr += PAGE_SIZE;
+			buflen -= len;
+		} while (buflen);
+	} else {
+		sg_set_page(&sgtable->sgl[sgtable->nents++],
+			    virt_to_page((void *)addr), buflen, off);
+	}
 }
 
 /*
@@ -960,10 +944,12 @@ encrypt_message(struct TCP_Server_Info *server,
 }
 
 static void
-fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, unsigned int orig_len,
-		   const struct smb_rqst *old_rq, __le16 cipher_type)
+fill_transform_hdr(struct smb2_transform_hdr *tr_hdr,
+		   struct smb_message *head_smb,
+		   unsigned int orig_len,
+		   __le16 cipher_type)
 {
-	struct smb2_hdr *shdr = (struct smb2_hdr *)old_rq->rq_iov[0].iov_base;
+	struct smb2_hdr *shdr = head_smb->request;
 
 	*tr_hdr = (struct smb2_transform_hdr){
 		.ProtocolId		= SMB2_TRANSFORM_PROTO_NUM,
@@ -985,14 +971,14 @@ fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, unsigned int orig_len,
  */
 int
 smb3_init_transform_rq(struct TCP_Server_Info *server,
-		       int num_rqst, const struct smb_rqst *rqst,
+		       struct smb_message *head_smb,
 		       struct smb2_transform_hdr *tr_hdr,
 		       struct iov_iter *iter)
 {
 	size_t orig_len = iov_iter_count(iter) - sizeof(*tr_hdr);
 	int rc;
 
-	fill_transform_hdr(tr_hdr, orig_len, rqst, server->cipher_type);
+	fill_transform_hdr(tr_hdr, head_smb, orig_len, server->cipher_type);
 
 	iov_iter_advance(iter, offsetof(struct smb2_transform_hdr, Nonce));
 
@@ -1107,7 +1093,7 @@ static void smb2_decrypt_offload(struct work_struct *work)
 		goto out;
 	}
 
-	smb2_parse_pdu(dw->server, rxq);
+	smb2_parse_pdu(dw->server, rxq, true);
 out:
 	netfs_put_rx_bvecq(rxq->take_from);
 	kfree(dw);
@@ -1191,7 +1177,7 @@ static int smb3_reverse_transform(struct TCP_Server_Info *server,
 
 	rxq->refillable = false;
 	decrypt_pdu(server, &tr_hdr, rxq);
-	smb2_parse_pdu(server, rxq);
+	smb2_parse_pdu(server, rxq, true);
 	return 0;
 }
 
@@ -1302,7 +1288,8 @@ static void smb2_copy_to_prepped_buffers(struct TCP_Server_Info *server,
  */
 static void smb2_parse_one_message(struct TCP_Server_Info *server,
 				   struct cifs_receive *recv,
-				   struct netfs_rxqueue *rxq)
+				   struct netfs_rxqueue *rxq,
+				   bool decrypted)
 {
 	union smb2_response_hdr *h = recv->response;
 	struct smb_message *smb;
@@ -1316,6 +1303,7 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 		rxq->msg_id = 0;
 	} else {
 		rxq->msg_id = 0; /* TODO: smb->debug_id */
+		smb->decrypted = decrypted;
 	}
 
 	/*
@@ -1349,12 +1337,12 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 				       le64_to_cpu(shdr->MessageId));
 		cifs_dbg(FYI, "Session expired or deleted\n");
 		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
-		release_mid(server, smb);
+		smb_put_message(smb);
 		return;
 	case STATUS_PENDING:
 		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
 		smb2_status_pending(shdr, server);
-		release_mid(server, smb);
+		smb_put_message(smb);
 		return;
 	case STATUS_IO_TIMEOUT:
 		int iotimo = atomic_inc_return(&server->num_io_timeout);
@@ -1448,7 +1436,7 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
 		dequeue_mid(server, smb, recv->malformed);
 		mid_execute_callback(server, smb);
 
-		release_mid(server, smb);
+		smb_put_message(smb);
 	} else if (shdr->Command == cpu_to_le32(SMB2_OPLOCK_BREAK)) {
 		smb2_is_valid_oplock_break(server, h);
 		smb2_add_credits_from_hdr(shdr, server);
@@ -1476,7 +1464,7 @@ static void smb2_parse_one_message(struct TCP_Server_Info *server,
  * though some may yet to be received.
  */
 static void smb2_parse_pdu(struct TCP_Server_Info *server,
-			   struct netfs_rxqueue *rxq)
+			   struct netfs_rxqueue *rxq, bool decrypted)
 {
 	u32 next_command, ssize2, next_len;
 	int rc;
@@ -1571,7 +1559,7 @@ static void smb2_parse_pdu(struct TCP_Server_Info *server,
 		recv.hdr_len += ssize2;
 		recv.extracted += ssize2;
 
-		smb2_parse_one_message(server, &recv, rxq);
+		smb2_parse_one_message(server, &recv, rxq, decrypted);
 
 		WARN(rxq->pdu_remain > 0, "MSG=%08x pdu_remain=%x",
 		     rxq->msg_id, rxq->pdu_remain);
@@ -1614,6 +1602,6 @@ int smb2_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len)
 	 */
 	if (protocol_id == SMB2_TRANSFORM_PROTO_NUM)
 		return smb3_reverse_transform(server, rxq);
-	smb2_parse_pdu(server, rxq);
+	smb2_parse_pdu(server, rxq, false);
 	return 0;
 }

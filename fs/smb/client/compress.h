@@ -32,20 +32,20 @@ typedef int (*compress_send_fn)(struct TCP_Server_Info *, int, struct smb_rqst *
 
 
 int smb_compress(struct TCP_Server_Info *server, struct iov_iter *iter,
-		 struct bvecq **bq, unsigned int flags);
-bool should_compress(const struct cifs_tcon *tcon, const struct smb_rqst *rq);
+		 struct bvecq **bq, bool writeback);
+bool should_compress(const struct cifs_tcon *tcon, const struct smb_message *smb);
 bool is_compressible(const struct iov_iter *data);
 
 #else /* !CONFIG_CIFS_COMPRESSION */
 static inline
 int smb_compress(struct TCP_Server_Info *server, struct iov_iter *iter,
-		 struct bvecq **bq, unsigned int flags)
+		 struct bvecq **bq, bool writeback)
 {
 	return -EOPNOTSUPP;
 }
 
 static inline bool is_compressible(const struct iov_iter *data) { return false; }
-static inline bool should_compress(void *unused1, void *unused2)
+static inline bool should_compress(const struct cifs_tcon *tcon, const struct smb_message *smb)
 {
 	return false;
 }

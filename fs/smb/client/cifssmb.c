@@ -261,7 +261,6 @@ small_smb_init_no_tc(const int smb_command, const int wct,
 		return rc;
 
 	buffer = (struct smb_hdr *)*request_buf;
-	buffer->Mid = get_next_mid(ses->server);
 	if (ses->capabilities & CAP_UNICODE)
 		buffer->Flags2 |= SMBFLG2_UNICODE;
 	if (ses->capabilities & CAP_STATUS32)
@@ -411,7 +410,6 @@ CIFSSMBNegotiate(const unsigned int xid,
 		return rc;
 	in_len = rc;
 
-	pSMB->hdr.Mid = get_next_mid(server);
 	pSMB->hdr.Flags2 |= SMBFLG2_ERR_STATUS;
 
 	if (ses->unicode != 0)
@@ -531,7 +529,6 @@ CIFSTCon(const unsigned int xid, struct cifs_ses *ses,
 	in_len = header_assemble(smb_buffer, SMB_COM_TREE_CONNECT_ANDX,
 				 NULL /*no tid */, 4 /*wct */);
 
-	smb_buffer->Mid = get_next_mid(ses->server);
 	smb_buffer->Uid = ses->Suid;
 	pSMB = (TCONX_REQ *) smb_buffer;
 	pSMBr = (TCONX_RSP *) smb_buffer_response;
@@ -699,50 +696,55 @@ cifs_echo_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	struct cifs_credits credits = { .value = 1, .instance = 0 };
 
-	release_mid(server, smb);
 	add_credits(server, &credits, CIFS_ECHO_OP);
 }
 
 int
 CIFSSMBEcho(struct TCP_Server_Info *server)
 {
-	ECHO_REQ *smb;
+	struct smb_message *smb;
+	ECHO_REQ *req;
 	int rc = 0;
 	struct kvec iov[1];
-	struct smb_rqst rqst = {
-		.rq_iov = iov,
-		.rq_nvec = ARRAY_SIZE(iov),
-	};
 	unsigned int in_len;
 
 	cifs_dbg(FYI, "In echo request\n");
 
-	rc = small_smb_init(SMB_COM_ECHO, 0, NULL, (void **)&smb);
+	smb = smb_message_alloc(smb1_command_trace_echo, GFP_NOFS);
+	if (!smb)
+		return -ENOMEM;
+
+	rc = small_smb_init(SMB_COM_ECHO, 0, NULL, (void **)&req);
 	if (rc < 0)
 		return rc;
 	in_len = rc;
 
 	if (server->capabilities & CAP_UNICODE)
-		smb->hdr.Flags2 |= SMBFLG2_UNICODE;
+		req->hdr.Flags2 |= SMBFLG2_UNICODE;
 
 	/* set up echo request */
-	smb->hdr.Tid = 0xffff;
-	smb->hdr.WordCount = 1;
-	put_unaligned_le16(1, &smb->EchoCount);
-	put_bcc(1, &smb->hdr);
-	smb->Data[0] = 'a';
+	req->hdr.Tid = 0xffff;
+	req->hdr.WordCount = 1;
+	put_unaligned_le16(1, &req->EchoCount);
+	put_bcc(1, &req->hdr);
+	req->Data[0] = 'a';
 	in_len += 3;
 
-	iov[0].iov_len = in_len;
-	iov[0].iov_base = smb;
+	iov[0].iov_len	= in_len;
+	iov[0].iov_base	= req;
+	smb->rqst.rq_iov	= iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->request		= req;
+	smb->total_len		= in_len;
+	smb->callback		= cifs_echo_callback;
+	smb->callback_data	= server;
 
-	rc = cifs_call_async(server, &rqst, cifs_echo_callback, server,
-			     CIFS_NON_BLOCKING | CIFS_ECHO_OP, NULL, NULL);
+	rc = cifs_call_async(server, smb, CIFS_NON_BLOCKING | CIFS_ECHO_OP, NULL);
 	if (rc)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
-	cifs_small_buf_release(smb);
-
+	cifs_small_buf_release(req);
+	smb_put_message(smb);
 	return rc;
 }
 
@@ -778,8 +780,6 @@ CIFSSMBLogoff(const unsigned int xid, struct cifs_ses *ses)
 		return rc;
 	}
 	in_len = rc;
-
-	pSMB->hdr.Mid = get_next_mid(ses->server);
 
 	if (ses->server->sign)
 		pSMB->hdr.Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
@@ -1526,7 +1526,6 @@ do_retry:
 	rdata->subreq.transferred += smb->resp_data_len;
 	trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 	netfs_read_subreq_terminated(&rdata->subreq);
-	release_mid(server, smb);
 	add_credits(server, &credits, 0);
 	trace_smb3_rw_credits(rreq_debug_id, subreq_debug_index, 0,
 			      server->credits, server->in_flight,
@@ -1538,12 +1537,10 @@ int
 cifs_async_readv(struct cifs_io_subrequest *rdata)
 {
 	int rc;
-	READ_REQ *smb = NULL;
+	READ_REQ *req = NULL;
 	int wct;
+	struct smb_message *smb;
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
-	struct smb_rqst rqst = { .rq_iov = rdata->iov,
-				 .rq_nvec = 1 };
-	struct iov_iter iter;
 	unsigned int in_len;
 
 	cifs_dbg(FYI, "%s: offset=%llu bytes=%zu\n",
@@ -1559,34 +1556,51 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 		}
 	}
 
-	rc = small_smb_init(SMB_COM_READ_ANDX, wct, tcon, (void **)&smb);
+	smb = smb_message_alloc(smb1_command_trace_read, GFP_NOFS);
+	if (!smb)
+		return -ENOMEM;
+
+	rc = small_smb_init(SMB_COM_READ_ANDX, wct, tcon, (void **)&req);
 	if (rc < 0)
-		return rc;
+		goto put_smb;
 	in_len = rc;
 
-	smb->hdr.Pid = cpu_to_le16((__u16)rdata->req->pid);
-	smb->hdr.PidHigh = cpu_to_le16((__u16)(rdata->req->pid >> 16));
+	req->hdr.Pid = cpu_to_le16((__u16)rdata->req->pid);
+	req->hdr.PidHigh = cpu_to_le16((__u16)(rdata->req->pid >> 16));
 
-	smb->AndXCommand = 0xFF;	/* none */
-	smb->Fid = rdata->req->cfile->fid.netfid;
-	smb->OffsetLow = cpu_to_le32(rdata->subreq.start & 0xFFFFFFFF);
+	req->AndXCommand = 0xFF;	/* none */
+	req->Fid = rdata->req->cfile->fid.netfid;
+	req->OffsetLow = cpu_to_le32(rdata->subreq.start & 0xFFFFFFFF);
 	if (wct == 12)
-		smb->OffsetHigh = cpu_to_le32(rdata->subreq.start >> 32);
-	smb->Remaining = 0;
-	smb->MaxCount = cpu_to_le16(rdata->subreq.len & 0xFFFF);
-	smb->MaxCountHigh = cpu_to_le32(rdata->subreq.len >> 16);
+		req->OffsetHigh = cpu_to_le32(rdata->subreq.start >> 32);
+	req->Remaining = 0;
+	req->MaxCount = cpu_to_le16(rdata->subreq.len & 0xFFFF);
+	req->MaxCountHigh = cpu_to_le32(rdata->subreq.len >> 16);
 	if (wct == 12)
-		smb->ByteCount = 0;
+		req->ByteCount = 0;
 	else {
 		/* old style read */
-		struct smb_com_readx_req *smbr =
-			(struct smb_com_readx_req *)smb;
-		smbr->ByteCount = 0;
+		struct smb_com_readx_req *reqr =
+			(struct smb_com_readx_req *)req;
+		reqr->ByteCount = 0;
 	}
 
 	/* 4 for RFC1001 length + 1 for BCC */
-	rdata->iov[0].iov_base = smb;
+	rdata->iov[0].iov_base = req;
 	rdata->iov[0].iov_len = in_len;
+
+	smb->rqst.rq_iov	= rdata->iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->command		= SMB2_READ;
+	smb->request		= req;
+	smb->total_len		= in_len;
+	smb->callback		= cifs_readv_callback;
+	smb->callback_data	= rdata;
+	smb->copy_to_bufs	= true;
+
+	iov_iter_bvec_queue(&smb->response_iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
 
 	trace_smb3_read_enter(rdata->rreq->debug_id,
 			      rdata->subreq.debug_index,
@@ -1595,16 +1609,12 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 			      tcon->tid, tcon->ses->Suid,
 			      rdata->subreq.start, rdata->subreq.len);
 
-	iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
-			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-			    rdata->subreq.content.offset, rdata->subreq.len);
-
-	rc = cifs_call_async(tcon->ses->server, &rqst,
-			     cifs_readv_callback, rdata, 0, NULL, &iter);
+	rc = cifs_call_async(tcon->ses->server, smb, 0, NULL);
 
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_reads);
-	cifs_small_buf_release(smb);
+put_smb:
+	smb_put_message(smb);
 	return rc;
 }
 
@@ -1919,7 +1929,6 @@ cifs_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 			      0, cifs_trace_rw_credits_write_response_clear);
 	wdata->credits.value = 0;
 	cifs_write_subrequest_terminated(wdata, result);
-	release_mid(server, smb);
 	trace_smb3_rw_credits(credits.rreq_debug_id, credits.rreq_debug_index, 0,
 			      server->credits, server->in_flight,
 			      credits.value, cifs_trace_rw_credits_write_response_add);
@@ -1933,13 +1942,10 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 	int rc = -EACCES;
 	WRITE_REQ *req = NULL;
 	int wct;
+	struct smb_message *smb;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
 	struct kvec iov[1];
-	struct smb_rqst rqst = { };
-	unsigned int in_len, flags = 0;
-
-	if (wdata->rreq->origin == NETFS_WRITEBACK)
-		flags |= CIFS_WRITEBACK;
+	unsigned int in_len;
 
 	if (tcon->ses->capabilities & CAP_LARGE_FILES) {
 		wct = 14;
@@ -1952,10 +1958,35 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 		}
 	}
 
+	smb = smb_message_alloc(smb1_command_trace_write, GFP_NOFS);
+	if (!smb) {
+		rc = -ENOMEM;
+		goto out_put;
+	}
+
+	if (wdata->rreq->origin == NETFS_WRITEBACK)
+		smb->writeback = true;
+
 	rc = small_smb_init(SMB_COM_WRITE_ANDX, wct, tcon, (void **)&req);
 	if (rc < 0)
 		goto async_writev_out;
 	in_len = rc;
+
+	iov[0].iov_base	= req;
+	iov[0].iov_len	= in_len + 1; /* +1 for BCC */
+
+	smb->rqst.rq_iov	= iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->command		= SMB2_WRITE;
+	smb->request		= req;
+	smb->total_len		= in_len + 1;
+	smb->total_len		+= wdata->subreq.len;
+	smb->callback		= cifs_writev_callback;
+	smb->callback_data	= wdata;
+
+	iov_iter_bvec_queue(&smb->rqst.rq_iter, ITER_DEST,
+			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,
+			    wdata->subreq.content.offset, wdata->subreq.len);
 
 	req->hdr.Pid = cpu_to_le16((__u16)wdata->req->pid);
 	req->hdr.PidHigh = cpu_to_le16((__u16)(wdata->req->pid >> 16));
@@ -1971,16 +2002,6 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 
 	req->DataOffset =
 	    cpu_to_le16(offsetof(struct smb_com_write_req, Data));
-
-	iov[0].iov_base = req;
-	iov[0].iov_len = in_len + 1; /* +1 for BCC */
-
-	rqst.rq_iov = iov;
-	rqst.rq_nvec = 1;
-
-	iov_iter_bvec_queue(&rqst.rq_iter, ITER_SOURCE,
-			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,
-			    wdata->subreq.content.offset, wdata->subreq.len);
 
 	cifs_dbg(FYI, "async write at %llu %zu bytes\n",
 		 wdata->subreq.start, wdata->subreq.len);
@@ -2000,14 +2021,15 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 		iov[0].iov_len += 4; /* pad bigger by four bytes */
 	}
 
-	rc = cifs_call_async(tcon->ses->server, &rqst,
-			     cifs_writev_callback, wdata, flags, NULL, NULL);
+	rc = cifs_call_async(tcon->ses->server, smb, 0, NULL);
 	/* Can't touch wdata if rc == 0 */
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_writes);
 
 async_writev_out:
 	cifs_small_buf_release(req);
+out_put:
+	smb_put_message(smb);
 out:
 	if (rc) {
 		add_credits_and_wake_if(wdata->server, &wdata->credits, 0);
@@ -4759,7 +4781,6 @@ getDFSRetry:
 
 	/* server pointer checked in called function,
 	but should never be null here anyway */
-	pSMB->hdr.Mid = get_next_mid(ses->server);
 	pSMB->hdr.Tid = ses->tcon_ipc->tid;
 	pSMB->hdr.Uid = ses->Suid;
 	if (ses->capabilities & CAP_STATUS32)

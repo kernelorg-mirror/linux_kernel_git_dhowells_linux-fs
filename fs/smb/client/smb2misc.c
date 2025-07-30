@@ -846,27 +846,20 @@ smb2_handle_cancelled_mid(struct smb_message *smb, struct TCP_Server_Info *serve
 }
 
 /**
- * smb311_update_preauth_hash - update @ses hash with the packet data in @iov
- *
- * Assumes @iov does not contain the rfc1002 length and iov[0] has the
- * SMB2 header.
- *
+ * smb311_update_preauth_hash - update @ses hash from the message
  * @ses:	server session structure
  * @server:	pointer to server info
- * @iov:	array containing the SMB request we will send to the server
- * @nvec:	number of array entries for the iov
+ * @smb:	the SMB request we will send to the server
+ * @hash_resp:	T if we're hashing a response
  */
 void
 smb311_update_preauth_hash(struct cifs_ses *ses, struct TCP_Server_Info *server,
-			   struct kvec *iov, int nvec)
+			   struct smb_message *smb, bool hash_resp)
 {
-	int i;
-	struct smb2_hdr *hdr;
 	struct sha512_ctx sha_ctx;
 
-	hdr = (struct smb2_hdr *)iov[0].iov_base;
 	/* neg prot are always taken */
-	if (hdr->Command == SMB2_NEGOTIATE)
+	if (smb->command == SMB2_NEGOTIATE)
 		goto ok;
 
 	/*
@@ -877,20 +870,29 @@ smb311_update_preauth_hash(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	if (server->dialect != SMB311_PROT_ID)
 		return;
 
-	if (hdr->Command != SMB2_SESSION_SETUP)
+	if (smb->command != SMB2_SESSION_SETUP)
 		return;
 
 	/* skip last sess setup response */
-	if ((hdr->Flags & SMB2_FLAGS_SERVER_TO_REDIR)
-	    && (hdr->Status == NT_STATUS_OK
-		|| (hdr->Status !=
-		    cpu_to_le32(NT_STATUS_MORE_PROCESSING_REQUIRED))))
-		return;
+	if (hash_resp) {
+		struct smb2_hdr *resp = smb->response;
+		if (resp->Status == NT_STATUS_OK ||
+		    resp->Status != cpu_to_le32(NT_STATUS_MORE_PROCESSING_REQUIRED))
+			return;
+	}
 
 ok:
 	sha512_init(&sha_ctx);
 	sha512_update(&sha_ctx, ses->preauth_sha_hash, SMB2_PREAUTH_HASH_SIZE);
-	for (i = 0; i < nvec; i++)
-		sha512_update(&sha_ctx, iov[i].iov_base, iov[i].iov_len);
+
+	if (hash_resp) {
+		sha512_update(&sha_ctx,  smb->response, smb->resp_len);
+	} else {
+		struct kvec *iov = smb->rqst.rq_iov;
+
+		for (int i = 0; i < smb->rqst.rq_nvec; i++)
+			sha512_update(&sha_ctx, iov[i].iov_base, iov[i].iov_len);
+	}
+
 	sha512_final(&sha_ctx, ses->preauth_sha_hash);
 }

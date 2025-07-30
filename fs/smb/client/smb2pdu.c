@@ -4229,7 +4229,6 @@ smb2_echo_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		credits.instance = server->reconnect_instance;
 	}
 
-	release_mid(server, smb);
 	add_credits(server, &credits, CIFS_ECHO_OP);
 }
 
@@ -4387,10 +4386,9 @@ int
 SMB2_echo(struct TCP_Server_Info *server)
 {
 	struct smb2_echo_req *req;
+	struct smb_message *smb;
 	int rc = 0;
 	struct kvec iov[1];
-	struct smb_rqst rqst = { .rq_iov = iov,
-				 .rq_nvec = 1 };
 	unsigned int total_len;
 
 	cifs_dbg(FYI, "In echo request for conn_id %lld\n", server->conn_id);
@@ -4405,22 +4403,36 @@ SMB2_echo(struct TCP_Server_Info *server)
 	}
 	spin_unlock(&server->srv_lock);
 
+	smb = smb_message_alloc(smb2_command_trace_echo, GFP_NOFS);
+	if (!smb)
+		return -ENOMEM;
+
 	rc = smb2_plain_req_init(SMB2_ECHO, NULL, server,
 				 (void **)&req, &total_len);
-	if (rc)
+	if (rc) {
+		mempool_free(smb, &smb_message_pool);
 		return rc;
-
-	req->hdr.CreditRequest = cpu_to_le16(1);
+	}
 
 	iov[0].iov_len = total_len;
 	iov[0].iov_base = (char *)req;
 
-	rc = cifs_call_async(server, &rqst, smb2_echo_callback, server,
-			     CIFS_ECHO_OP, NULL, NULL);
+	smb->rqst.rq_iov	= iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->command		= SMB2_ECHO;
+	smb->request		= req;
+	smb->total_len		= total_len;
+	smb->callback		= smb2_echo_callback;
+	smb->callback_data	= server;
+
+	req->hdr.CreditRequest = cpu_to_le16(1);
+
+	rc = cifs_call_async(server, smb, CIFS_ECHO_OP, NULL);
 	if (rc)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
 	cifs_small_buf_release(req);
+	smb_put_message(smb);
 	return rc;
 }
 
@@ -4667,21 +4679,10 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		.rreq_debug_id = rdata->rreq->debug_id,
 		.rreq_debug_index = rdata->subreq.debug_index,
 	};
-	struct kvec kv = {
-		.iov_base = smb->response,
-		.iov_len  = smb->resp_len,
-	};
-	struct smb_rqst rqst = {
-		.rq_iov  = &kv,
-		.rq_nvec = 1
-	};
 	unsigned int rreq_debug_id = rdata->rreq->debug_id;
 	unsigned int subreq_debug_index = rdata->subreq.debug_index;
 
-	iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
-			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-			    rdata->subreq.content.offset, rdata->subreq.len);
-
+	rdata->result = smb->error;
 	WARN_ONCE(rdata->server != server,
 		  "rdata server %p != mid server %p",
 		  rdata->server, server);
@@ -4698,7 +4699,7 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		if (server->sign && !smb->decrypted) {
 			int rc;
 
-			rc = smb2_verify_signature(&rqst, server);
+			rc = smb2_verify_signature(smb, server);
 			if (rc) {
 				cifs_tcon_dbg(VFS, "SMB signature verification returned error = %d\n",
 					      rc);
@@ -4804,7 +4805,6 @@ do_retry:
 	rdata->subreq.transferred += smb->resp_data_len;
 	trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 	netfs_read_subreq_terminated(&rdata->subreq);
-	release_mid(server, smb);
 	trace_smb3_rw_credits(rreq_debug_id, subreq_debug_index, 0,
 			      server->credits, server->in_flight,
 			      credits.value, cifs_trace_rw_credits_read_response_add);
@@ -4815,41 +4815,44 @@ do_retry:
 int
 smb2_async_readv(struct cifs_io_subrequest *rdata)
 {
-	int rc, flags = 0;
-	char *buf;
 	struct netfs_io_subrequest *subreq = &rdata->subreq;
-	struct smb2_hdr *shdr;
-	struct cifs_io_parms io_parms;
-	struct smb_rqst rqst = { .rq_iov = rdata->iov,
-				 .rq_nvec = 1 };
-	struct iov_iter iter;
 	struct TCP_Server_Info *server;
+	struct smb_message *smb;
+	struct smb2_hdr *shdr;
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	unsigned int total_len;
+	void *buf;
 	int credit_request;
+	int rc, flags = 0;
 
 	cifs_dbg(FYI, "%s: offset=%llu bytes=%zu\n",
 		 __func__, subreq->start, subreq->len);
 
-	iov_iter_bvec_queue(&iter, ITER_DEST,
-			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-			    rdata->subreq.content.offset, rdata->subreq.len);
+	server = rdata->server;
+	if (!server)
+		server = rdata->server = cifs_pick_channel(tcon->ses);
 
-	if (!rdata->server)
-		rdata->server = cifs_pick_channel(tcon->ses);
+	struct cifs_io_parms io_parms = {
+		.tcon		= tlink_tcon(rdata->req->cfile->tlink),
+		.server		= server,
+		.offset		= subreq->start + subreq->transferred,
+		.length		= subreq->len   - subreq->transferred,
+		.persistent_fid	= rdata->req->cfile->fid.persistent_fid,
+		.volatile_fid	= rdata->req->cfile->fid.volatile_fid,
+		.pid		= rdata->req->pid,
+	};
 
-	io_parms.tcon = tlink_tcon(rdata->req->cfile->tlink);
-	io_parms.server = server = rdata->server;
-	io_parms.offset = subreq->start + subreq->transferred;
-	io_parms.length = subreq->len   - subreq->transferred;
-	io_parms.persistent_fid = rdata->req->cfile->fid.persistent_fid;
-	io_parms.volatile_fid = rdata->req->cfile->fid.volatile_fid;
-	io_parms.pid = rdata->req->pid;
-
-	rc = smb2_new_read_req(
-		(void **) &buf, &total_len, &io_parms, rdata, 0, 0);
-	if (rc)
+	smb = smb_message_alloc(smb2_command_trace_read, GFP_NOFS);
+	if (!smb) {
+		rc = -ENOMEM;
 		goto out;
+	}
+
+	rc = smb2_new_read_req(&buf, &total_len, &io_parms, rdata, 0, 0);
+	if (rc) {
+		mempool_free(smb, &smb_message_pool);
+		goto out;
+	}
 
 	if (smb3_encryption_required(io_parms.tcon))
 		flags |= CIFS_TRANSFORM_REQ;
@@ -4858,13 +4861,26 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 	rdata->iov[0].iov_len = total_len;
 	rdata->result = 0;
 
-	shdr = (struct smb2_hdr *)buf;
+	smb->rqst.rq_iov	= rdata->iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->command		= SMB2_READ;
+	smb->request		= buf;
+	smb->total_len		= total_len;
+	smb->callback		= smb2_readv_callback;
+	smb->callback_data	= rdata;
+	smb->copy_to_bufs	= true;
+
+	iov_iter_bvec_queue(&smb->response_iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
+
+	shdr = (struct smb2_hdr *)smb->request;
 
 	if (rdata->replay) {
 		/* Back-off before retry */
 		if (rdata->cur_sleep)
 			msleep(rdata->cur_sleep);
-		smb2_set_replay(server, &rqst);
+		smb2_set_replay(server, &smb->rqst);
 	}
 
 	if (rdata->credits.value > 0) {
@@ -4885,8 +4901,7 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 		flags |= CIFS_HAS_CREDITS;
 	}
 
-	rc = cifs_call_async(server, &rqst, smb2_readv_callback, rdata, flags,
-			     &rdata->credits, &iter);
+	rc = cifs_call_async(server, smb, flags, &rdata->credits);
 	if (rc) {
 		cifs_stats_fail_inc(io_parms.tcon, SMB2_READ_HE);
 		trace_smb3_read_err(rdata->rreq->debug_id,
@@ -4911,6 +4926,7 @@ out:
 		__set_bit(NETFS_SREQ_NEED_RETRY, &rdata->subreq.flags);
 	}
 
+	smb_put_message(smb);
 	return rc;
 }
 
@@ -5126,7 +5142,6 @@ smb2_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		wdata->replay = true;
 
 	cifs_write_subrequest_terminated(wdata, result ?: written);
-	release_mid(server, smb);
 	trace_smb3_rw_credits(rreq_debug_id, subreq_debug_index, 0,
 			      server->credits, server->in_flight,
 			      credits.value, cifs_trace_rw_credits_write_response_add);
@@ -5137,82 +5152,94 @@ smb2_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 void
 smb2_async_writev(struct cifs_io_subrequest *wdata)
 {
-	int rc = -EACCES, flags = 0;
 	struct smb2_write_req *req = NULL;
+	struct smb_message *smb;
 	struct smb2_hdr *shdr;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
 	struct TCP_Server_Info *server = wdata->server;
 	struct kvec iov[1];
-	struct smb_rqst rqst = { };
 	unsigned int total_len, xid = wdata->xid;
-	struct cifs_io_parms _io_parms;
-	struct cifs_io_parms *io_parms = NULL;
 	int credit_request;
-
-	if (wdata->rreq->origin == NETFS_WRITEBACK)
-		flags |= CIFS_WRITEBACK;
+	int rc = -EACCES, flags = 0;
 
 	/*
 	 * in future we may get cifs_io_parms passed in from the caller,
 	 * but for now we construct it here...
 	 */
-	_io_parms = (struct cifs_io_parms) {
-		.tcon = tcon,
-		.server = server,
-		.offset = wdata->subreq.start,
-		.length = wdata->subreq.len,
-		.persistent_fid = wdata->req->cfile->fid.persistent_fid,
-		.volatile_fid = wdata->req->cfile->fid.volatile_fid,
-		.pid = wdata->req->pid,
+	struct cifs_io_parms io_parms = {
+		.tcon		= tcon,
+		.server		= server,
+		.offset		= wdata->subreq.start,
+		.length		= wdata->subreq.len,
+		.persistent_fid	= wdata->req->cfile->fid.persistent_fid,
+		.volatile_fid	= wdata->req->cfile->fid.volatile_fid,
+		.pid		= wdata->req->pid,
 	};
-	io_parms = &_io_parms;
+
+	smb = smb_message_alloc(smb2_command_trace_write, GFP_NOFS);
+	if (!smb) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	if (wdata->rreq->origin == NETFS_WRITEBACK)
+		smb->writeback = true;
 
 	rc = smb2_plain_req_init(SMB2_WRITE, tcon, server,
 				 (void **) &req, &total_len);
-	if (rc)
+	if (rc) {
+		mempool_free(smb, &smb_message_pool);
 		goto out;
+	}
 
-	rqst.rq_iov = iov;
-	iov_iter_bvec_queue(&rqst.rq_iter, ITER_SOURCE,
+	iov[0].iov_len	= total_len;
+	iov[0].iov_base	= (char *)req;
+	total_len += wdata->subreq.len;
+
+	smb->rqst.rq_iov	= iov;
+	smb->rqst.rq_nvec	= 1;
+	smb->command		= SMB2_WRITE;
+	smb->request		= req;
+	smb->total_len		= total_len;
+	smb->callback		= smb2_writev_callback;
+	smb->callback_data	= wdata;
+
+	iov_iter_bvec_queue(&smb->rqst.rq_iter, ITER_SOURCE,
 			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,
 			    wdata->subreq.content.offset, wdata->subreq.len);
-
-	rqst.rq_iov[0].iov_len = total_len - 1;
-	rqst.rq_iov[0].iov_base = (char *)req;
-	rqst.rq_nvec += 1;
 
 	if (smb3_encryption_required(tcon))
 		flags |= CIFS_TRANSFORM_REQ;
 
 	shdr = (struct smb2_hdr *)req;
-	shdr->Id.SyncId.ProcessId = cpu_to_le32(io_parms->pid);
+	shdr->Id.SyncId.ProcessId = cpu_to_le32(io_parms.pid);
 
-	req->PersistentFileId = io_parms->persistent_fid;
-	req->VolatileFileId = io_parms->volatile_fid;
-	req->WriteChannelInfoOffset = 0;
-	req->WriteChannelInfoLength = 0;
-	req->Channel = SMB2_CHANNEL_NONE;
-	req->Length = cpu_to_le32(io_parms->length);
-	req->Offset = cpu_to_le64(io_parms->offset);
-	req->DataOffset = cpu_to_le16(
-				offsetof(struct smb2_write_req, Buffer));
-	req->RemainingBytes = 0;
+	req->PersistentFileId		= io_parms.persistent_fid;
+	req->VolatileFileId		= io_parms.volatile_fid;
+	req->WriteChannelInfoOffset	= 0;
+	req->WriteChannelInfoLength	= 0;
+	req->Channel			= SMB2_CHANNEL_NONE;
+	req->Length			= cpu_to_le32(io_parms.length);
+	req->Offset			= cpu_to_le64(io_parms.offset);
+	req->DataOffset			=
+		cpu_to_le16(offsetof(struct smb2_write_req, Buffer));
+	req->RemainingBytes		= 0;
 
 	trace_smb3_write_enter(wdata->rreq->debug_id,
 			       wdata->subreq.debug_index,
 			       wdata->xid,
-			       io_parms->persistent_fid,
-			       io_parms->tcon->tid,
-			       io_parms->tcon->ses->Suid,
-			       io_parms->offset,
-			       io_parms->length);
+			       io_parms.persistent_fid,
+			       io_parms.tcon->tid,
+			       io_parms.tcon->ses->Suid,
+			       io_parms.offset,
+			       io_parms.length);
 
 #ifdef CONFIG_CIFS_SMB_DIRECT
 	/*
 	 * If we want to do a server RDMA read, fill in and append
 	 * smbdirect_buffer_descriptor_v1 to the end of write request
 	 */
-	if (smb3_use_rdma_offload(io_parms)) {
+	if (smb3_use_rdma_offload(&io_parms)) {
 		struct smbdirect_buffer_descriptor_v1 *v1;
 		struct iov_iter iter;
 		bool need_invalidate = server->dialect == SMB30_PROT_ID;
@@ -5241,13 +5268,13 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 		v1 = (struct smbdirect_buffer_descriptor_v1 *) &req->Buffer[0];
 		smbd_mr_fill_buffer_descriptor(wdata->mr, v1);
 
-		rqst.rq_iov[0].iov_len += sizeof(*v1);
+		smb->rqst.rq_iov[0].iov_len += sizeof(*v1);
 
 		/*
 		 * We keep wdata->subreq.io_iter,
 		 * but we have to truncate rqst.rq_iter
 		 */
-		iov_iter_truncate(&rqst.rq_iter, 0);
+		iov_iter_truncate(&smb->rqst.rq_iter, 0);
 	}
 #endif
 
@@ -5255,11 +5282,11 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 		/* Back-off before retry */
 		if (wdata->cur_sleep)
 			msleep(wdata->cur_sleep);
-		smb2_set_replay(server, &rqst);
+		smb2_set_replay(server, &smb->rqst);
 	}
 
-	cifs_dbg(FYI, "async write at %llu %u bytes len=%zx\n",
-		 io_parms->offset, io_parms->length, wdata->subreq.len);
+	cifs_dbg(FYI, "async write at %llu %u bytes iter=%zx\n",
+		 io_parms.offset, io_parms.length, iov_iter_count(&smb->rqst.rq_iter));
 
 	if (wdata->credits.value > 0) {
 		shdr->CreditCharge = cpu_to_le16(DIV_ROUND_UP(wdata->subreq.len,
@@ -5280,27 +5307,28 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 	}
 
 	/* XXX: compression + encryption is unsupported for now */
-	if (((flags & CIFS_TRANSFORM_REQ) != CIFS_TRANSFORM_REQ) && should_compress(tcon, &rqst))
+	if (((flags & CIFS_TRANSFORM_REQ) != CIFS_TRANSFORM_REQ) &&
+	    should_compress(tcon, smb))
 		flags |= CIFS_COMPRESS_REQ;
 
-	rc = cifs_call_async(server, &rqst, smb2_writev_callback, wdata, flags,
-			     &wdata->credits, NULL);
+	rc = cifs_call_async(server, smb, flags, &wdata->credits);
 	/* Can't touch wdata if rc == 0 */
 	if (rc) {
 		trace_smb3_write_err(wdata->rreq->debug_id,
 				     wdata->subreq.debug_index,
 				     xid,
-				     io_parms->persistent_fid,
-				     io_parms->tcon->tid,
-				     io_parms->tcon->ses->Suid,
-				     io_parms->offset,
-				     io_parms->length,
+				     io_parms.persistent_fid,
+				     io_parms.tcon->tid,
+				     io_parms.tcon->ses->Suid,
+				     io_parms.offset,
+				     io_parms.length,
 				     rc);
 		cifs_stats_fail_inc(tcon, SMB2_WRITE_HE);
 	}
 
 async_writev_out:
 	cifs_small_buf_release(req);
+	smb_put_message(smb);
 out:
 	/* if the send error is retryable, let netfs know about it */
 	if (is_replayable_error(rc) &&

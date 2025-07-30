@@ -287,16 +287,18 @@ int CIFS_SessSetup(const unsigned int xid, struct cifs_ses *ses,
 /*
  * smb1transport.c
  */
-struct smb_message *cifs_setup_async_request(struct TCP_Server_Info *server,
-					     struct smb_rqst *rqst);
+u16 cifs_get_next_mid(struct TCP_Server_Info *server);
+struct smb_message *cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr);
+bool cifs_is_network_name_deleted(const struct smb_hdr *shdr, struct TCP_Server_Info *server);
+int cifs_setup_async_request(struct TCP_Server_Info *server,
+			     struct smb_message *smb);
 int SendReceiveNoRsp(const unsigned int xid, struct cifs_ses *ses,
 		     char *in_buf, unsigned int in_len, int flags);
 int checkSMB(const struct TCP_Server_Info *server, struct cifs_receive *recv);
 int cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		       bool log_error);
-struct smb_message *cifs_setup_request(struct cifs_ses *ses,
-				       struct TCP_Server_Info *server,
-				       struct smb_rqst *rqst);
+int cifs_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
+		       struct smb_message *smb);
 int SendReceive2(const unsigned int xid, struct cifs_ses *ses,
 		 struct kvec *iov, int n_vec, int *resp_buf_type /* ret */,
 		 const int flags, struct kvec *resp_iov);
@@ -304,6 +306,7 @@ int SendReceive(const unsigned int xid, struct cifs_ses *ses,
 		struct smb_hdr *in_buf, unsigned int in_len,
 		struct smb_hdr *out_buf, int *pbytes_returned,
 		const int flags);
+int smb1_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
 
 #define GETU16(var)  (*((__u16 *)var))	/* BB check for endian issues */
 #define GETU32(var)  (*((__u32 *)var))	/* BB check for endian issues */
@@ -335,10 +338,6 @@ put_bcc(__u16 count, struct smb_hdr *hdr)
 
 	put_unaligned_le16(count, bc_ptr);
 }
-
-struct smb_message *cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr);
-bool cifs_is_network_name_deleted(const struct smb_hdr *shdr, struct TCP_Server_Info *server);
-int smb1_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
 
 #endif /* CONFIG_CIFS_ALLOW_INSECURE_LEGACY */
 

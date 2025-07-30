@@ -30,52 +30,18 @@
 #include "smbdirect.h"
 #include "compress.h"
 
-/* Max number of iovectors we can use off the stack when sending requests. */
-#define CIFS_MAX_IOV_SIZE 8
-
-static struct smb_message *
-alloc_mid(const struct smb_hdr *shdr, struct TCP_Server_Info *server)
+static int allocate_mid(struct cifs_ses *ses, struct smb_message *smb)
 {
-	struct smb_message *smb;
+	struct smb_hdr *hdr = smb->request;
+	u16 mid = cifs_get_next_mid(ses->server);
 
-	if (server == NULL) {
-		cifs_dbg(VFS, "%s: null TCP session\n", __func__);
-		return NULL;
-	}
+	smb->mid = mid;
+	hdr->Mid = cpu_to_le16(mid);
 
-	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
-	memset(smb, 0, sizeof(struct smb_message));
-	refcount_set(&smb->ref, 1);
-	spin_lock_init(&smb->mid_lock);
-	smb->mid	= le16_to_cpu(shdr->Mid);
-	smb->pid	= current->pid;
-	smb->command	= cpu_to_le16(shdr->Command);
-	cifs_dbg(FYI, "For smb_command %d\n", shdr->Command);
-	/* easier to use jiffies */
-	/* when mid allocated can be before when sent */
-	smb->when_alloc	= jiffies;
-
-	/*
-	 * The default is for the mid to be synchronous, so the
-	 * default callback just wakes up the current task.
-	 */
-	get_task_struct(current);
-	smb->creator = current;
-	smb->callback = cifs_wake_up_task;
-	smb->callback_data = current;
-
-	atomic_inc(&mid_count);
-	smb->mid_state = MID_REQUEST_ALLOCATED;
-	return smb;
-}
-
-static int allocate_mid(struct cifs_ses *ses, struct smb_hdr *in_buf,
-			struct smb_message **ppmidQ)
-{
 	spin_lock(&ses->ses_lock);
 	if (ses->ses_status == SES_NEW) {
-		if ((in_buf->Command != SMB_COM_SESSION_SETUP_ANDX) &&
-			(in_buf->Command != SMB_COM_NEGOTIATE)) {
+		if ((hdr->Command != SMB_COM_SESSION_SETUP_ANDX) &&
+		    (hdr->Command != SMB_COM_NEGOTIATE)) {
 			spin_unlock(&ses->ses_lock);
 			return -EAGAIN;
 		}
@@ -84,7 +50,7 @@ static int allocate_mid(struct cifs_ses *ses, struct smb_hdr *in_buf,
 
 	if (ses->ses_status == SES_EXITING) {
 		/* check if SMB session is bad because we are setting it up */
-		if (in_buf->Command != SMB_COM_LOGOFF_ANDX) {
+		if (hdr->Command != SMB_COM_LOGOFF_ANDX) {
 			spin_unlock(&ses->ses_lock);
 			return -EAGAIN;
 		}
@@ -92,37 +58,38 @@ static int allocate_mid(struct cifs_ses *ses, struct smb_hdr *in_buf,
 	}
 	spin_unlock(&ses->ses_lock);
 
-	*ppmidQ = alloc_mid(in_buf, ses->server);
-	if (*ppmidQ == NULL)
-		return -ENOMEM;
+	smb_get_message(smb);
 	spin_lock(&ses->server->mid_queue_lock);
-	list_add_tail(&(*ppmidQ)->qhead, &ses->server->pending_mid_q);
+	list_add_tail(&smb->qhead, &ses->server->pending_mid_q);
 	spin_unlock(&ses->server->mid_queue_lock);
 	return 0;
 }
 
-struct smb_message *
-cifs_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
+int
+cifs_setup_async_request(struct TCP_Server_Info *server, struct smb_message *smb)
 {
+	struct smb_hdr *shdr = smb->request;
+	u16 mid;
 	int rc;
-	struct smb_hdr *hdr = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
-	struct smb_message *smb;
 
 	/* enable signing if server requires it */
 	if (server->sign)
-		hdr->Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
+		shdr->Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
 
-	smb = alloc_mid(hdr, server);
-	if (smb == NULL)
-		return ERR_PTR(-ENOMEM);
+	mid = cifs_get_next_mid(server);
+	shdr->Mid = cpu_to_le16(mid);
+	smb->mid = mid;
+	smb->command = shdr->Command;
+	cifs_dbg(FYI, "For smb_command %d\n", smb->command);
+	atomic_inc(&mid_count);
 
-	rc = cifs_sign_rqst(rqst, server, &smb->sequence_number);
+	rc = cifs_sign_rqst(&smb->rqst, server, &smb->sequence_number);
 	if (rc) {
-		release_mid(server, smb);
-		return ERR_PTR(rc);
+		smb_put_message(smb);
+		return rc;
 	}
 
-	return smb;
+	return 0;
 }
 
 /*
@@ -179,23 +146,21 @@ cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 	return map_and_check_smb_error(server, smb, log_error);
 }
 
-struct smb_message *
+int
 cifs_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		   struct smb_rqst *rqst)
+		   struct smb_message *smb)
 {
 	int rc;
-	struct smb_hdr *hdr = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
-	struct smb_message *smb;
 
-	rc = allocate_mid(ses, hdr, &smb);
+	rc = allocate_mid(ses, smb);
 	if (rc)
-		return ERR_PTR(rc);
-	rc = cifs_sign_rqst(rqst, server, &smb->sequence_number);
+		return rc;
+	rc = cifs_sign_rqst(&smb->rqst, server, &smb->sequence_number);
 	if (rc) {
-		delete_mid(server, smb);
-		return ERR_PTR(rc);
+		dequeue_mid(server, smb, false);
+		return rc;
 	}
-	return smb;
+	return 0;
 }
 
 int
@@ -970,7 +935,7 @@ static void smb1_parse_one_message(struct TCP_Server_Info *server,
 			/* Handle multipart trans2-class messages. */
 			rc = smb1_trans2_receive(server, smb, recv, rxq);
 			if (rc == 1) {
-				release_mid(server, smb);
+				smb_put_message(smb);
 				return; /* Multipart, incomplete. */
 			}
 			if (rc < 0)
@@ -1044,7 +1009,7 @@ static void smb1_parse_one_message(struct TCP_Server_Info *server,
 		dequeue_mid(server, smb, recv->malformed);
 		mid_execute_callback(server, smb);
 
-		release_mid(server, smb);
+		smb_put_message(smb);
 	} else if (smb1_is_valid_oplock_break(h, recv->msg_len, server)) {
 		cifs_dbg(FYI, "Received oplock break\n");
 		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);

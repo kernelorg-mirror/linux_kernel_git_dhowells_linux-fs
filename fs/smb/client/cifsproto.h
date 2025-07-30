@@ -93,10 +93,8 @@ char *smb3_fs_context_fullpath(const struct smb3_fs_context *ctx, char dirsep);
 int smb3_parse_devname(const char *devname, struct smb3_fs_context *ctx);
 int cifs_ipaddr_cmp(struct sockaddr *srcaddr, struct sockaddr *rhs);
 bool cifs_match_ipaddr(struct sockaddr *srcaddr, struct sockaddr *rhs);
-int cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
-		    mid_callback_t callback, void *cbdata, const int flags,
-		    const struct cifs_credits *exist_credits,
-		    struct iov_iter *resp_buf);
+int cifs_call_async(struct TCP_Server_Info *server, struct smb_message *smb,
+		    const int flags, const struct cifs_credits *exist_credits);
 struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses);
 int cifs_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		   struct TCP_Server_Info *server, struct smb_rqst *rqst,
@@ -115,11 +113,10 @@ int cifs_wait_mtu_credits(struct TCP_Server_Info *server, size_t size,
 
 static inline int
 send_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-	    struct smb_rqst *rqst, struct smb_message *smb,
-	    unsigned int xid)
+	    struct smb_message *smb, unsigned int xid)
 {
 	return server->ops->send_cancel ?
-		server->ops->send_cancel(ses, server, rqst, smb, xid) : 0;
+		server->ops->send_cancel(ses, server, smb, xid) : 0;
 }
 
 int wait_for_response(struct TCP_Server_Info *server, struct smb_message *smb);
@@ -466,12 +463,6 @@ static inline bool dfs_src_pathname_equal(const char *s1, const char *s2)
 	return true;
 }
 
-static inline void release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
-{
-	if (refcount_dec_and_test(&smb->ref))
-		__release_mid(server, smb);
-}
-
 static inline void cifs_free_open_info(struct cifs_open_info_data *data)
 {
 	kfree(data->symlink_target);
@@ -495,94 +486,6 @@ static inline int smb_EIO2(enum smb_eio_trace trace, unsigned long info, unsigne
 {
 	trace_smb3_eio(trace, info, info2);
 	return -EIO;
-}
-
-static inline int cifs_get_num_sgs(const struct smb_rqst *rqst,
-				   int num_rqst,
-				   const u8 *sig)
-{
-	unsigned int len, skip;
-	unsigned int nents = 0;
-	unsigned long addr;
-	size_t data_size;
-	int i, j;
-
-	/*
-	 * The first rqst has a transform header where the first 20 bytes are
-	 * not part of the encrypted blob.
-	 */
-	skip = 20;
-
-	/* Assumes the first rqst has a transform header as the first iov.
-	 * I.e.
-	 * rqst[0].rq_iov[0]  is transform header
-	 * rqst[0].rq_iov[1+] data to be encrypted/decrypted
-	 * rqst[1+].rq_iov[0+] data to be encrypted/decrypted
-	 */
-	for (i = 0; i < num_rqst; i++) {
-		data_size = iov_iter_count(&rqst[i].rq_iter);
-
-		/* We really don't want a mixture of pinned and unpinned pages
-		 * in the sglist.  It's hard to keep track of which is what.
-		 * Instead, we convert to a BVEC-type iterator higher up.
-		 */
-		if (data_size &&
-		    WARN_ON_ONCE(user_backed_iter(&rqst[i].rq_iter)))
-			return smb_EIO(smb_eio_trace_user_iter);
-
-		/* We also don't want to have any extra refs or pins to clean
-		 * up in the sglist.
-		 */
-		if (data_size &&
-		    WARN_ON_ONCE(iov_iter_extract_will_pin(&rqst[i].rq_iter)))
-			return smb_EIO(smb_eio_trace_extract_will_pin);
-
-		for (j = 0; j < rqst[i].rq_nvec; j++) {
-			struct kvec *iov = &rqst[i].rq_iov[j];
-
-			addr = (unsigned long)iov->iov_base + skip;
-			if (is_vmalloc_or_module_addr((void *)addr)) {
-				len = iov->iov_len - skip;
-				nents += DIV_ROUND_UP(offset_in_page(addr) + len,
-						      PAGE_SIZE);
-			} else {
-				nents++;
-			}
-			skip = 0;
-		}
-		if (data_size)
-			nents += iov_iter_npages(&rqst[i].rq_iter, INT_MAX);
-	}
-	nents += DIV_ROUND_UP(offset_in_page(sig) + SMB2_SIGNATURE_SIZE, PAGE_SIZE);
-	return nents;
-}
-
-/* We can not use the normal sg_set_buf() as we will sometimes pass a
- * stack object as buf.
- */
-static inline void cifs_sg_set_buf(struct sg_table *sgtable,
-				   const void *buf,
-				   unsigned int buflen)
-{
-	unsigned long addr = (unsigned long)buf;
-	unsigned int off = offset_in_page(addr);
-
-	addr &= PAGE_MASK;
-	if (is_vmalloc_or_module_addr((void *)addr)) {
-		do {
-			unsigned int len = min_t(unsigned int, buflen, PAGE_SIZE - off);
-
-			sg_set_page(&sgtable->sgl[sgtable->nents++],
-				    vmalloc_to_page((void *)addr), len, off);
-
-			off = 0;
-			addr += PAGE_SIZE;
-			buflen -= len;
-		} while (buflen);
-	} else {
-		sg_set_page(&sgtable->sgl[sgtable->nents++],
-			    virt_to_page((void *)addr), buflen, off);
-	}
 }
 
 static inline int cifs_get_writable_file(struct cifsInodeInfo *cifs_inode,

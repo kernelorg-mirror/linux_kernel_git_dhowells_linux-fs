@@ -21,7 +21,31 @@
  * Specify enums for tracing information.
  */
 #define smb_command_traces \
-	E_(smb_unknown_command,				"unknown-command")
+	EM(smb2_command_trace_negotiate,	"smb2-negotiate") \
+	EM(smb2_command_trace_session_setup,	"smb2-session_setup") \
+	EM(smb2_command_trace_logoff,		"smb2-logoff") \
+	EM(smb2_command_trace_tree_connect,	"smb2-tree_connect") \
+	EM(smb2_command_trace_tree_disconnect,	"smb2-tree_disconnect") \
+	EM(smb2_command_trace_create,		"smb2-create") \
+	EM(smb2_command_trace_close,		"smb2-close") \
+	EM(smb2_command_trace_flush,		"smb2-flush") \
+	EM(smb2_command_trace_read,		"smb2-read") \
+	EM(smb2_command_trace_write,		"smb2-write") \
+	EM(smb2_command_trace_lock,		"smb2-lock") \
+	EM(smb2_command_trace_ioctl,		"smb2-ioctl") \
+	EM(smb2_command_trace_cancel,		"smb2-cancel") \
+	EM(smb2_command_trace_echo,		"smb2-echo") \
+	EM(smb2_command_trace_query_directory,	"smb2-query_directory") \
+	EM(smb2_command_trace_change_notify,	"smb2-change_notify") \
+	EM(smb2_command_trace_query_info,	"smb2-query_info") \
+	EM(smb2_command_trace_set_info,		"smb2-set_info") \
+	EM(smb2_command_trace_oplock_break,	"smb2-oplock_break") \
+	EM(smb2_command_trace_s2c_notification,	"smb2-s2c-notification") \
+	EM(smb1_command_trace_read,		"smb1-read") \
+	EM(smb1_command_trace_write,		"smb1-write") \
+	EM(smb1_command_trace_echo,		"smb1-echo") \
+	EM(smb1_command_trace_unknown,		"smb1-unknown") \
+	E_(smb_command_trace_unknown,		"unknown-command")
 
 #define smb_eio_traces \
 	EM(smb_eio_trace_compress_copy,			"compress_copy") \

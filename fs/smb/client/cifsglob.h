@@ -313,18 +313,16 @@ struct cifs_credits;
 
 struct smb_version_operations {
 	int (*send_cancel)(struct cifs_ses *ses, struct TCP_Server_Info *server,
-			   struct smb_rqst *rqst, struct smb_message *smb,
-			   unsigned int xid);
+			   struct smb_message *smb, unsigned int xid);
 	bool (*compare_fids)(struct cifsFileInfo *, struct cifsFileInfo *);
-	/* setup request: allocate mid, sign message */
-	struct smb_message *(*setup_request)(struct cifs_ses *ses,
-					     struct TCP_Server_Info *server,
-					     struct smb_rqst *rqst);
+	/* setup request: set up mid, sign message */
+	int (*setup_request)(struct cifs_ses *ses,
+			     struct TCP_Server_Info *server,
+			     struct smb_message *smb);
 	/* setup async request: allocate mid, sign message */
-	struct smb_message *(*setup_async_request)(struct TCP_Server_Info *server,
-						   struct smb_rqst *rqst);
+	int (*setup_async_request)(struct TCP_Server_Info *server, struct smb_message *smb);
 	/* check response: verify signature, map error */
-	int (*check_receive)(struct smb_message *mid, struct TCP_Server_Info *server,
+	int (*check_receive)(struct smb_message *smb, struct TCP_Server_Info *server,
 			     bool log_error);
 	void (*add_credits)(struct TCP_Server_Info *server,
 			    struct cifs_credits *credits,
@@ -332,7 +330,6 @@ struct smb_version_operations {
 	void (*set_credits)(struct TCP_Server_Info *, const int);
 	int * (*get_credits_field)(struct TCP_Server_Info *, const int);
 	unsigned int (*get_credits)(struct smb_message *smb);
-	__u64 (*get_next_mid)(struct TCP_Server_Info *);
 	void (*revert_current_mid)(struct TCP_Server_Info *server,
 				   const unsigned int val);
 	/* Finish receiving a PDU and decrypt and decompress and parse it. */
@@ -572,10 +569,8 @@ struct smb_version_operations {
 	long (*fallocate)(struct file *, struct cifs_tcon *, int, loff_t,
 			  loff_t);
 	/* init transform (compress/encrypt) request */
-	int (*init_transform_rq)(struct TCP_Server_Info *server,
-				 int num_rqst, const struct smb_rqst *rqst,
-				 struct smb2_transform_hdr *tr_hdr,
-				 struct iov_iter *iter);
+	int (*init_transform_rq)(struct TCP_Server_Info *server, struct smb_message *head_smb,
+				 struct smb2_transform_hdr *tr_hdr, struct iov_iter *iter);
 	enum securityEnum (*select_sectype)(struct TCP_Server_Info *,
 			    enum securityEnum);
 	int (*next_header)(struct TCP_Server_Info *server, char *buf,
@@ -899,23 +894,6 @@ adjust_credits(struct TCP_Server_Info *server, struct cifs_io_subrequest *subreq
 {
 	return server->ops->adjust_credits ?
 		server->ops->adjust_credits(server, subreq, trace) : 0;
-}
-
-static inline __le64
-get_next_mid64(struct TCP_Server_Info *server)
-{
-	return cpu_to_le64(server->ops->get_next_mid(server));
-}
-
-static inline __le16
-get_next_mid(struct TCP_Server_Info *server)
-{
-	__u16 mid = server->ops->get_next_mid(server);
-	/*
-	 * The value in the SMB header should be little endian for easy
-	 * on-the-wire decoding.
-	 */
-	return cpu_to_le16(mid);
 }
 
 static inline void
@@ -1941,7 +1919,6 @@ enum cifs_find_flags {
 #define   CIFS_COMPRESS_REQ       0x4000 /* compress request before sending */
 #define   CIFS_INTERRUPTIBLE_WAIT 0x8000 /* Interruptible wait (e.g. lock request) */
 #define   CIFS_WINDOWS_LOCK       0x10000 /* We're trying to get a Windows lock */
-#define   CIFS_WRITEBACK	  0x20000 /* We're doing writeback */
 
 /* Security Flags: indicate type of session setup needed */
 #define   CIFSSEC_MAY_SIGN	0x00001
