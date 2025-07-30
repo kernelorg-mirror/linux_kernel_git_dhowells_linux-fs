@@ -590,7 +590,7 @@ static struct smb2_create_ea_ctx *ea_create_context(u32 dlen, size_t *cc_len)
 {
 	struct smb2_create_ea_ctx *cc;
 
-	*cc_len = round_up(sizeof(*cc) + dlen, 8);
+	*cc_len = ALIGN8(sizeof(*cc) + dlen);
 	cc = kzalloc(*cc_len, GFP_KERNEL);
 	if (!cc)
 		return ERR_PTR(-ENOMEM);

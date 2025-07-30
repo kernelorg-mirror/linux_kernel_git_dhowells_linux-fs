@@ -271,7 +271,7 @@ smb2_check_message(char *buf, unsigned int pdu_len, unsigned int len,
 		 * Some windows servers (win2016) will pad also the final
 		 * PDU in a compound to 8 bytes.
 		 */
-		if (ALIGN(calc_len, 8) == len)
+		if (ALIGN8(calc_len) == len)
 			return 0;
 
 		/*

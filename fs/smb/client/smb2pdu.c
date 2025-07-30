@@ -658,14 +658,14 @@ build_signing_ctxt(struct smb2_signing_capabilities *pneg_ctxt)
 	/*
 	 * Context Data length must be rounded to multiple of 8 for some servers
 	 */
-	pneg_ctxt->DataLength = cpu_to_le16(ALIGN(sizeof(struct smb2_signing_capabilities) -
+	pneg_ctxt->DataLength = cpu_to_le16(ALIGN8(sizeof(struct smb2_signing_capabilities) -
 					    sizeof(struct smb2_neg_context) +
-					    (num_algs * sizeof(u16)), 8));
+					    (num_algs * sizeof(u16))));
 	pneg_ctxt->SigningAlgorithmCount = cpu_to_le16(num_algs);
 	pneg_ctxt->SigningAlgorithms[0] = cpu_to_le16(SIGNING_ALG_AES_CMAC);
 
 	ctxt_len += sizeof(__le16) * num_algs;
-	ctxt_len = ALIGN(ctxt_len, 8);
+	ctxt_len = ALIGN8(ctxt_len);
 	return ctxt_len;
 	/* TBD add SIGNING_ALG_AES_GMAC and/or SIGNING_ALG_HMAC_SHA256 */
 }
@@ -702,7 +702,7 @@ build_netname_ctxt(struct smb2_netname_neg_context *pneg_ctxt, char *hostname)
 	/* copy up to max of first 100 bytes of server name to NetName field */
 	pneg_ctxt->DataLength = cpu_to_le16(2 * cifs_strtoUTF16(pneg_ctxt->NetName, hostname, 100, cp));
 	/* context size is DataLength + minimal smb2_neg_context */
-	return ALIGN(le16_to_cpu(pneg_ctxt->DataLength) + sizeof(struct smb2_neg_context), 8);
+	return ALIGN8(le16_to_cpu(pneg_ctxt->DataLength) + sizeof(struct smb2_neg_context));
 }
 
 static void
@@ -748,18 +748,18 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 	 * round up total_len of fixed part of SMB3 negotiate request to 8
 	 * byte boundary before adding negotiate contexts
 	 */
-	*total_len = ALIGN(*total_len, 8);
+	*total_len = ALIGN8(*total_len);
 
 	pneg_ctxt = (*total_len) + (char *)req;
 	req->NegotiateContextOffset = cpu_to_le32(*total_len);
 
 	build_preauth_ctxt((struct smb2_preauth_neg_context *)pneg_ctxt);
-	ctxt_len = ALIGN(sizeof(struct smb2_preauth_neg_context), 8);
+	ctxt_len = ALIGN8(sizeof(struct smb2_preauth_neg_context));
 	*total_len += ctxt_len;
 	pneg_ctxt += ctxt_len;
 
 	build_encrypt_ctxt((struct smb2_encryption_neg_context *)pneg_ctxt);
-	ctxt_len = ALIGN(sizeof(struct smb2_encryption_neg_context), 8);
+	ctxt_len = ALIGN8(sizeof(struct smb2_encryption_neg_context));
 	*total_len += ctxt_len;
 	pneg_ctxt += ctxt_len;
 
@@ -788,7 +788,7 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 	if (server->compression.requested) {
 		build_compression_ctxt((struct smb2_compression_capabilities_context *)
 				pneg_ctxt);
-		ctxt_len = ALIGN(sizeof(struct smb2_compression_capabilities_context), 8);
+		ctxt_len = ALIGN8(sizeof(struct smb2_compression_capabilities_context));
 		*total_len += ctxt_len;
 		pneg_ctxt += ctxt_len;
 		neg_context_count++;
@@ -999,7 +999,7 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 		 * aligned offset following the previous negotiate context.
 		 */
 		if (i + 1 != ctxt_cnt)
-			clen = ALIGN(clen, 8);
+			clen = ALIGN8(clen);
 		if (clen > len_of_ctxts)
 			break;
 
@@ -2727,7 +2727,7 @@ create_sd_buf(umode_t mode, bool set_owner, unsigned int *len)
 	unsigned int group_offset = 0;
 	struct smb3_acl acl = {};
 
-	*len = round_up(sizeof(struct crt_sd_ctxt) + (sizeof(struct smb_ace) * 4), 8);
+	*len = ALIGN8(sizeof(struct crt_sd_ctxt) + (sizeof(struct smb_ace) * 4));
 
 	if (set_owner) {
 		/* sizeof(struct owner_group_sids) is already multiple of 8 so no need to round */
@@ -2802,7 +2802,7 @@ create_sd_buf(umode_t mode, bool set_owner, unsigned int *len)
 	memcpy(aclptr, &acl, sizeof(struct smb3_acl));
 
 	buf->ccontext.DataLength = cpu_to_le32(ptr - (__u8 *)&buf->sd);
-	*len = round_up((unsigned int)(ptr - (__u8 *)buf), 8);
+	*len = ALIGN8((unsigned int)(ptr - (__u8 *)buf));
 
 	return buf;
 }
@@ -2895,7 +2895,7 @@ alloc_path_with_tree_prefix(__le16 **out_path, int *out_size, int *out_len,
 	 * final path needs to be 8-byte aligned as specified in
 	 * MS-SMB2 2.2.13 SMB2 CREATE Request.
 	 */
-	*out_size = round_up(*out_len * sizeof(__le16), 8);
+	*out_size = ALIGN8(*out_len * sizeof(__le16));
 	*out_path = kzalloc(*out_size + sizeof(__le16) /* null */, GFP_KERNEL);
 	if (!*out_path)
 		return -ENOMEM;
@@ -3166,7 +3166,7 @@ SMB2_open_init(struct cifs_tcon *tcon, struct TCP_Server_Info *server,
 		uni_path_len = (2 * UniStrnlen((wchar_t *)path, PATH_MAX)) + 2;
 		/* MUST set path len (NameLength) to 0 opening root of share */
 		req->NameLength = cpu_to_le16(uni_path_len - 2);
-		copy_size = round_up(uni_path_len, 8);
+		copy_size = ALIGN8(uni_path_len);
 		copy_path = kzalloc(copy_size, GFP_KERNEL);
 		if (!copy_path)
 			return -ENOMEM;
@@ -4619,7 +4619,7 @@ smb2_new_read_req(void **buf, unsigned int *total_len,
 	if (request_type & CHAINED_REQUEST) {
 		if (!(request_type & END_OF_CHAIN)) {
 			/* next 8-byte aligned request */
-			*total_len = ALIGN(*total_len, 8);
+			*total_len = ALIGN8(*total_len);
 			shdr->NextCommand = cpu_to_le32(*total_len);
 		} else /* END_OF_CHAIN */
 			shdr->NextCommand = 0;

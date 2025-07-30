@@ -2401,4 +2401,6 @@ static inline int cifs_open_create_options(unsigned int oflags, int opts)
 	DIV_ROUND_UP_ULL((u64)(size), CIFS_INO_BLOCK_SIZE)
 #define CIFS_INO_BYTES(blocks) ((u64)(blocks) * CIFS_INO_BLOCK_SIZE)
 
+#define ALIGN8(x) ALIGN((x), 8)
+
 #endif	/* _CIFS_GLOB_H */
