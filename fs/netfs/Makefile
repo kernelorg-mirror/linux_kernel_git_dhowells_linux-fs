@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
 netfs-y := \
+	buffer.o \
 	buffered_read.o \
 	buffered_write.o \
 	direct_read.o \

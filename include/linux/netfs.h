@@ -23,6 +23,7 @@
 enum netfs_sreq_ref_trace;
 typedef struct mempool_s mempool_t;
 struct folio_queue;
+struct bvecq;
 
 /**
  * folio_start_private_2 - Start an fscache write on a folio.  [DEPRECATED]
@@ -462,6 +463,9 @@ int netfs_alloc_folioq_buffer(struct address_space *mapping,
 			      struct folio_queue **_buffer,
 			      size_t *_cur_size, ssize_t size, gfp_t gfp);
 void netfs_free_folioq_buffer(struct folio_queue *fq);
+void dump_bvecq(const struct bvecq *bq);
+struct bvecq *netfs_alloc_bvecq_buffer(size_t size, unsigned int pre_slots, gfp_t gfp);
+void netfs_free_bvecq_buffer(struct bvecq *bq);
 
 /**
  * netfs_inode - Get the netfs inode context from the inode
