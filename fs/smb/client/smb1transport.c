@@ -33,44 +33,44 @@
 /* Max number of iovectors we can use off the stack when sending requests. */
 #define CIFS_MAX_IOV_SIZE 8
 
-static struct mid_q_entry *
+static struct smb_message *
 alloc_mid(const struct smb_hdr *smb_buffer, struct TCP_Server_Info *server)
 {
-	struct mid_q_entry *temp;
+	struct smb_message *smb;
 
 	if (server == NULL) {
 		cifs_dbg(VFS, "%s: null TCP session\n", __func__);
 		return NULL;
 	}
 
-	temp = mempool_alloc(&cifs_mid_pool, GFP_NOFS);
-	memset(temp, 0, sizeof(struct mid_q_entry));
-	refcount_set(&temp->refcount, 1);
-	spin_lock_init(&temp->mid_lock);
-	temp->mid = get_mid(smb_buffer);
-	temp->pid = current->pid;
-	temp->command = cpu_to_le16(smb_buffer->Command);
+	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
+	memset(smb, 0, sizeof(struct smb_message));
+	refcount_set(&smb->refcount, 1);
+	spin_lock_init(&smb->mid_lock);
+	smb->mid = get_mid(smb_buffer);
+	smb->pid = current->pid;
+	smb->command = cpu_to_le16(smb_buffer->Command);
 	cifs_dbg(FYI, "For smb_command %d\n", smb_buffer->Command);
 	/* easier to use jiffies */
 	/* when mid allocated can be before when sent */
-	temp->when_alloc = jiffies;
+	smb->when_alloc = jiffies;
 
 	/*
 	 * The default is for the mid to be synchronous, so the
 	 * default callback just wakes up the current task.
 	 */
 	get_task_struct(current);
-	temp->creator = current;
-	temp->callback = cifs_wake_up_task;
-	temp->callback_data = current;
+	smb->creator = current;
+	smb->callback = cifs_wake_up_task;
+	smb->callback_data = current;
 
 	atomic_inc(&mid_count);
-	temp->mid_state = MID_REQUEST_ALLOCATED;
-	return temp;
+	smb->mid_state = MID_REQUEST_ALLOCATED;
+	return smb;
 }
 
 static int allocate_mid(struct cifs_ses *ses, struct smb_hdr *in_buf,
-			struct mid_q_entry **ppmidQ)
+			struct smb_message **ppmidQ)
 {
 	spin_lock(&ses->ses_lock);
 	if (ses->ses_status == SES_NEW) {
@@ -101,28 +101,28 @@ static int allocate_mid(struct cifs_ses *ses, struct smb_hdr *in_buf,
 	return 0;
 }
 
-struct mid_q_entry *
+struct smb_message *
 cifs_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 {
 	int rc;
 	struct smb_hdr *hdr = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 
 	/* enable signing if server requires it */
 	if (server->sign)
 		hdr->Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
 
-	mid = alloc_mid(hdr, server);
-	if (mid == NULL)
+	smb = alloc_mid(hdr, server);
+	if (smb == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	rc = cifs_sign_rqst(rqst, server, &mid->sequence_number);
+	rc = cifs_sign_rqst(rqst, server, &smb->sequence_number);
 	if (rc) {
-		release_mid(server, mid);
+		release_mid(server, smb);
 		return ERR_PTR(rc);
 	}
 
-	return mid;
+	return smb;
 }
 
 /*
@@ -153,12 +153,12 @@ SendReceiveNoRsp(const unsigned int xid, struct cifs_ses *ses,
 }
 
 int
-cifs_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		   bool log_error)
 {
-	unsigned int len = mid->response_pdu_len;
+	unsigned int len = smb->response_pdu_len;
 
-	dump_smb(mid->resp_buf, min_t(u32, 92, len));
+	dump_smb(smb->resp_buf, min_t(u32, 92, len));
 
 	/* convert the length into a more usable form */
 	if (server->sign) {
@@ -167,11 +167,11 @@ cifs_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 		struct smb_rqst rqst = { .rq_iov = iov,
 					 .rq_nvec = ARRAY_SIZE(iov) };
 
-		iov[0].iov_base = mid->resp_buf;
+		iov[0].iov_base = smb->resp_buf;
 		iov[0].iov_len = len;
 
 		rc = cifs_verify_signature(&rqst, server,
-					   mid->sequence_number);
+					   smb->sequence_number);
 		if (rc) {
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
 				 rc);
@@ -184,26 +184,26 @@ cifs_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 	}
 
 	/* BB special case reconnect tid and uid here? */
-	return map_and_check_smb_error(server, mid, log_error);
+	return map_and_check_smb_error(server, smb, log_error);
 }
 
-struct mid_q_entry *
+struct smb_message *
 cifs_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		   struct smb_rqst *rqst)
 {
 	int rc;
 	struct smb_hdr *hdr = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 
-	rc = allocate_mid(ses, hdr, &mid);
+	rc = allocate_mid(ses, hdr, &smb);
 	if (rc)
 		return ERR_PTR(rc);
-	rc = cifs_sign_rqst(rqst, server, &mid->sequence_number);
+	rc = cifs_sign_rqst(rqst, server, &smb->sequence_number);
 	if (rc) {
-		delete_mid(server, mid);
+		delete_mid(server, smb);
 		return ERR_PTR(rc);
 	}
-	return mid;
+	return smb;
 }
 
 int
@@ -427,22 +427,22 @@ coalesce_t2(char *second_buf, struct smb_hdr *target_hdr, unsigned int *pdu_len)
 }
 
 bool
-cifs_check_trans2(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+cifs_check_trans2(struct smb_message *smb, struct TCP_Server_Info *server,
 		  char *buf, int malformed)
 {
 	if (malformed)
 		return false;
 	if (check2ndT2(buf) <= 0)
 		return false;
-	mid->multiRsp = true;
-	if (mid->resp_buf) {
+	smb->multiRsp = true;
+	if (smb->resp_buf) {
 		/* merge response - fix up 1st*/
-		malformed = coalesce_t2(buf, mid->resp_buf, &mid->response_pdu_len);
+		malformed = coalesce_t2(buf, smb->resp_buf, &smb->response_pdu_len);
 		if (malformed > 0)
 			return true;
 		/* All parts received or packet is malformed. */
-		mid->multiEnd = true;
-		dequeue_mid(server, mid, malformed);
+		smb->multiEnd = true;
+		dequeue_mid(server, smb, malformed);
 		return true;
 	}
 	if (!server->large_buf) {
@@ -450,8 +450,8 @@ cifs_check_trans2(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 		cifs_dbg(VFS, "1st trans2 resp needs bigbuf\n");
 	} else {
 		/* Have first buffer */
-		mid->resp_buf = buf;
-		mid->large_buf = true;
+		smb->resp_buf = buf;
+		smb->large_buf = true;
 		server->bigbuf = NULL;
 	}
 	return true;

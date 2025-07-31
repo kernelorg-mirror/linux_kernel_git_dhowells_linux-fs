@@ -175,16 +175,16 @@ map_smb_to_linux_error(char *buf, bool logErr)
 
 int
 map_and_check_smb_error(struct TCP_Server_Info *server,
-			struct mid_q_entry *mid, bool logErr)
+			struct smb_message *smb, bool logErr)
 {
 	int rc;
-	struct smb_hdr *smb = (struct smb_hdr *)mid->resp_buf;
+	struct smb_hdr *rhdr = (struct smb_hdr *)smb->resp_buf;
 
-	rc = map_smb_to_linux_error((char *)smb, logErr);
-	if (rc == -EACCES && !(smb->Flags2 & SMBFLG2_ERR_STATUS)) {
+	rc = map_smb_to_linux_error((char *)rhdr, logErr);
+	if (rc == -EACCES && !(rhdr->Flags2 & SMBFLG2_ERR_STATUS)) {
 		/* possible ERRBaduid */
-		__u8 class = smb->Status.DosError.ErrorClass;
-		__u16 code = le16_to_cpu(smb->Status.DosError.Error);
+		__u8 class = rhdr->Status.DosError.ErrorClass;
+		__u16 code = le16_to_cpu(rhdr->Status.DosError.Error);
 
 		/* switch can be used to handle different errors */
 		if (class == ERRSRV && code == ERRbaduid) {

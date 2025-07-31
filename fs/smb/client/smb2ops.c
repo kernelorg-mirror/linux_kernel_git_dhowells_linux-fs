@@ -236,9 +236,9 @@ smb2_get_credits_field(struct TCP_Server_Info *server, const int optype)
 }
 
 static unsigned int
-smb2_get_credits(struct mid_q_entry *mid)
+smb2_get_credits(struct smb_message *smb)
 {
-	return mid->credits_received;
+	return smb->credits_received;
 }
 
 static int
@@ -399,10 +399,10 @@ smb2_revert_current_mid(struct TCP_Server_Info *server, const unsigned int val)
 	spin_unlock(&server->mid_counter_lock);
 }
 
-static struct mid_q_entry *
+static struct smb_message *
 __smb2_find_mid(struct TCP_Server_Info *server, char *buf, bool dequeue)
 {
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	__u64 wire_mid = le64_to_cpu(shdr->MessageId);
 
@@ -412,30 +412,30 @@ __smb2_find_mid(struct TCP_Server_Info *server, char *buf, bool dequeue)
 	}
 
 	spin_lock(&server->mid_queue_lock);
-	list_for_each_entry(mid, &server->pending_mid_q, qhead) {
-		if ((mid->mid == wire_mid) &&
-		    (mid->mid_state == MID_REQUEST_SUBMITTED) &&
-		    (mid->command == shdr->Command)) {
-			smb_get_mid(mid);
+	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
+		if ((smb->mid == wire_mid) &&
+		    (smb->mid_state == MID_REQUEST_SUBMITTED) &&
+		    (smb->command == shdr->Command)) {
+			smb_get_mid(smb);
 			if (dequeue) {
-				list_del_init(&mid->qhead);
-				mid->deleted_from_q = true;
+				list_del_init(&smb->qhead);
+				smb->deleted_from_q = true;
 			}
 			spin_unlock(&server->mid_queue_lock);
-			return mid;
+			return smb;
 		}
 	}
 	spin_unlock(&server->mid_queue_lock);
 	return NULL;
 }
 
-static struct mid_q_entry *
+static struct smb_message *
 smb2_find_mid(struct TCP_Server_Info *server, char *buf)
 {
 	return __smb2_find_mid(server, buf, false);
 }
 
-static struct mid_q_entry *
+static struct smb_message *
 smb2_find_dequeue_mid(struct TCP_Server_Info *server, char *buf)
 {
 	return __smb2_find_mid(server, buf, true);
@@ -4873,7 +4873,7 @@ cifs_copy_bvecq_to_iter(struct bvecq *bq, size_t data_size,
 }
 
 static int
-handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
+handle_read_data(struct TCP_Server_Info *server, struct smb_message *smb,
 		 char *buf, unsigned int buf_len, struct bvecq *buffer,
 		 unsigned int buffer_len, bool is_offloaded)
 {
@@ -4883,7 +4883,7 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 	unsigned int cur_off;
 	unsigned int cur_page_idx;
 	unsigned int pad_len;
-	struct cifs_io_subrequest *rdata = mid->callback_data;
+	struct cifs_io_subrequest *rdata = smb->callback_data;
 	struct iov_iter iter;
 	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	size_t copied;
@@ -4922,9 +4922,9 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 			 __func__, rdata->result);
 		/* normal error on read response */
 		if (is_offloaded)
-			mid->mid_state = MID_RESPONSE_RECEIVED;
+			smb->mid_state = MID_RESPONSE_RECEIVED;
 		else
-			dequeue_mid(server, mid, false);
+			dequeue_mid(server, smb, false);
 		return 0;
 	}
 
@@ -4949,9 +4949,9 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 			 __func__, data_offset);
 		rdata->result = smb_EIO1(smb_eio_trace_rx_overlong, data_offset);
 		if (is_offloaded)
-			mid->mid_state = MID_RESPONSE_MALFORMED;
+			smb->mid_state = MID_RESPONSE_MALFORMED;
 		else
-			dequeue_mid(server, mid, rdata->result);
+			dequeue_mid(server, smb, rdata->result);
 		return 0;
 	}
 
@@ -4972,9 +4972,9 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 				 __func__, data_offset);
 			rdata->result = smb_EIO1(smb_eio_trace_rx_overpage, data_offset);
 			if (is_offloaded)
-				mid->mid_state = MID_RESPONSE_MALFORMED;
+				smb->mid_state = MID_RESPONSE_MALFORMED;
 			else
-				dequeue_mid(server, mid, rdata->result);
+				dequeue_mid(server, smb, rdata->result);
 			return 0;
 		}
 
@@ -4982,9 +4982,9 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 			/* data_len is corrupt -- discard frame */
 			rdata->result = smb_EIO1(smb_eio_trace_rx_bad_datalen, data_len);
 			if (is_offloaded)
-				mid->mid_state = MID_RESPONSE_MALFORMED;
+				smb->mid_state = MID_RESPONSE_MALFORMED;
 			else
-				dequeue_mid(server, mid, rdata->result);
+				dequeue_mid(server, smb, rdata->result);
 			return 0;
 		}
 
@@ -4993,9 +4993,9 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 							cur_off, &iter);
 		if (rdata->result != 0) {
 			if (is_offloaded)
-				mid->mid_state = MID_RESPONSE_MALFORMED;
+				smb->mid_state = MID_RESPONSE_MALFORMED;
 			else
-				dequeue_mid(server, mid, rdata->result);
+				dequeue_mid(server, smb, rdata->result);
 			return 0;
 		}
 		rdata->got_bytes = data_len;
@@ -5013,16 +5013,16 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 		WARN_ONCE(1, "buf can not contain only a part of read data");
 		rdata->result = smb_EIO(smb_eio_trace_rx_both_buf);
 		if (is_offloaded)
-			mid->mid_state = MID_RESPONSE_MALFORMED;
+			smb->mid_state = MID_RESPONSE_MALFORMED;
 		else
-			dequeue_mid(server, mid, rdata->result);
+			dequeue_mid(server, smb, rdata->result);
 		return 0;
 	}
 
 	if (is_offloaded)
-		mid->mid_state = MID_RESPONSE_RECEIVED;
+		smb->mid_state = MID_RESPONSE_RECEIVED;
 	else
-		dequeue_mid(server, mid, false);
+		dequeue_mid(server, smb, false);
 	return 0;
 }
 
@@ -5040,7 +5040,7 @@ static void smb2_decrypt_offload(struct work_struct *work)
 	struct smb2_decrypt_work *dw = container_of(work,
 				struct smb2_decrypt_work, decrypt);
 	int rc;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 	struct iov_iter iter;
 
 	iov_iter_bvec_queue(&iter, ITER_DEST, dw->buffer, 0, 0, dw->len);
@@ -5052,43 +5052,43 @@ static void smb2_decrypt_offload(struct work_struct *work)
 	}
 
 	dw->server->lstrp = jiffies;
-	mid = smb2_find_dequeue_mid(dw->server, dw->buf);
-	if (mid == NULL)
+	smb = smb2_find_dequeue_mid(dw->server, dw->buf);
+	if (smb == NULL)
 		cifs_dbg(FYI, "mid not found\n");
 	else {
-		mid->decrypted = true;
-		rc = handle_read_data(dw->server, mid, dw->buf,
+		smb->decrypted = true;
+		rc = handle_read_data(dw->server, smb, dw->buf,
 				      dw->server->vals->read_rsp_size,
 				      dw->buffer, dw->len,
 				      true);
 		if (rc >= 0) {
 #ifdef CONFIG_CIFS_STATS2
-			mid->when_received = jiffies;
+			smb->when_received = jiffies;
 #endif
 			if (dw->server->ops->is_network_name_deleted)
 				dw->server->ops->is_network_name_deleted(dw->buf,
 									 dw->server);
 
-			mid_execute_callback(dw->server, mid);
+			mid_execute_callback(dw->server, smb);
 		} else {
 			spin_lock(&dw->server->srv_lock);
 			if (dw->server->tcpStatus == CifsNeedReconnect) {
 				spin_lock(&dw->server->mid_queue_lock);
-				mid->mid_state = MID_RETRY_NEEDED;
+				smb->mid_state = MID_RETRY_NEEDED;
 				spin_unlock(&dw->server->mid_queue_lock);
 				spin_unlock(&dw->server->srv_lock);
-				mid_execute_callback(dw->server, mid);
+				mid_execute_callback(dw->server, smb);
 			} else {
 				spin_lock(&dw->server->mid_queue_lock);
-				mid->mid_state = MID_REQUEST_SUBMITTED;
-				mid->deleted_from_q = false;
-				list_add_tail(&mid->qhead,
+				smb->mid_state = MID_REQUEST_SUBMITTED;
+				smb->deleted_from_q = false;
+				list_add_tail(&smb->qhead,
 					&dw->server->pending_mid_q);
 				spin_unlock(&dw->server->mid_queue_lock);
 				spin_unlock(&dw->server->srv_lock);
 			}
 		}
-		release_mid(dw->server, mid);
+		release_mid(dw->server, smb);
 	}
 
 free_pages:
@@ -5099,7 +5099,7 @@ free_pages:
 
 
 static int
-receive_encrypted_read(struct TCP_Server_Info *server, struct mid_q_entry **mid,
+receive_encrypted_read(struct TCP_Server_Info *server, struct smb_message **smb,
 		       int *num_mids)
 {
 	char *buf = server->smallbuf;
@@ -5183,13 +5183,13 @@ receive_encrypted_read(struct TCP_Server_Info *server, struct mid_q_entry **mid,
 	if (rc)
 		goto free_pages;
 
-	*mid = smb2_find_mid(server, buf);
-	if (*mid == NULL) {
+	*smb = smb2_find_mid(server, buf);
+	if (*smb == NULL) {
 		cifs_dbg(FYI, "mid not found\n");
 	} else {
 		cifs_dbg(FYI, "mid found\n");
-		(*mid)->decrypted = true;
-		rc = handle_read_data(server, *mid, buf,
+		(*smb)->decrypted = true;
+		rc = handle_read_data(server, *smb, buf,
 				      server->vals->read_rsp_size,
 				      dw->buffer, dw->len, false);
 		if (rc >= 0) {
@@ -5212,7 +5212,7 @@ discard_data:
 
 static int
 receive_encrypted_standard(struct TCP_Server_Info *server,
-			   struct mid_q_entry **mids, char **bufs,
+			   struct smb_message **mids, char **bufs,
 			   int *num_mids)
 {
 	int ret, length;
@@ -5221,7 +5221,7 @@ receive_encrypted_standard(struct TCP_Server_Info *server,
 	unsigned int pdu_length = server->pdu_size;
 	unsigned int buf_size;
 	unsigned int next_cmd;
-	struct mid_q_entry *mid_entry;
+	struct smb_message *smb;
 	int next_is_large;
 	char *next_buffer = NULL;
 
@@ -5270,22 +5270,22 @@ one_more:
 		memcpy(next_buffer, buf + next_cmd, pdu_length - next_cmd);
 	}
 
-	mid_entry = smb2_find_mid(server, buf);
-	if (mid_entry == NULL)
+	smb = smb2_find_mid(server, buf);
+	if (smb == NULL)
 		cifs_dbg(FYI, "mid not found\n");
 	else {
 		cifs_dbg(FYI, "mid found\n");
-		mid_entry->decrypted = true;
-		mid_entry->resp_buf_size = server->pdu_size;
+		smb->decrypted = true;
+		smb->resp_buf_size = server->pdu_size;
 	}
 
 	bufs[*num_mids] = buf;
-	mids[(*num_mids)++] = mid_entry;
+	mids[(*num_mids)++] = smb;
 
-	if (mid_entry && mid_entry->handle)
-		ret = mid_entry->handle(server, mid_entry);
+	if (smb && smb->handle)
+		ret = smb->handle(server, smb);
 	else
-		ret = cifs_handle_standard(server, mid_entry);
+		ret = cifs_handle_standard(server, smb);
 
 	if (ret == 0 && next_cmd) {
 		pdu_length -= next_cmd;
@@ -5313,7 +5313,7 @@ one_more:
 
 static int
 smb3_receive_transform(struct TCP_Server_Info *server,
-		       struct mid_q_entry **mids, char **bufs, int *num_mids)
+		       struct smb_message **mids, char **bufs, int *num_mids)
 {
 	char *buf = server->smallbuf;
 	unsigned int pdu_length = server->pdu_size;
@@ -5343,11 +5343,11 @@ smb3_receive_transform(struct TCP_Server_Info *server,
 }
 
 int
-smb3_handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+smb3_handle_read_data(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	char *buf = server->large_buf ? server->bigbuf : server->smallbuf;
 
-	return handle_read_data(server, mid, buf, server->pdu_size,
+	return handle_read_data(server, smb, buf, server->pdu_size,
 				NULL, 0, false);
 }
 

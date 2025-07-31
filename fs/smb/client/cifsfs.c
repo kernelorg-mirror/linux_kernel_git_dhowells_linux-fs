@@ -421,13 +421,13 @@ static int cifs_permission(struct mnt_idmap *idmap,
 
 static struct kmem_cache *cifs_inode_cachep;
 static struct kmem_cache *cifs_req_cachep;
-static struct kmem_cache *cifs_mid_cachep;
+static struct kmem_cache *smb_message_cachep;
 static struct kmem_cache *cifs_sm_req_cachep;
 static struct kmem_cache *cifs_io_request_cachep;
 static struct kmem_cache *cifs_io_subrequest_cachep;
 mempool_t *cifs_sm_req_poolp;
 mempool_t *cifs_req_poolp;
-mempool_t cifs_mid_pool;
+mempool_t smb_message_pool;
 mempool_t cifs_io_request_pool;
 mempool_t cifs_io_subrequest_pool;
 
@@ -1903,27 +1903,27 @@ cifs_destroy_request_bufs(void)
 	kmem_cache_destroy(cifs_sm_req_cachep);
 }
 
-static int init_mids(void)
+static int init_smb_message(void)
 {
-	cifs_mid_cachep = kmem_cache_create("cifs_mpx_ids",
-					    sizeof(struct mid_q_entry), 0,
-					    SLAB_HWCACHE_ALIGN, NULL);
-	if (cifs_mid_cachep == NULL)
+	smb_message_cachep = kmem_cache_create("cifs_smb_message",
+					       sizeof(struct smb_message), 0,
+					       SLAB_HWCACHE_ALIGN, NULL);
+	if (smb_message_cachep == NULL)
 		return -ENOMEM;
 
 	/* 3 is a reasonable minimum number of simultaneous operations */
-	if (mempool_init_slab_pool(&cifs_mid_pool, 3, cifs_mid_cachep) < 0) {
-		kmem_cache_destroy(cifs_mid_cachep);
+	if (mempool_init_slab_pool(&smb_message_pool, 3, smb_message_cachep) < 0) {
+		kmem_cache_destroy(smb_message_cachep);
 		return -ENOMEM;
 	}
 
 	return 0;
 }
 
-static void destroy_mids(void)
+static void destroy_smb_message(void)
 {
-	mempool_exit(&cifs_mid_pool);
-	kmem_cache_destroy(cifs_mid_cachep);
+	mempool_exit(&smb_message_pool);
+	kmem_cache_destroy(smb_message_cachep);
 }
 
 static int cifs_init_netfs(void)
@@ -2098,7 +2098,7 @@ init_cifs(void)
 	if (rc)
 		goto out_destroy_inodecache;
 
-	rc = init_mids();
+	rc = init_smb_message();
 	if (rc)
 		goto out_destroy_netfs;
 
@@ -2155,7 +2155,7 @@ out_destroy_request_bufs:
 #endif
 	cifs_destroy_request_bufs();
 out_destroy_mids:
-	destroy_mids();
+	destroy_smb_message();
 out_destroy_netfs:
 	cifs_destroy_netfs();
 out_destroy_inodecache:
@@ -2197,7 +2197,7 @@ exit_cifs(void)
 	dfs_cache_destroy();
 #endif
 	cifs_destroy_request_bufs();
-	destroy_mids();
+	destroy_smb_message();
 	cifs_destroy_netfs();
 	cifs_destroy_inodecache();
 	destroy_workqueue(deferredclose_wq);

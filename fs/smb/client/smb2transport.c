@@ -607,11 +607,11 @@ smb2_seq_num_into_buf(struct TCP_Server_Info *server,
 		get_next_mid(server);
 }
 
-static struct mid_q_entry *
+static struct smb_message *
 smb2_mid_entry_alloc(const struct smb2_hdr *shdr,
 		     struct TCP_Server_Info *server)
 {
-	struct mid_q_entry *temp;
+	struct smb_message *smb;
 	unsigned int credits = le16_to_cpu(shdr->CreditCharge);
 
 	if (server == NULL) {
@@ -619,36 +619,36 @@ smb2_mid_entry_alloc(const struct smb2_hdr *shdr,
 		return NULL;
 	}
 
-	temp = mempool_alloc(&cifs_mid_pool, GFP_NOFS);
-	memset(temp, 0, sizeof(struct mid_q_entry));
-	refcount_set(&temp->refcount, 1);
-	spin_lock_init(&temp->mid_lock);
-	temp->mid = le64_to_cpu(shdr->MessageId);
-	temp->credits = credits > 0 ? credits : 1;
-	temp->pid = current->pid;
-	temp->command = shdr->Command; /* Always LE */
-	temp->when_alloc = jiffies;
+	smb = mempool_alloc(&smb_message_pool, GFP_NOFS);
+	memset(smb, 0, sizeof(*smb));
+	refcount_set(&smb->refcount, 1);
+	spin_lock_init(&smb->mid_lock);
+	smb->mid = le64_to_cpu(shdr->MessageId);
+	smb->credits = credits > 0 ? credits : 1;
+	smb->pid = current->pid;
+	smb->command = shdr->Command; /* Always LE */
+	smb->when_alloc = jiffies;
 
 	/*
 	 * The default is for the mid to be synchronous, so the
 	 * default callback just wakes up the current task.
 	 */
 	get_task_struct(current);
-	temp->creator = current;
-	temp->callback = cifs_wake_up_task;
-	temp->callback_data = current;
+	smb->creator = current;
+	smb->callback = cifs_wake_up_task;
+	smb->callback_data = current;
 
 	atomic_inc(&mid_count);
-	temp->mid_state = MID_REQUEST_ALLOCATED;
+	smb->mid_state = MID_REQUEST_ALLOCATED;
 	trace_smb3_cmd_enter(le32_to_cpu(shdr->Id.SyncId.TreeId),
 			     le64_to_cpu(shdr->SessionId),
-			     le16_to_cpu(shdr->Command), temp->mid);
-	return temp;
+			     le16_to_cpu(shdr->Command), smb->mid);
+	return smb;
 }
 
 static int
 smb2_get_mid_entry(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		   struct smb2_hdr *shdr, struct mid_q_entry **mid)
+		   struct smb2_hdr *shdr, struct smb_message **smb)
 {
 	switch (READ_ONCE(server->tcpStatus)) {
 	case CifsExiting:
@@ -680,31 +680,31 @@ smb2_get_mid_entry(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		break;
 	}
 
-	*mid = smb2_mid_entry_alloc(shdr, server);
-	if (*mid == NULL)
+	*smb = smb2_mid_entry_alloc(shdr, server);
+	if (*smb == NULL)
 		return -ENOMEM;
 	spin_lock(&server->mid_queue_lock);
-	list_add_tail(&(*mid)->qhead, &server->pending_mid_q);
+	list_add_tail(&(*smb)->qhead, &server->pending_mid_q);
 	spin_unlock(&server->mid_queue_lock);
 
 	return 0;
 }
 
 int
-smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		   bool log_error)
 {
-	unsigned int len = mid->resp_buf_size;
+	unsigned int len = smb->resp_buf_size;
 	struct kvec iov[1];
 	struct smb_rqst rqst = { .rq_iov = iov,
 				 .rq_nvec = 1 };
 
-	iov[0].iov_base = (char *)mid->resp_buf;
+	iov[0].iov_base = (char *)smb->resp_buf;
 	iov[0].iov_len = len;
 
-	dump_smb(mid->resp_buf, min_t(u32, 80, len));
+	dump_smb(smb->resp_buf, min_t(u32, 80, len));
 	/* convert the length into a more usable form */
-	if (len > 24 && server->sign && !mid->decrypted) {
+	if (len > 24 && server->sign && !smb->decrypted) {
 		int rc;
 
 		rc = smb2_verify_signature(&rqst, server);
@@ -713,21 +713,21 @@ smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 				 rc);
 	}
 
-	return map_smb2_to_linux_error(mid->resp_buf, log_error);
+	return map_smb2_to_linux_error(smb->resp_buf, log_error);
 }
 
-struct mid_q_entry *
+struct smb_message *
 smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		   struct smb_rqst *rqst)
 {
 	int rc;
 	struct smb2_hdr *shdr =
 			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 
 	smb2_seq_num_into_buf(server, shdr);
 
-	rc = smb2_get_mid_entry(ses, server, shdr, &mid);
+	rc = smb2_get_mid_entry(ses, server, shdr, &smb);
 	if (rc) {
 		revert_current_mid_from_hdr(server, shdr);
 		return ERR_PTR(rc);
@@ -736,20 +736,20 @@ smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	rc = smb2_sign_rqst(rqst, server);
 	if (rc) {
 		revert_current_mid_from_hdr(server, shdr);
-		delete_mid(server, mid);
+		delete_mid(server, smb);
 		return ERR_PTR(rc);
 	}
 
-	return mid;
+	return smb;
 }
 
-struct mid_q_entry *
+struct smb_message *
 smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 {
 	int rc;
 	struct smb2_hdr *shdr =
 			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 
 	spin_lock(&server->srv_lock);
 	if (server->tcpStatus == CifsNeedNegotiate &&
@@ -761,8 +761,8 @@ smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 
 	smb2_seq_num_into_buf(server, shdr);
 
-	mid = smb2_mid_entry_alloc(shdr, server);
-	if (mid == NULL) {
+	smb = smb2_mid_entry_alloc(shdr, server);
+	if (smb == NULL) {
 		revert_current_mid_from_hdr(server, shdr);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -770,11 +770,11 @@ smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 	rc = smb2_sign_rqst(rqst, server);
 	if (rc) {
 		revert_current_mid_from_hdr(server, shdr);
-		release_mid(server, mid);
+		release_mid(server, smb);
 		return ERR_PTR(rc);
 	}
 
-	return mid;
+	return smb;
 }
 
 int

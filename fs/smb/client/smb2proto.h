@@ -38,19 +38,19 @@ __le16 *cifs_convert_path_to_utf16(const char *from,
 
 int smb2_verify_signature(struct smb_rqst *rqst,
 			  struct TCP_Server_Info *server);
-int smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+int smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		       bool log_error);
-struct mid_q_entry *smb2_setup_request(struct cifs_ses *ses,
+struct smb_message *smb2_setup_request(struct cifs_ses *ses,
 				       struct TCP_Server_Info *server,
 				       struct smb_rqst *rqst);
-struct mid_q_entry *smb2_setup_async_request(struct TCP_Server_Info *server,
+struct smb_message *smb2_setup_async_request(struct TCP_Server_Info *server,
 					     struct smb_rqst *rqst);
 struct cifs_tcon *smb2_find_smb_tcon(struct TCP_Server_Info *server,
 				     __u64 ses_id, __u32  tid);
 __le32 smb2_get_lease_state(struct cifsInodeInfo *cinode, unsigned int oplock);
 bool smb2_is_valid_oplock_break(char *buffer, struct TCP_Server_Info *server);
 int smb3_handle_read_data(struct TCP_Server_Info *server,
-			  struct mid_q_entry *mid);
+			  struct smb_message *smb);
 struct inode *smb2_create_reparse_inode(struct cifs_open_info_data *data,
 					struct super_block *sb,
 					const unsigned int xid,
@@ -226,7 +226,7 @@ int SMB2_oplock_break(const unsigned int xid, struct cifs_tcon *tcon,
 		      __u8 oplock_level);
 int smb2_handle_cancelled_close(struct cifs_tcon *tcon, __u64 persistent_fid,
 				__u64 volatile_fid);
-int smb2_handle_cancelled_mid(struct mid_q_entry *mid,
+int smb2_handle_cancelled_mid(struct smb_message *smb,
 			      struct TCP_Server_Info *server);
 void smb2_cancelled_close_fid(struct work_struct *work);
 int SMB311_posix_qfs_info(const unsigned int xid, struct cifs_tcon *tcon,

@@ -81,13 +81,12 @@ char *cifs_build_path_to_root(struct smb3_fs_context *ctx,
 			      struct cifs_sb_info *cifs_sb,
 			      struct cifs_tcon *tcon, int add_treename);
 char *cifs_build_devname(char *nodename, const char *prepath);
-void delete_mid(struct TCP_Server_Info *server, struct mid_q_entry *mid);
-void __release_mid(struct TCP_Server_Info *server,
-		   struct mid_q_entry *midEntry);
+void delete_mid(struct TCP_Server_Info *server, struct smb_message *smb);
+void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 void cifs_wake_up_task(struct TCP_Server_Info *server,
-		       struct mid_q_entry *mid);
+		       struct smb_message *smb);
 int cifs_handle_standard(struct TCP_Server_Info *server,
-			 struct mid_q_entry *mid);
+			 struct smb_message *smb);
 char *smb3_fs_context_fullpath(const struct smb3_fs_context *ctx, char dirsep);
 int smb3_parse_devname(const char *devname, struct smb3_fs_context *ctx);
 int cifs_ipaddr_cmp(struct sockaddr *srcaddr, struct sockaddr *rhs);
@@ -105,7 +104,7 @@ int compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		       struct TCP_Server_Info *server, const int flags,
 		       const int num_rqst, struct smb_rqst *rqst,
 		       int *resp_buf_type, struct kvec *resp_iov);
-int cifs_sync_mid_result(struct mid_q_entry *mid,
+int cifs_sync_mid_result(struct smb_message *mid,
 			 struct TCP_Server_Info *server);
 int __smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 		    struct smb_rqst *rqst);
@@ -116,14 +115,14 @@ int cifs_wait_mtu_credits(struct TCP_Server_Info *server, size_t size,
 
 static inline int
 send_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-	    struct smb_rqst *rqst, struct mid_q_entry *mid,
+	    struct smb_rqst *rqst, struct smb_message *smb,
 	    unsigned int xid)
 {
 	return server->ops->send_cancel ?
-		server->ops->send_cancel(ses, server, rqst, mid, xid) : 0;
+		server->ops->send_cancel(ses, server, rqst, smb, xid) : 0;
 }
 
-int wait_for_response(struct TCP_Server_Info *server, struct mid_q_entry *mid);
+int wait_for_response(struct TCP_Server_Info *server, struct smb_message *smb);
 
 void smb2_query_server_interfaces(struct work_struct *work);
 void cifs_signal_cifsd_for_reconnect(struct TCP_Server_Info *server,
@@ -223,7 +222,7 @@ unsigned int setup_special_mode_ACE(struct smb_ace *pntace, bool posix,
 				    __u64 nmode);
 unsigned int setup_special_user_owner_ACE(struct smb_ace *pntace);
 
-void dequeue_mid(struct TCP_Server_Info *server, struct mid_q_entry *mid,
+void dequeue_mid(struct TCP_Server_Info *server, struct smb_message *smb,
 		 bool malformed);
 int cifs_read_from_socket(struct TCP_Server_Info *server, char *buf,
 			  unsigned int to_read);
@@ -335,7 +334,7 @@ struct cifs_ses *cifs_get_smb_ses(struct TCP_Server_Info *server,
 				  struct smb3_fs_context *ctx);
 
 int cifs_readv_receive(struct TCP_Server_Info *server,
-		       struct mid_q_entry *mid);
+		       struct smb_message *smb);
 
 int cifs_query_mf_symlink(unsigned int xid, struct cifs_tcon *tcon,
 			  struct cifs_sb_info *cifs_sb,
@@ -472,15 +471,15 @@ static inline bool dfs_src_pathname_equal(const char *s1, const char *s2)
 	return true;
 }
 
-static inline void smb_get_mid(struct mid_q_entry *mid)
+static inline void smb_get_mid(struct smb_message *smb)
 {
-	refcount_inc(&mid->refcount);
+	refcount_inc(&smb->refcount);
 }
 
-static inline void release_mid(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+static inline void release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	if (refcount_dec_and_test(&mid->refcount))
-		__release_mid(server, mid);
+	if (refcount_dec_and_test(&smb->refcount))
+		__release_mid(server, smb);
 }
 
 static inline void cifs_free_open_info(struct cifs_open_info_data *data)

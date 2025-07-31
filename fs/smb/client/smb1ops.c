@@ -139,7 +139,7 @@ void reset_cifs_unix_caps(unsigned int xid, struct cifs_tcon *tcon,
  */
 static int
 send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-	       struct smb_rqst *rqst, struct mid_q_entry *mid,
+	       struct smb_rqst *rqst, struct smb_message *smb,
 	       unsigned int xid)
 {
 	struct smb_hdr *in_buf = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
@@ -156,7 +156,7 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	iov[0].iov_len  = sizeof(struct smb_hdr) + 2;
 
 	cifs_server_lock(server);
-	rc = cifs_sign_rqst(&crqst, server, &mid->sequence_number);
+	rc = cifs_sign_rqst(&crqst, server, &smb->sequence_number);
 	if (rc) {
 		cifs_server_unlock(server);
 		return rc;
@@ -186,7 +186,7 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
  */
 static int
 send_lock_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-		 struct smb_rqst *rqst, struct mid_q_entry *mid,
+		 struct smb_rqst *rqst, struct smb_message *smb,
 		 unsigned int xid)
 {
 	struct smb_hdr *in_buf = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
@@ -212,12 +212,12 @@ send_lock_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 }
 
 static int cifs_send_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
-			    struct smb_rqst *rqst, struct mid_q_entry *mid,
+			    struct smb_rqst *rqst, struct smb_message *smb,
 			    unsigned int xid)
 {
-	if (mid->sr_flags & CIFS_WINDOWS_LOCK)
-		return send_lock_cancel(ses, server, rqst, mid, xid);
-	return send_nt_cancel(ses, server, rqst, mid, xid);
+	if (smb->sr_flags & CIFS_WINDOWS_LOCK)
+		return send_lock_cancel(ses, server, rqst, smb, xid);
+	return send_nt_cancel(ses, server, rqst, smb, xid);
 }
 
 static bool
@@ -243,20 +243,20 @@ cifs_read_data_length(char *buf, bool in_remaining)
 	       le16_to_cpu(rsp->DataLength);
 }
 
-static struct mid_q_entry *
+static struct smb_message *
 cifs_find_mid(struct TCP_Server_Info *server, char *buffer)
 {
 	struct smb_hdr *buf = (struct smb_hdr *)buffer;
-	struct mid_q_entry *mid;
+	struct smb_message *smb;
 
 	spin_lock(&server->mid_queue_lock);
-	list_for_each_entry(mid, &server->pending_mid_q, qhead) {
-		if (compare_mid(mid->mid, buf) &&
-		    mid->mid_state == MID_REQUEST_SUBMITTED &&
-		    le16_to_cpu(mid->command) == buf->Command) {
-			smb_get_mid(mid);
+	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
+		if (compare_mid(smb->mid, buf) &&
+		    smb->mid_state == MID_REQUEST_SUBMITTED &&
+		    le16_to_cpu(smb->command) == buf->Command) {
+			smb_get_mid(smb);
 			spin_unlock(&server->mid_queue_lock);
-			return mid;
+			return smb;
 		}
 	}
 	spin_unlock(&server->mid_queue_lock);
@@ -290,7 +290,7 @@ cifs_get_credits_field(struct TCP_Server_Info *server, const int optype)
 }
 
 static unsigned int
-cifs_get_credits(struct mid_q_entry *mid)
+cifs_get_credits(struct smb_message *smb)
 {
 	return 1;
 }
@@ -343,7 +343,7 @@ cifs_get_next_mid(struct TCP_Server_Info *server)
 	 * did not time out).
 	 */
 	while (cur_mid != last_mid) {
-		struct mid_q_entry *mid_entry;
+		struct smb_message *smb;
 		unsigned int num_mids;
 
 		collision = false;
@@ -352,10 +352,10 @@ cifs_get_next_mid(struct TCP_Server_Info *server)
 
 		num_mids = 0;
 		spin_lock(&server->mid_queue_lock);
-		list_for_each_entry(mid_entry, &server->pending_mid_q, qhead) {
+		list_for_each_entry(smb, &server->pending_mid_q, qhead) {
 			++num_mids;
-			if (mid_entry->mid == cur_mid &&
-			    mid_entry->mid_state == MID_REQUEST_SUBMITTED) {
+			if (smb->mid == cur_mid &&
+			    smb->mid_state == MID_REQUEST_SUBMITTED) {
 				/* This mid is in use, try a different one */
 				collision = true;
 				break;

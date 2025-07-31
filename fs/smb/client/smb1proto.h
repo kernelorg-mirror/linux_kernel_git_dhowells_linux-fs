@@ -236,7 +236,7 @@ int cifs_verify_signature(struct smb_rqst *rqst,
 int map_smb_to_linux_error(char *buf, bool logErr);
 int smb1_init_maperror(void);
 int map_and_check_smb_error(struct TCP_Server_Info *server,
-			    struct mid_q_entry *mid, bool logErr);
+			    struct smb_message *smb, bool logErr);
 #if IS_ENABLED(CONFIG_SMB1_KUNIT_TESTS)
 extern const struct ntstatus_to_dos_err *ntstatus_to_dos_map_test;
 extern unsigned int ntstatus_to_dos_num;
@@ -280,13 +280,13 @@ int CIFS_SessSetup(const unsigned int xid, struct cifs_ses *ses,
 /*
  * smb1transport.c
  */
-struct mid_q_entry *cifs_setup_async_request(struct TCP_Server_Info *server,
+struct smb_message *cifs_setup_async_request(struct TCP_Server_Info *server,
 					     struct smb_rqst *rqst);
 int SendReceiveNoRsp(const unsigned int xid, struct cifs_ses *ses,
 		     char *in_buf, unsigned int in_len, int flags);
-int cifs_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+int cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		       bool log_error);
-struct mid_q_entry *cifs_setup_request(struct cifs_ses *ses,
+struct smb_message *cifs_setup_request(struct cifs_ses *ses,
 				       struct TCP_Server_Info *server,
 				       struct smb_rqst *rqst);
 int SendReceive2(const unsigned int xid, struct cifs_ses *ses,
@@ -296,7 +296,7 @@ int SendReceive(const unsigned int xid, struct cifs_ses *ses,
 		struct smb_hdr *in_buf, unsigned int in_len,
 		struct smb_hdr *out_buf, int *pbytes_returned,
 		const int flags);
-bool cifs_check_trans2(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+bool cifs_check_trans2(struct smb_message *smb, struct TCP_Server_Info *server,
 		       char *buf, int malformed);
 int checkSMB(char *buf, unsigned int pdu_len, unsigned int total_read,
 	     struct TCP_Server_Info *server);

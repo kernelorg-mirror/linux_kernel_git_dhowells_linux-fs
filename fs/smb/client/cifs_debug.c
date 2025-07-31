@@ -38,33 +38,33 @@ cifs_dump_mem(char *label, void *data, int length)
 void cifs_dump_mids(struct TCP_Server_Info *server)
 {
 #ifdef CONFIG_CIFS_DEBUG2
-	struct mid_q_entry *mid_entry;
+	struct smb_message *smb;
 
 	if (server == NULL)
 		return;
 
 	cifs_dbg(VFS, "Dump pending requests:\n");
 	spin_lock(&server->mid_queue_lock);
-	list_for_each_entry(mid_entry, &server->pending_mid_q, qhead) {
+	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
 		cifs_dbg(VFS, "State: %d Cmd: %d Pid: %d Cbdata: %p Mid %llu\n",
-			 mid_entry->mid_state,
-			 le16_to_cpu(mid_entry->command),
-			 mid_entry->pid,
-			 mid_entry->callback_data,
-			 mid_entry->mid);
+			 smb->mid_state,
+			 le16_to_cpu(smb->command),
+			 smb->pid,
+			 smb->callback_data,
+			 smb->mid);
 #ifdef CONFIG_CIFS_STATS2
 		cifs_dbg(VFS, "IsLarge: %d buf: %p time rcv: %ld now: %ld\n",
-			 mid_entry->large_buf,
-			 mid_entry->resp_buf,
-			 mid_entry->when_received,
+			 smb->large_buf,
+			 smb->resp_buf,
+			 smb->when_received,
 			 jiffies);
 #endif /* STATS2 */
 		cifs_dbg(VFS, "IsMult: %d IsEnd: %d\n",
-			 mid_entry->multiRsp, mid_entry->multiEnd);
-		if (mid_entry->resp_buf) {
-			server->ops->dump_detail(mid_entry->resp_buf,
-					 mid_entry->response_pdu_len, server);
-			cifs_dump_mem("existing buf: ", mid_entry->resp_buf, 62);
+			 smb->multiRsp, smb->multiEnd);
+		if (smb->resp_buf) {
+			server->ops->dump_detail(smb->resp_buf,
+						 smb->response_pdu_len, server);
+			cifs_dump_mem("existing buf: ", smb->resp_buf, 62);
 		}
 	}
 	spin_unlock(&server->mid_queue_lock);
@@ -437,7 +437,7 @@ static __always_inline const char *cipher_alg_str(__le16 cipher)
 
 static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 {
-	struct mid_q_entry *mid_entry;
+	struct smb_message *smb;
 	struct TCP_Server_Info *server;
 	struct TCP_Server_Info *chan_server;
 	struct cifs_ses *ses;
@@ -694,13 +694,13 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 				seq_printf(m, "\n\tServer ConnectionId: 0x%llx",
 					   chan_server->conn_id);
 				spin_lock(&chan_server->mid_queue_lock);
-				list_for_each_entry(mid_entry, &chan_server->pending_mid_q, qhead) {
+				list_for_each_entry(smb, &chan_server->pending_mid_q, qhead) {
 					seq_printf(m, "\n\t\tState: %d com: %d pid: %d cbdata: %p mid %llu",
-						   mid_entry->mid_state,
-						   le16_to_cpu(mid_entry->command),
-						   mid_entry->pid,
-						   mid_entry->callback_data,
-						   mid_entry->mid);
+						   smb->mid_state,
+						   le16_to_cpu(smb->command),
+						   smb->pid,
+						   smb->callback_data,
+						   smb->mid);
 				}
 				spin_unlock(&chan_server->mid_queue_lock);
 			}

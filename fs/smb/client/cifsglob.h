@@ -292,7 +292,7 @@ struct smb_rqst {
 	struct bvecq	*rq_buffer;	/* Buffer for encryption */
 };
 
-struct mid_q_entry;
+struct smb_message;
 struct TCP_Server_Info;
 struct cifsFileInfo;
 struct cifs_ses;
@@ -310,25 +310,25 @@ struct cifs_credits;
 
 struct smb_version_operations {
 	int (*send_cancel)(struct cifs_ses *ses, struct TCP_Server_Info *server,
-			   struct smb_rqst *rqst, struct mid_q_entry *mid,
+			   struct smb_rqst *rqst, struct smb_message *smb,
 			   unsigned int xid);
 	bool (*compare_fids)(struct cifsFileInfo *, struct cifsFileInfo *);
 	/* setup request: allocate mid, sign message */
-	struct mid_q_entry *(*setup_request)(struct cifs_ses *,
-					     struct TCP_Server_Info *,
-					     struct smb_rqst *);
+	struct smb_message *(*setup_request)(struct cifs_ses *ses,
+					     struct TCP_Server_Info *server,
+					     struct smb_rqst *rqst);
 	/* setup async request: allocate mid, sign message */
-	struct mid_q_entry *(*setup_async_request)(struct TCP_Server_Info *,
-						struct smb_rqst *);
+	struct smb_message *(*setup_async_request)(struct TCP_Server_Info *server,
+						   struct smb_rqst *rqst);
 	/* check response: verify signature, map error */
-	int (*check_receive)(struct mid_q_entry *, struct TCP_Server_Info *,
-			     bool);
+	int (*check_receive)(struct smb_message *mid, struct TCP_Server_Info *server,
+			     bool log_error);
 	void (*add_credits)(struct TCP_Server_Info *server,
 			    struct cifs_credits *credits,
 			    const int optype);
 	void (*set_credits)(struct TCP_Server_Info *, const int);
 	int * (*get_credits_field)(struct TCP_Server_Info *, const int);
-	unsigned int (*get_credits)(struct mid_q_entry *);
+	unsigned int (*get_credits)(struct smb_message *smb);
 	__u64 (*get_next_mid)(struct TCP_Server_Info *);
 	void (*revert_current_mid)(struct TCP_Server_Info *server,
 				   const unsigned int val);
@@ -345,7 +345,7 @@ struct smb_version_operations {
 	/* map smb to linux error */
 	int (*map_error)(char *, bool);
 	/* find mid corresponding to the response message */
-	struct mid_q_entry *(*find_mid)(struct TCP_Server_Info *server, char *buf);
+	struct smb_message *(*find_mid)(struct TCP_Server_Info *server, char *buf);
 	void (*dump_detail)(void *buf, size_t buf_len, struct TCP_Server_Info *ptcp_info);
 	void (*clear_stats)(struct cifs_tcon *);
 	void (*print_stats)(struct seq_file *m, struct cifs_tcon *);
@@ -354,13 +354,13 @@ struct smb_version_operations {
 	int (*check_message)(char *buf, unsigned int pdu_len, unsigned int len,
 			     struct TCP_Server_Info *server);
 	bool (*is_oplock_break)(char *, struct TCP_Server_Info *);
-	int (*handle_cancelled_mid)(struct mid_q_entry *, struct TCP_Server_Info *);
+	int (*handle_cancelled_mid)(struct smb_message *smb, struct TCP_Server_Info *server);
 	void (*downgrade_oplock)(struct TCP_Server_Info *server,
 				 struct cifsInodeInfo *cinode, __u32 oplock,
 				 __u16 epoch, bool *purge_cache);
 	/* process transaction2 response */
-	bool (*check_trans2)(struct mid_q_entry *, struct TCP_Server_Info *,
-			     char *, int);
+	bool (*check_trans2)(struct smb_message *smb, struct TCP_Server_Info *server,
+			     char *buf, int malformed);
 	/* check if we need to negotiate */
 	bool (*need_neg)(struct TCP_Server_Info *);
 	/* negotiate to the server */
@@ -596,7 +596,7 @@ struct smb_version_operations {
 				 struct smb_rqst *, struct smb_rqst *);
 	int (*is_transform_hdr)(void *buf);
 	int (*receive_transform)(struct TCP_Server_Info *,
-				 struct mid_q_entry **, char **, int *);
+				 struct smb_message **smb, char **, int *);
 	enum securityEnum (*select_sectype)(struct TCP_Server_Info *,
 			    enum securityEnum);
 	int (*next_header)(struct TCP_Server_Info *server, char *buf,
@@ -1687,7 +1687,7 @@ static inline void cifs_stats_bytes_read(struct cifs_tcon *tcon,
  * the TCP_Server_Info will also be updated.
  */
 typedef int (*mid_receive_t)(struct TCP_Server_Info *server,
-			    struct mid_q_entry *mid);
+			     struct smb_message *msg);
 
 /*
  * This is the prototype for the mid callback function. This is called once the
@@ -1697,17 +1697,17 @@ typedef int (*mid_receive_t)(struct TCP_Server_Info *server,
  * - it will be called by cifsd, with no locks held
  * - the mid will be removed from any lists
  */
-typedef void (*mid_callback_t)(struct TCP_Server_Info *srv, struct mid_q_entry *mid);
+typedef void (*mid_callback_t)(struct TCP_Server_Info *srv, struct smb_message *smb);
 
 /*
  * This is the protopyte for mid handle function. This is called once the mid
  * has been recognized after decryption of the message.
  */
 typedef int (*mid_handle_t)(struct TCP_Server_Info *server,
-			    struct mid_q_entry *mid);
+			    struct smb_message *smb);
 
 /* one of these for every pending CIFS request to the server */
-struct mid_q_entry {
+struct smb_message {
 	struct list_head qhead;	/* mids waiting on reply from this server */
 	refcount_t refcount;
 	__u64 mid;		/* multiplex id */
@@ -1773,12 +1773,12 @@ static inline void cifs_num_waiters_dec(struct TCP_Server_Info *server)
 }
 
 #ifdef CONFIG_CIFS_STATS2
-static inline void cifs_save_when_sent(struct mid_q_entry *mid)
+static inline void cifs_save_when_sent(struct smb_message *smb)
 {
-	mid->when_sent = jiffies;
+	smb->when_sent = jiffies;
 }
 #else
-static inline void cifs_save_when_sent(struct mid_q_entry *mid)
+static inline void cifs_save_when_sent(struct smb_message *smb)
 {
 }
 #endif
@@ -2147,7 +2147,7 @@ extern __u32 cifs_lock_secret;
 
 extern mempool_t *cifs_sm_req_poolp;
 extern mempool_t *cifs_req_poolp;
-extern mempool_t cifs_mid_pool;
+extern mempool_t smb_message_pool;
 extern mempool_t cifs_io_request_pool;
 extern mempool_t cifs_io_subrequest_pool;
 
@@ -2306,17 +2306,17 @@ static inline bool cifs_netbios_name(const char *name, size_t namelen)
  * and prevents sleeping in atomic context.
  */
 static inline void mid_execute_callback(struct TCP_Server_Info *server,
-					struct mid_q_entry *mid)
+					struct smb_message *smb)
 {
 	mid_callback_t callback;
 
-	spin_lock(&mid->mid_lock);
-	callback = mid->callback;
-	mid->callback = NULL;  /* Mark as executed, */
-	spin_unlock(&mid->mid_lock);
+	spin_lock(&smb->mid_lock);
+	callback = smb->callback;
+	smb->callback = NULL;  /* Mark as executed, */
+	spin_unlock(&smb->mid_lock);
 
 	if (callback)
-		callback(server, mid);
+		callback(server, smb);
 }
 
 #define CIFS_REPARSE_SUPPORT(tcon) \

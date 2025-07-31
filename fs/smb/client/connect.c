@@ -296,7 +296,7 @@ cifs_mark_tcp_ses_conns_for_reconnect(struct TCP_Server_Info *server,
 static void
 cifs_abort_connection(struct TCP_Server_Info *server)
 {
-	struct mid_q_entry *mid, *nmid;
+	struct smb_message *smb, *nsmb;
 	struct list_head retry_list;
 
 	server->maxBuf = 0;
@@ -327,21 +327,21 @@ cifs_abort_connection(struct TCP_Server_Info *server)
 	INIT_LIST_HEAD(&retry_list);
 	cifs_dbg(FYI, "%s: moving mids to private list\n", __func__);
 	spin_lock(&server->mid_queue_lock);
-	list_for_each_entry_safe(mid, nmid, &server->pending_mid_q, qhead) {
-		smb_get_mid(mid);
-		if (mid->mid_state == MID_REQUEST_SUBMITTED)
-			mid->mid_state = MID_RETRY_NEEDED;
-		list_move(&mid->qhead, &retry_list);
-		mid->deleted_from_q = true;
+	list_for_each_entry_safe(smb, nsmb, &server->pending_mid_q, qhead) {
+		smb_get_mid(smb);
+		if (smb->mid_state == MID_REQUEST_SUBMITTED)
+			smb->mid_state = MID_RETRY_NEEDED;
+		list_move(&smb->qhead, &retry_list);
+		smb->deleted_from_q = true;
 	}
 	spin_unlock(&server->mid_queue_lock);
 	cifs_server_unlock(server);
 
 	cifs_dbg(FYI, "%s: issuing mid callbacks\n", __func__);
-	list_for_each_entry_safe(mid, nmid, &retry_list, qhead) {
-		list_del_init(&mid->qhead);
-		mid_execute_callback(server, mid);
-		release_mid(server, mid);
+	list_for_each_entry_safe(smb, nsmb, &retry_list, qhead) {
+		list_del_init(&smb->qhead);
+		mid_execute_callback(server, smb);
+		release_mid(server, smb);
 	}
 }
 
@@ -871,7 +871,7 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 		    !server->with_rfc1001 &&
 		    server->rfc1001_sessinit != 0) {
 			int rc, mid_rc;
-			struct mid_q_entry *mid, *nmid;
+			struct smb_message *smb, *nsmb;
 			LIST_HEAD(dispose_list);
 
 			cifs_dbg(FYI, "RFC 1002 negative session response during SMB Negotiate, retrying with NetBIOS session\n");
@@ -884,10 +884,10 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 			 * corresponding to SMB1/SMB2 Negotiate packet.
 			 */
 			spin_lock(&server->mid_queue_lock);
-			list_for_each_entry_safe(mid, nmid, &server->pending_mid_q, qhead) {
-				smb_get_mid(mid);
-				list_move(&mid->qhead, &dispose_list);
-				mid->deleted_from_q = true;
+			list_for_each_entry_safe(smb, nsmb, &server->pending_mid_q, qhead) {
+				smb_get_mid(smb);
+				list_move(&smb->qhead, &dispose_list);
+				smb->deleted_from_q = true;
 			}
 			spin_unlock(&server->mid_queue_lock);
 
@@ -914,12 +914,12 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 			 * callback. Use MID_RC state which indicates that the
 			 * return code should be read from mid_rc member.
 			 */
-			list_for_each_entry_safe(mid, nmid, &dispose_list, qhead) {
-				list_del_init(&mid->qhead);
-				mid->mid_rc = mid_rc;
-				mid->mid_state = MID_RC;
-				mid_execute_callback(server, mid);
-				release_mid(server, mid);
+			list_for_each_entry_safe(smb, nsmb, &dispose_list, qhead) {
+				list_del_init(&smb->qhead);
+				smb->mid_rc = mid_rc;
+				smb->mid_state = MID_RC;
+				mid_execute_callback(server, smb);
+				release_mid(server, smb);
 			}
 
 			/*
@@ -951,26 +951,26 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 }
 
 void
-dequeue_mid(struct TCP_Server_Info *server, struct mid_q_entry *mid, bool malformed)
+dequeue_mid(struct TCP_Server_Info *server, struct smb_message *smb, bool malformed)
 {
 #ifdef CONFIG_CIFS_STATS2
-	mid->when_received = jiffies;
+	smb->when_received = jiffies;
 #endif
 	spin_lock(&server->mid_queue_lock);
 	if (!malformed)
-		mid->mid_state = MID_RESPONSE_RECEIVED;
+		smb->mid_state = MID_RESPONSE_RECEIVED;
 	else
-		mid->mid_state = MID_RESPONSE_MALFORMED;
+		smb->mid_state = MID_RESPONSE_MALFORMED;
 	/*
 	 * Trying to handle/dequeue a mid after the send_recv()
 	 * function has finished processing it is a bug.
 	 */
-	if (mid->deleted_from_q == true) {
+	if (smb->deleted_from_q == true) {
 		spin_unlock(&server->mid_queue_lock);
 		pr_warn_once("trying to dequeue a deleted mid\n");
 	} else {
-		list_del_init(&mid->qhead);
-		mid->deleted_from_q = true;
+		list_del_init(&smb->qhead);
+		smb->deleted_from_q = true;
 		spin_unlock(&server->mid_queue_lock);
 	}
 }
@@ -990,24 +990,24 @@ smb2_get_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
 }
 
 static void
-handle_mid(struct mid_q_entry *mid, struct TCP_Server_Info *server,
+handle_mid(struct smb_message *smb, struct TCP_Server_Info *server,
 	   char *buf, int malformed)
 {
 	if (server->ops->check_trans2 &&
-	    server->ops->check_trans2(mid, server, buf, malformed))
+	    server->ops->check_trans2(smb, server, buf, malformed))
 		return;
-	mid->credits_received = smb2_get_credits_from_hdr(buf, server);
-	mid->resp_buf = buf;
-	mid->large_buf = server->large_buf;
+	smb->credits_received = smb2_get_credits_from_hdr(buf, server);
+	smb->resp_buf = buf;
+	smb->large_buf = server->large_buf;
 	/* Was previous buf put in mpx struct for multi-rsp? */
-	if (!mid->multiRsp) {
+	if (!smb->multiRsp) {
 		/* smb buffer will be freed by user thread */
 		if (server->large_buf)
 			server->bigbuf = NULL;
 		else
 			server->smallbuf = NULL;
 	}
-	dequeue_mid(server, mid, malformed);
+	dequeue_mid(server, smb, malformed);
 }
 
 int
@@ -1096,28 +1096,28 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 	}
 
 	if (!list_empty(&server->pending_mid_q)) {
-		struct mid_q_entry *mid_entry;
+		struct smb_message *smb;
 		struct list_head *tmp, *tmp2;
 		LIST_HEAD(dispose_list);
 
 		spin_lock(&server->mid_queue_lock);
 		list_for_each_safe(tmp, tmp2, &server->pending_mid_q) {
-			mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
-			cifs_dbg(FYI, "Clearing mid %llu\n", mid_entry->mid);
-			smb_get_mid(mid_entry);
-			mid_entry->mid_state = MID_SHUTDOWN;
-			list_move(&mid_entry->qhead, &dispose_list);
-			mid_entry->deleted_from_q = true;
+			smb = list_entry(tmp, struct smb_message, qhead);
+			cifs_dbg(FYI, "Clearing mid %llu\n", smb->mid);
+			smb_get_mid(smb);
+			smb->mid_state = MID_SHUTDOWN;
+			list_move(&smb->qhead, &dispose_list);
+			smb->deleted_from_q = true;
 		}
 		spin_unlock(&server->mid_queue_lock);
 
 		/* now walk dispose list and issue callbacks */
 		list_for_each_safe(tmp, tmp2, &dispose_list) {
-			mid_entry = list_entry(tmp, struct mid_q_entry, qhead);
-			cifs_dbg(FYI, "Callback mid %llu\n", mid_entry->mid);
-			list_del_init(&mid_entry->qhead);
-			mid_execute_callback(server, mid_entry);
-			release_mid(server, mid_entry);
+			smb = list_entry(tmp, struct smb_message, qhead);
+			cifs_dbg(FYI, "Callback mid %llu\n", smb->mid);
+			list_del_init(&smb->qhead);
+			mid_execute_callback(server, smb);
+			release_mid(server, smb);
 		}
 		/* 1/8th of sec is more than enough time for them to exit */
 		msleep(125);
@@ -1151,7 +1151,7 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 }
 
 static int
-standard_receive3(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+standard_receive3(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	int length;
 	char *buf = server->smallbuf;
@@ -1181,11 +1181,11 @@ standard_receive3(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 
 	dump_smb(buf, server->total_read);
 
-	return cifs_handle_standard(server, mid);
+	return cifs_handle_standard(server, smb);
 }
 
 int
-cifs_handle_standard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+cifs_handle_standard(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	char *buf = server->large_buf ? server->bigbuf : server->smallbuf;
 	int rc;
@@ -1214,10 +1214,10 @@ cifs_handle_standard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	    server->ops->is_status_pending(buf, server))
 		return -1;
 
-	if (!mid)
+	if (!smb)
 		return rc;
 
-	handle_mid(mid, server, buf, rc);
+	handle_mid(smb, server, buf, rc);
 	return 0;
 }
 
@@ -1254,13 +1254,13 @@ smb2_add_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
 static int
 cifs_demultiplex_thread(void *p)
 {
-	int i, num_mids, length;
+	int i, num_smbs, length;
 	struct TCP_Server_Info *server = p;
 	unsigned int pdu_length;
 	unsigned int next_offset;
 	char *buf = NULL;
 	struct task_struct *task_to_wake = NULL;
-	struct mid_q_entry *mids[MAX_COMPOUND];
+	struct smb_message *smbs[MAX_COMPOUND];
 	char *bufs[MAX_COMPOUND];
 	unsigned int noreclaim_flag, num_io_timeout = 0;
 	bool pending_reconnect = false;
@@ -1331,34 +1331,34 @@ next_pdu:
 				server->pdu_size = next_offset;
 		}
 
-		memset(mids, 0, sizeof(mids));
+		memset(smbs, 0, sizeof(smbs));
 		memset(bufs, 0, sizeof(bufs));
-		num_mids = 0;
+		num_smbs = 0;
 
 		if (server->ops->is_transform_hdr &&
 		    server->ops->receive_transform &&
 		    server->ops->is_transform_hdr(buf)) {
 			length = server->ops->receive_transform(server,
-								mids,
+								smbs,
 								bufs,
-								&num_mids);
+								&num_smbs);
 		} else {
-			mids[0] = server->ops->find_mid(server, buf);
+			smbs[0] = server->ops->find_mid(server, buf);
 			bufs[0] = buf;
-			num_mids = 1;
+			num_smbs = 1;
 
-			if (mids[0])
-				mids[0]->response_pdu_len = pdu_length;
-			if (!mids[0] || !mids[0]->receive)
-				length = standard_receive3(server, mids[0]);
+			if (smbs[0])
+				smbs[0]->response_pdu_len = pdu_length;
+			if (!smbs[0] || !smbs[0]->receive)
+				length = standard_receive3(server, smbs[0]);
 			else
-				length = mids[0]->receive(server, mids[0]);
+				length = smbs[0]->receive(server, smbs[0]);
 		}
 
 		if (length < 0) {
-			for (i = 0; i < num_mids; i++)
-				if (mids[i])
-					release_mid(server, mids[i]);
+			for (i = 0; i < num_smbs; i++)
+				if (smbs[i])
+					release_mid(server, smbs[i]);
 			continue;
 		}
 
@@ -1377,9 +1377,9 @@ next_pdu:
 
 		server->lstrp = jiffies;
 
-		for (i = 0; i < num_mids; i++) {
-			if (mids[i] != NULL) {
-				mids[i]->resp_buf_size = server->pdu_size;
+		for (i = 0; i < num_smbs; i++) {
+			if (smbs[i] != NULL) {
+				smbs[i]->resp_buf_size = server->pdu_size;
 
 				if (bufs[i] != NULL) {
 					if (server->ops->is_network_name_deleted &&
@@ -1390,10 +1390,10 @@ next_pdu:
 					}
 				}
 
-				if (!mids[i]->multiRsp || mids[i]->multiEnd)
-					mid_execute_callback(server, mids[i]);
+				if (!smbs[i]->multiRsp || smbs[i]->multiEnd)
+					mid_execute_callback(server, smbs[i]);
 
-				release_mid(server, mids[i]);
+				release_mid(server, smbs[i]);
 			} else if (server->ops->is_oplock_break &&
 				   server->ops->is_oplock_break(bufs[i],
 								server)) {

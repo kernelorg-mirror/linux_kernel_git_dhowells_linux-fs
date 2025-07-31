@@ -727,11 +727,11 @@ CIFSSMBTDis(const unsigned int xid, struct cifs_tcon *tcon)
  * FIXME: maybe we should consider checking that the reply matches request?
  */
 static void
-cifs_echo_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+cifs_echo_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	struct cifs_credits credits = { .value = 1, .instance = 0 };
 
-	release_mid(server, mid);
+	release_mid(server, smb);
 	add_credits(server, &credits, CIFS_ECHO_OP);
 }
 
@@ -1460,9 +1460,9 @@ openRetry:
 }
 
 static void
-cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *rdata = mid->callback_data;
+	struct cifs_io_subrequest *rdata = smb->callback_data;
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct inode *inode = &ictx->inode;
@@ -1478,7 +1478,7 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	unsigned int subreq_debug_index = rdata->subreq.debug_index;
 
 	cifs_dbg(FYI, "%s: mid=%llu state=%d result=%d bytes=%zu\n",
-		 __func__, mid->mid, mid->mid_state, rdata->result,
+		 __func__, smb->mid, smb->mid_state, rdata->result,
 		 rdata->subreq.len);
 
 	if (rdata->got_bytes)
@@ -1486,7 +1486,7 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 				    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
 				    rdata->subreq.content.offset, rdata->subreq.len);
 
-	switch (mid->mid_state) {
+	switch (smb->mid_state) {
 	case MID_RESPONSE_RECEIVED:
 		/* result already set, check signature */
 		if (server->sign) {
@@ -1494,7 +1494,7 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 
 			iov_iter_truncate(&rqst.rq_iter, rdata->got_bytes);
 			rc = cifs_verify_signature(&rqst, server,
-						  mid->sequence_number);
+						  smb->sequence_number);
 			if (rc)
 				cifs_dbg(VFS, "SMB signature verification returned error = %d\n",
 					 rc);
@@ -1525,7 +1525,7 @@ do_retry:
 	default:
 		trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_unknown);
 		rdata->result = smb_EIO1(smb_eio_trace_read_mid_state_unknown,
-					 mid->mid_state);
+					 smb->mid_state);
 		break;
 	}
 
@@ -1568,7 +1568,7 @@ do_retry:
 	rdata->subreq.transferred += rdata->got_bytes;
 	trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 	netfs_read_subreq_terminated(&rdata->subreq);
-	release_mid(server, mid);
+	release_mid(server, smb);
 	add_credits(server, &credits, 0);
 	trace_smb3_rw_credits(rreq_debug_id, subreq_debug_index, 0,
 			      server->credits, server->in_flight,
@@ -1889,11 +1889,11 @@ CIFSSMBWrite(const unsigned int xid, struct cifs_io_parms *io_parms,
  * workqueue completion task.
  */
 static void
-cifs_writev_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+cifs_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *wdata = mid->callback_data;
+	struct cifs_io_subrequest *wdata = smb->callback_data;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
-	WRITE_RSP *smb = (WRITE_RSP *)mid->resp_buf;
+	WRITE_RSP *rsp = (WRITE_RSP *)smb->resp_buf;
 	struct cifs_credits credits = {
 		.value = 1,
 		.instance = 0,
@@ -1903,15 +1903,15 @@ cifs_writev_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	ssize_t result;
 	size_t written;
 
-	switch (mid->mid_state) {
+	switch (smb->mid_state) {
 	case MID_RESPONSE_RECEIVED:
-		result = cifs_check_receive(mid, tcon->ses->server, 0);
+		result = cifs_check_receive(smb, tcon->ses->server, 0);
 		if (result != 0)
 			break;
 
-		written = le16_to_cpu(smb->CountHigh);
+		written = le16_to_cpu(rsp->CountHigh);
 		written <<= 16;
-		written += le16_to_cpu(smb->Count);
+		written += le16_to_cpu(rsp->Count);
 		/*
 		 * Mask off high 16 bits when bytes written as returned
 		 * by the server is greater than bytes requested by the
@@ -1946,7 +1946,7 @@ cifs_writev_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	default:
 		trace_netfs_sreq(&wdata->subreq, netfs_sreq_trace_io_unknown);
 		result = smb_EIO1(smb_eio_trace_write_mid_state_unknown,
-				  mid->mid_state);
+				  smb->mid_state);
 		break;
 	}
 
@@ -1956,7 +1956,7 @@ cifs_writev_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 			      0, cifs_trace_rw_credits_write_response_clear);
 	wdata->credits.value = 0;
 	cifs_write_subrequest_terminated(wdata, result);
-	release_mid(server, mid);
+	release_mid(server, smb);
 	trace_smb3_rw_credits(credits.rreq_debug_id, credits.rreq_debug_index, 0,
 			      server->credits, server->in_flight,
 			      credits.value, cifs_trace_rw_credits_write_response_add);
