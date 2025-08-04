@@ -4599,16 +4599,17 @@ smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc, u8 *key)
 
 	return -EAGAIN;
 }
+
 /*
- * Encrypt or decrypt @rqst message. @rqst[0] has the following format:
+ * Encrypt @rqst message. @rqst[0] has the following format:
  * iov[0]   - transform header (associate data),
  * iov[1-N] - SMB2 header and pages - data to encrypt.
  * On success return encrypted data in iov[1-N] and pages, leave iov[0]
  * untouched.
  */
 static int
-crypt_message(struct TCP_Server_Info *server, int num_rqst,
-	      struct smb_rqst *rqst, int enc, struct crypto_aead *tfm)
+encrypt_message(struct TCP_Server_Info *server, int num_rqst,
+		struct smb_rqst *rqst, struct crypto_aead *tfm)
 {
 	struct smb2_transform_hdr *tr_hdr =
 		(struct smb2_transform_hdr *)rqst[0].rq_iov[0].iov_base;
@@ -4623,10 +4624,10 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
 	void *creq;
 
-	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), enc, key);
+	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 1, key);
 	if (rc) {
-		cifs_server_dbg(FYI, "%s: Could not get %scryption key. sid: 0x%llx\n", __func__,
-			 enc ? "en" : "de", le64_to_cpu(tr_hdr->SessionId));
+		cifs_server_dbg(FYI, "%s: Could not get encryption key. sid: 0x%llx\n",
+				__func__, le64_to_cpu(tr_hdr->SessionId));
 		return rc;
 	}
 
@@ -4651,10 +4652,84 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 	if (IS_ERR(creq))
 		return PTR_ERR(creq);
 
-	if (!enc) {
-		memcpy(sign, &tr_hdr->Signature, SMB2_SIGNATURE_SIZE);
-		crypt_len += SMB2_SIGNATURE_SIZE;
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
+	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		memcpy(iv, (char *)tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
+	else {
+		iv[0] = 3;
+		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
 	}
+
+	aead_request_set_tfm(req, tfm);
+	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
+	aead_request_set_ad(req, assoc_data_len);
+
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
+
+	rc = crypto_wait_req(crypto_aead_encrypt(req), &wait);
+
+	if (!rc)
+		memcpy(&tr_hdr->Signature, sign, SMB2_SIGNATURE_SIZE);
+
+	kfree_sensitive(creq);
+	return rc;
+}
+
+/*
+ * Decrypt @rqst message. @rqst[0] has the following format:
+ * iov[0]   - transform header (associate data),
+ * iov[1-N] - SMB2 header and pages - data to decrypt.
+ * On success return encrypted data in iov[1-N] and pages, leave iov[0]
+ * untouched.
+ */
+static int
+decrypt_message(struct TCP_Server_Info *server, int num_rqst,
+		struct smb_rqst *rqst, struct crypto_aead *tfm)
+{
+	struct smb2_transform_hdr *tr_hdr =
+		(struct smb2_transform_hdr *)rqst[0].rq_iov[0].iov_base;
+	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
+	int rc = 0;
+	struct scatterlist *sg;
+	u8 sign[SMB2_SIGNATURE_SIZE] = {};
+	u8 key[SMB3_ENC_DEC_KEY_SIZE];
+	struct aead_request *req;
+	u8 *iv;
+	DECLARE_CRYPTO_WAIT(wait);
+	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
+	void *creq;
+
+	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 0, key);
+	if (rc) {
+		cifs_server_dbg(FYI, "%s: Could not get decryption key. sid: 0x%llx\n",
+				__func__, le64_to_cpu(tr_hdr->SessionId));
+		return rc;
+	}
+
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES256_CCM) ||
+		(server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM256_CRYPTKEY_SIZE);
+	else
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM128_CRYPTKEY_SIZE);
+
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set aead key %d\n", __func__, rc);
+		return rc;
+	}
+
+	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set authsize %d\n", __func__, rc);
+		return rc;
+	}
+
+	creq = smb2_get_aead_req(tfm, rqst, num_rqst, sign, &iv, &req, &sg);
+	if (IS_ERR(creq))
+		return PTR_ERR(creq);
+
+	memcpy(sign, &tr_hdr->Signature, SMB2_SIGNATURE_SIZE);
+	crypt_len += SMB2_SIGNATURE_SIZE;
 
 	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
 	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
@@ -4671,11 +4746,7 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
 				  crypto_req_done, &wait);
 
-	rc = crypto_wait_req(enc ? crypto_aead_encrypt(req)
-				: crypto_aead_decrypt(req), &wait);
-
-	if (!rc && enc)
-		memcpy(&tr_hdr->Signature, sign, SMB2_SIGNATURE_SIZE);
+	rc = crypto_wait_req(crypto_aead_decrypt(req), &wait);
 
 	kfree_sensitive(creq);
 	return rc;
@@ -4759,7 +4830,7 @@ smb3_init_transform_rq(struct TCP_Server_Info *server, int num_rqst,
 	/* fill the 1st iov with a transform header */
 	fill_transform_hdr(tr_hdr, orig_len, old_rq, server->cipher_type);
 
-	rc = crypt_message(server, num_rqst, new_rq, 1, server->secmech.enc);
+	rc = encrypt_message(server, num_rqst, new_rq, server->secmech.enc);
 	cifs_dbg(FYI, "Encrypt message returned %d\n", rc);
 	if (rc)
 		goto err_free;
@@ -4821,7 +4892,7 @@ decrypt_raw_data(struct TCP_Server_Info *server, char *buf,
 		tfm = server->secmech.dec;
 	}
 
-	rc = crypt_message(server, 1, &rqst, 0, tfm);
+	rc = decrypt_message(server, 1, &rqst, tfm);
 	cifs_dbg(FYI, "Decrypt message returned %d\n", rc);
 
 	if (is_offloaded)
