@@ -2777,9 +2777,7 @@ void
 smb2_set_next_command(struct cifs_tcon *tcon, struct smb_rqst *rqst)
 {
 	struct smb2_hdr *shdr;
-	struct cifs_ses *ses = tcon->ses;
-	struct TCP_Server_Info *server = ses->server;
-	unsigned long len = smb_rqst_len(server, rqst);
+	size_t len = 0;
 	int num_padding;
 
 	shdr = (struct smb2_hdr *)(rqst->rq_iov[0].iov_base);
@@ -2787,6 +2785,10 @@ smb2_set_next_command(struct cifs_tcon *tcon, struct smb_rqst *rqst)
 		cifs_dbg(FYI, "shdr NULL in smb2_set_next_command\n");
 		return;
 	}
+
+	for (int i = 0; i < rqst->rq_nvec; i++)
+		len += rqst->rq_iov[i].iov_len;
+	len += iov_iter_count(&rqst->rq_iter);
 
 	/* SMB headers in a compound are 8 byte aligned. */
 	if (IS_ALIGNED(len, 8))
@@ -4465,107 +4467,6 @@ smb2_dir_needs_close(struct cifsFileInfo *cfile)
 	return !cfile->invalidHandle;
 }
 
-static void
-fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, unsigned int orig_len,
-		   struct smb_rqst *old_rq, __le16 cipher_type)
-{
-	struct smb2_hdr *shdr =
-			(struct smb2_hdr *)old_rq->rq_iov[0].iov_base;
-
-	memset(tr_hdr, 0, sizeof(struct smb2_transform_hdr));
-	tr_hdr->ProtocolId = SMB2_TRANSFORM_PROTO_NUM;
-	tr_hdr->OriginalMessageSize = cpu_to_le32(orig_len);
-	tr_hdr->Flags = cpu_to_le16(0x01);
-	if ((cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
-	    (cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
-	else
-		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
-	memcpy(&tr_hdr->SessionId, &shdr->SessionId, 8);
-}
-
-static void *smb2_aead_req_alloc(struct crypto_aead *tfm, const struct smb_rqst *rqst,
-				 int num_rqst, const u8 *sig, u8 **iv,
-				 struct aead_request **req, struct sg_table *sgt,
-				 unsigned int *num_sgs)
-{
-	unsigned int req_size = sizeof(**req) + crypto_aead_reqsize(tfm);
-	unsigned int iv_size = crypto_aead_ivsize(tfm);
-	unsigned int len;
-	int ret;
-	u8 *p;
-
-	ret = cifs_get_num_sgs(rqst, num_rqst, sig);
-	if (ret < 0)
-		return ERR_PTR(ret);
-	*num_sgs = ret;
-
-	len = iv_size;
-	len += crypto_aead_alignmask(tfm) & ~(crypto_tfm_ctx_alignment() - 1);
-	len = ALIGN(len, crypto_tfm_ctx_alignment());
-	len += req_size;
-	len = ALIGN(len, __alignof__(struct scatterlist));
-	len += array_size(*num_sgs, sizeof(struct scatterlist));
-
-	p = kzalloc(len, GFP_NOFS);
-	if (!p)
-		return ERR_PTR(-ENOMEM);
-
-	*iv = (u8 *)PTR_ALIGN(p, crypto_aead_alignmask(tfm) + 1);
-	*req = (struct aead_request *)PTR_ALIGN(*iv + iv_size,
-						crypto_tfm_ctx_alignment());
-	sgt->sgl = (struct scatterlist *)PTR_ALIGN((u8 *)*req + req_size,
-						   __alignof__(struct scatterlist));
-	return p;
-}
-
-static void *smb2_get_aead_req(struct crypto_aead *tfm, struct smb_rqst *rqst,
-			       int num_rqst, const u8 *sig, u8 **iv,
-			       struct aead_request **req, struct scatterlist **sgl)
-{
-	struct sg_table sgtable = {};
-	unsigned int skip, num_sgs, i, j;
-	ssize_t rc;
-	void *p;
-
-	p = smb2_aead_req_alloc(tfm, rqst, num_rqst, sig, iv, req, &sgtable, &num_sgs);
-	if (IS_ERR(p))
-		return ERR_CAST(p);
-
-	sg_init_marker(sgtable.sgl, num_sgs);
-
-	/*
-	 * The first rqst has a transform header where the
-	 * first 20 bytes are not part of the encrypted blob.
-	 */
-	skip = 20;
-
-	for (i = 0; i < num_rqst; i++) {
-		struct iov_iter *iter = &rqst[i].rq_iter;
-		size_t count = iov_iter_count(iter);
-
-		for (j = 0; j < rqst[i].rq_nvec; j++) {
-			cifs_sg_set_buf(&sgtable,
-					rqst[i].rq_iov[j].iov_base + skip,
-					rqst[i].rq_iov[j].iov_len - skip);
-
-			/* See the above comment on the 'skip' assignment */
-			skip = 0;
-		}
-		sgtable.orig_nents = sgtable.nents;
-
-		rc = extract_iter_to_sg(iter, count, &sgtable,
-					num_sgs - sgtable.nents, 0);
-		iov_iter_revert(iter, rc);
-		sgtable.orig_nents = sgtable.nents;
-	}
-
-	cifs_sg_set_buf(&sgtable, sig, SMB2_SIGNATURE_SIZE);
-	sg_mark_end(&sgtable.sgl[sgtable.nents - 1]);
-	*sgl = sgtable.sgl;
-	return p;
-}
-
 int
 smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc, u8 *key)
 {
@@ -4593,172 +4494,6 @@ smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc, u8 *key)
 	trace_smb3_ses_not_found(ses_id);
 
 	return -EAGAIN;
-}
-
-/*
- * Encrypt @rqst message. @rqst[0] has the following format:
- * iov[0]   - transform header (associate data),
- * iov[1-N] - SMB2 header and pages - data to encrypt.
- * On success return encrypted data in iov[1-N] and pages, leave iov[0]
- * untouched.
- */
-static int
-encrypt_message(struct TCP_Server_Info *server, int num_rqst,
-		struct smb_rqst *rqst, struct crypto_aead *tfm)
-{
-	struct smb2_transform_hdr *tr_hdr =
-		(struct smb2_transform_hdr *)rqst[0].rq_iov[0].iov_base;
-	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
-	int rc = 0;
-	struct scatterlist *sg;
-	u8 sign[SMB2_SIGNATURE_SIZE] = {};
-	u8 key[SMB3_ENC_DEC_KEY_SIZE];
-	struct aead_request *req;
-	u8 *iv;
-	DECLARE_CRYPTO_WAIT(wait);
-	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
-	void *creq;
-
-	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 1, key);
-	if (rc) {
-		cifs_server_dbg(FYI, "%s: Could not get encryption key. sid: 0x%llx\n",
-				__func__, le64_to_cpu(tr_hdr->SessionId));
-		return rc;
-	}
-
-	if ((server->cipher_type == SMB2_ENCRYPTION_AES256_CCM) ||
-		(server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-		rc = crypto_aead_setkey(tfm, key, SMB3_GCM256_CRYPTKEY_SIZE);
-	else
-		rc = crypto_aead_setkey(tfm, key, SMB3_GCM128_CRYPTKEY_SIZE);
-
-	if (rc) {
-		cifs_server_dbg(VFS, "%s: Failed to set aead key %d\n", __func__, rc);
-		return rc;
-	}
-
-	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
-	if (rc) {
-		cifs_server_dbg(VFS, "%s: Failed to set authsize %d\n", __func__, rc);
-		return rc;
-	}
-
-	creq = smb2_get_aead_req(tfm, rqst, num_rqst, sign, &iv, &req, &sg);
-	if (IS_ERR(creq))
-		return PTR_ERR(creq);
-
-	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
-	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-		memcpy(iv, (char *)tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
-	else {
-		iv[0] = 3;
-		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
-	}
-
-	aead_request_set_tfm(req, tfm);
-	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
-	aead_request_set_ad(req, assoc_data_len);
-
-	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-				  crypto_req_done, &wait);
-
-	rc = crypto_wait_req(crypto_aead_encrypt(req), &wait);
-
-	if (!rc)
-		memcpy(&tr_hdr->Signature, sign, SMB2_SIGNATURE_SIZE);
-
-	kfree_sensitive(creq);
-	return rc;
-}
-
-/*
- * Copy data from an iterator to the pages in a bvec queue buffer.
- */
-static bool cifs_copy_iter_to_bvecq(struct iov_iter *iter, size_t size,
-				    struct bvecq *buffer)
-{
-	for (; buffer; buffer = buffer->next) {
-		for (int s = 0; s < buffer->nr_slots; s++) {
-			struct bio_vec *bv = &buffer->bv[s];
-			size_t part = umin(bv->bv_len, size);
-
-			if (copy_page_from_iter(bv->bv_page, bv->bv_offset,
-						part, iter) != part)
-				return false;
-			size -= part;
-		}
-	}
-	return true;
-}
-
-void
-smb3_free_compound_rqst(int num_rqst, struct smb_rqst *rqst)
-{
-	for (int i = 0; i < num_rqst; i++)
-		bvecq_put(rqst[i].rq_buffer);
-}
-
-/*
- * This function will initialize new_rq and encrypt the content.
- * The first entry, new_rq[0], only contains a single iov which contains
- * a smb2_transform_hdr and is pre-allocated by the caller.
- * This function then populates new_rq[1+] with the content from olq_rq[0+].
- *
- * The end result is an array of smb_rqst structures where the first structure
- * only contains a single iov for the transform header which we then can pass
- * to crypt_message().
- *
- * new_rq[0].rq_iov[0] :  smb2_transform_hdr pre-allocated by the caller
- * new_rq[1+].rq_iov[*] == old_rq[0+].rq_iov[*] : SMB2/3 requests
- */
-static int
-smb3_init_transform_rq(struct TCP_Server_Info *server, int num_rqst,
-		       struct smb_rqst *new_rq, struct smb_rqst *old_rq)
-{
-	struct smb2_transform_hdr *tr_hdr = new_rq[0].rq_iov[0].iov_base;
-	unsigned int orig_len = 0;
-	int rc = -ENOMEM;
-
-	for (int i = 1; i < num_rqst; i++) {
-		struct smb_rqst *old = &old_rq[i - 1];
-		struct smb_rqst *new = &new_rq[i];
-		struct bvecq *buffer = NULL;
-		size_t size = iov_iter_count(&old->rq_iter);
-
-		orig_len += smb_rqst_len(server, old);
-		new->rq_iov = old->rq_iov;
-		new->rq_nvec = old->rq_nvec;
-
-		if (size > 0) {
-			rc = -ENOMEM;
-			buffer = bvecq_alloc_buffer(size, GFP_NOFS, true);
-			if (!buffer)
-				goto err_free;
-
-			new->rq_buffer = buffer;
-			iov_iter_bvec_queue(&new->rq_iter, ITER_SOURCE,
-					    buffer, 0, 0, size);
-
-			if (!cifs_copy_iter_to_bvecq(&old->rq_iter, size, buffer)) {
-				rc = smb_EIO1(smb_eio_trace_tx_copy_iter_to_buf, size);
-				goto err_free;
-			}
-		}
-	}
-
-	/* fill the 1st iov with a transform header */
-	fill_transform_hdr(tr_hdr, orig_len, old_rq, server->cipher_type);
-
-	rc = encrypt_message(server, num_rqst, new_rq, server->secmech.enc);
-	cifs_dbg(FYI, "Encrypt message returned %d\n", rc);
-	if (rc)
-		goto err_free;
-
-	return rc;
-
-err_free:
-	smb3_free_compound_rqst(num_rqst - 1, &new_rq[1]);
-	return rc;
 }
 
 int __cifs_sfu_make_node(unsigned int xid, struct inode *inode,

@@ -107,8 +107,7 @@ int compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		       int *resp_buf_type, struct kvec *resp_iov);
 int cifs_sync_mid_result(struct smb_message *mid,
 			 struct TCP_Server_Info *server);
-int __smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
-		    struct smb_rqst *rqst);
+int __smb_send_rqst(struct TCP_Server_Info *server, struct iov_iter *iter);
 int wait_for_free_request(struct TCP_Server_Info *server, const int flags,
 			  unsigned int *instance);
 int cifs_wait_mtu_credits(struct TCP_Server_Info *server, size_t size,

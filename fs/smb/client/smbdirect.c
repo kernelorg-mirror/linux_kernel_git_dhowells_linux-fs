@@ -164,36 +164,6 @@ do {									\
 #define log_rdma_mr(level, fmt, args...) \
 		log_rdma(level, LOG_RDMA_MR, fmt, ##args)
 
-static int smbd_post_send_full_iter(struct smbdirect_socket *sc,
-				    struct smbdirect_send_batch *batch,
-				    struct iov_iter *iter,
-				    u32 remaining_data_length)
-{
-	int bytes = 0;
-
-	/*
-	 * smbdirect_connection_send_single_iter() respects the
-	 * negotiated max_send_size, so we need to
-	 * loop until the full iter is posted
-	 */
-
-	while (iov_iter_count(iter) > 0) {
-		int rc;
-
-		rc = smbdirect_connection_send_single_iter(sc,
-							   batch,
-							   iter,
-							   0, /* flags */
-							   remaining_data_length);
-		if (rc < 0)
-			return rc;
-		remaining_data_length -= rc;
-		bytes += rc;
-	}
-
-	return bytes;
-}
-
 /*
  * Destroy the transport and related RDMA and memory resources
  * Need to go through all the pending counters and make sure on one is using
@@ -405,85 +375,46 @@ int smbd_recv(struct smbd_connection *info, struct msghdr *msg)
 
 /*
  * Send data to transport
- * Each rqst is transported as a SMBDirect payload
- * rqst: the data to write
  * return value: 0 if successfully write, otherwise error code
  */
-int smbd_send(struct TCP_Server_Info *server,
-	int num_rqst, struct smb_rqst *rqst_array)
+int smbd_send(struct TCP_Server_Info *server, struct iov_iter *iter)
 {
 	struct smbd_connection *info = server->smbd_conn;
 	struct smbdirect_socket *sc = info->socket;
 	const struct smbdirect_socket_parameters *sp = smbd_get_parameters(info);
-	struct smb_rqst *rqst;
-	struct iov_iter iter;
 	struct smbdirect_send_batch_storage bstorage;
 	struct smbdirect_send_batch *batch;
-	unsigned int remaining_data_length, klen;
-	int rc, i, rqst_idx;
-	int error = 0;
+	size_t size = iov_iter_count(iter);
+	int rc, error = 0;
 
 	if (!smbdirect_connection_is_connected(sc))
 		return -EAGAIN;
 
-	/*
-	 * Add in the page array if there is one. The caller needs to set
-	 * rq_tailsz to PAGE_SIZE when the buffer has multiple pages and
-	 * ends at page boundary
-	 */
-	remaining_data_length = 0;
-	for (i = 0; i < num_rqst; i++)
-		remaining_data_length += smb_rqst_len(server, &rqst_array[i]);
-
-	if (unlikely(remaining_data_length > sp->max_fragmented_send_size)) {
+	if (unlikely(size > sp->max_fragmented_send_size)) {
 		/* assertion: payload never exceeds negotiated maximum */
-		log_write(ERR, "payload size %d > max size %d\n",
-			remaining_data_length, sp->max_fragmented_send_size);
+		log_write(ERR, "payload size %zu > max size %d\n",
+			  size, sp->max_fragmented_send_size);
 		return -EINVAL;
 	}
 
-	log_write(INFO, "num_rqst=%d total length=%u\n",
-			num_rqst, remaining_data_length);
+	log_write(INFO, "size=%zu\n", size);
 
-	rqst_idx = 0;
+	/*
+	 * smbdirect_connection_send_single_iter() respects the negotiated
+	 * max_send_size, so we need to loop until the full iter is posted
+	 */
 	batch = smbdirect_init_send_batch_storage(&bstorage, false, 0);
-	do {
-		rqst = &rqst_array[rqst_idx];
-
-		cifs_dbg(FYI, "Sending smb (RDMA): idx=%d smb_len=%lu\n",
-			 rqst_idx, smb_rqst_len(server, rqst));
-		for (i = 0; i < rqst->rq_nvec; i++)
-			dump_smb(rqst->rq_iov[i].iov_base, rqst->rq_iov[i].iov_len);
-
-		log_write(INFO, "RDMA-WR[%u] nvec=%d len=%u iter=%zu rqlen=%lu\n",
-			  rqst_idx, rqst->rq_nvec, remaining_data_length,
-			  iov_iter_count(&rqst->rq_iter), smb_rqst_len(server, rqst));
-
-		/* Send the metadata pages. */
-		klen = 0;
-		for (i = 0; i < rqst->rq_nvec; i++)
-			klen += rqst->rq_iov[i].iov_len;
-		iov_iter_kvec(&iter, ITER_SOURCE, rqst->rq_iov, rqst->rq_nvec, klen);
-
-		rc = smbd_post_send_full_iter(sc, batch, &iter, remaining_data_length);
+	while (iov_iter_count(iter) > 0) {
+		rc = smbdirect_connection_send_single_iter(sc,
+							   batch,
+							   iter,
+							   0, /* flags */
+							   iov_iter_count(iter));
 		if (rc < 0) {
 			error = rc;
 			break;
 		}
-		remaining_data_length -= rc;
-
-		if (iov_iter_count(&rqst->rq_iter) > 0) {
-			/* And then the data pages if there are any */
-			rc = smbd_post_send_full_iter(sc, batch, &rqst->rq_iter,
-						      remaining_data_length);
-			if (rc < 0) {
-				error = rc;
-				break;
-			}
-			remaining_data_length -= rc;
-		}
-
-	} while (++rqst_idx < num_rqst);
+	}
 
 	rc = smbdirect_connection_send_batch_flush(sc, batch, true);
 	if (unlikely(!rc && error))

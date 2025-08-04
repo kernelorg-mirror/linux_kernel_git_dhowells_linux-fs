@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/uio.h>
 #include <linux/sort.h>
+#include <linux/vmalloc.h>
 
 #include "cifsglob.h"
 #include "../common/smb2pdu.h"
@@ -195,7 +196,7 @@ static int collect_sample(const struct iov_iter *source, ssize_t max, u8 *sample
  * Tests shows that this function is quite reliable in predicting data compressibility,
  * matching close to 1:1 with the behaviour of LZ77 compression success and failures.
  */
-static bool is_compressible(const struct iov_iter *data)
+bool is_compressible(const struct iov_iter *data)
 {
 	const size_t read_size = SZ_2K, bkt_size = 256, max = SZ_4M;
 	struct bucket *bkt = NULL;
@@ -299,74 +300,123 @@ bool should_compress(const struct cifs_tcon *tcon, const struct smb_rqst *rq)
 		if (le32_to_cpu(wreq->Length) < SMB_COMPRESS_MIN_LEN)
 			return false;
 
-		return is_compressible(&rq->rq_iter);
+		return true;
 	}
 
 	return (shdr->Command == SMB2_READ);
 }
 
-int smb_compress(struct TCP_Server_Info *server, struct smb_rqst *rq, compress_send_fn send_fn)
+/*
+ * vmap the pages from a BVECQ-type iterator.
+ */
+static void *vmap_bvecq(struct iov_iter *iter, pgprot_t prot)
 {
-	struct iov_iter iter;
-	u32 slen, dlen;
+	struct page **pages = NULL;
+	ssize_t size, offset;
+	void *map;
+
+	if (WARN_ON(!iov_iter_is_bvecq(iter)))
+		return ERR_PTR(-EIO);
+
+	size = iov_iter_extract_pages(iter, &pages, INT_MAX, INT_MAX, 0, &offset);
+	if (size < 0)
+		return ERR_PTR(size);
+
+	if (size == 0 || offset > 0) {
+		kvfree(pages);
+		return ERR_PTR(-EIO);
+	}
+
+	map = vmap(pages, DIV_ROUND_UP(size, PAGE_SIZE), 0, prot);
+	kvfree(pages);
+	if (!map)
+		return ERR_PTR(-ENOMEM);
+	return map;
+}
+
+int smb_compress(struct TCP_Server_Info *server, struct iov_iter *iter,
+		 struct bvecq **bq, unsigned int flags)
+{
+	struct smb2_compression_hdr *z_hdr;
+	struct smb2_write_req *w_hdr;
+	struct smb2_hdr *shdr;
+	struct iov_iter tmp;
+	struct bvecq *sbq = *bq, *dbq = NULL;
 	void *src, *dst = NULL;
+	u32 slen, dlen, hlen, datalen;
 	int ret;
 
-	if (!server || !rq || !rq->rq_iov || !rq->rq_iov->iov_base)
-		return -EINVAL;
-
-	if (rq->rq_iov->iov_len != sizeof(struct smb2_write_req))
-		return -EINVAL;
-
-	slen = iov_iter_count(&rq->rq_iter);
-	src = kvzalloc(slen, GFP_KERNEL);
-	if (!src) {
-		ret = -ENOMEM;
+	/* We need contiguous buffers for the compression algorithm. */
+	slen = iov_iter_count(iter);
+	src = vmap_bvecq(iter, PAGE_KERNEL_RO);
+	if (IS_ERR(src)) {
+		ret = PTR_ERR(src);
+		src = NULL;
 		goto err_free;
 	}
 
-	/* Keep the original iter intact. */
-	iter = rq->rq_iter;
-
-	if (!copy_from_iter_full(src, slen, &iter)) {
-		ret = smb_EIO(smb_eio_trace_compress_copy);
-		goto err_free;
+	shdr = src;
+	hlen  = le16_to_cpu(shdr->StructureSize);
+	w_hdr = src;
+	hlen = le16_to_cpu(w_hdr->DataOffset);
+	datalen = le32_to_cpu(w_hdr->Length);
+	if (datalen != slen - hlen) {
+		pr_warn("datalen %x != slen-hlen %x\n", datalen, slen - hlen);
+		return -EMSGSIZE;
 	}
 
+	/*
+	 * This is just overprovisioning, as the algorithm will error out if @dst reaches 7/8
+	 * of @slen.
+	 */
 	dlen = smb_lz77_compressed_alloc_size(slen);
-	dst = kvzalloc(dlen, GFP_KERNEL);
-	if (!dst) {
+	dlen = sizeof(*z_hdr) + slen;
+	dbq = bvecq_alloc_buffer(dlen, GFP_NOFS, flags & CIFS_WRITEBACK);
+	if (!dbq) {
 		ret = -ENOMEM;
 		goto err_free;
 	}
 
-	ret = smb_lz77_compress(src, slen, dst, &dlen);
-	if (!ret) {
-		struct smb2_compression_hdr hdr = { 0 };
-		struct smb_rqst comp_rq = { .rq_nvec = 3, };
-		struct kvec iov[3];
-
-		hdr.ProtocolId = SMB2_COMPRESSION_TRANSFORM_ID;
-		hdr.OriginalCompressedSegmentSize = cpu_to_le32(slen);
-		hdr.CompressionAlgorithm = SMB3_COMPRESS_LZ77;
-		hdr.Flags = SMB2_COMPRESSION_FLAG_NONE;
-		hdr.Offset = cpu_to_le32(rq->rq_iov[0].iov_len);
-
-		iov[0].iov_base = &hdr;
-		iov[0].iov_len = sizeof(hdr);
-		iov[1] = rq->rq_iov[0];
-		iov[2].iov_base = dst;
-		iov[2].iov_len = dlen;
-
-		comp_rq.rq_iov = iov;
-
-		ret = send_fn(server, 1, &comp_rq);
-	} else if (ret == -EMSGSIZE || dlen >= slen) {
-		ret = send_fn(server, 1, rq);
+	iov_iter_bvec_queue(&tmp, ITER_DEST, dbq, 1, 0, dlen);
+	dst = vmap_bvecq(&tmp, PAGE_KERNEL);
+	if (IS_ERR(dst)) {
+		ret = PTR_ERR(dst);
+		dst = NULL;
+		goto err_free;
 	}
-err_free:
-	kvfree(dst);
-	kvfree(src);
+	z_hdr = dst;
+	dst  += sizeof(*z_hdr) + hlen;
+	dlen -= sizeof(*z_hdr) + hlen;
 
+	ret = smb_lz77_compress(src + hlen, slen - hlen, dst, &dlen);
+	if (ret)
+		goto err_free;
+
+	dlen += sizeof(*z_hdr) + hlen;
+	dst -= hlen;
+	memcpy(dst, src, hlen);
+
+	z_hdr->ProtocolId			= SMB2_COMPRESSION_TRANSFORM_ID;
+	z_hdr->OriginalCompressedSegmentSize	= cpu_to_le32(datalen);
+	z_hdr->CompressionAlgorithm		= SMB3_COMPRESS_LZ77;
+	z_hdr->Flags				= SMB2_COMPRESSION_FLAG_NONE;
+	z_hdr->Offset				= cpu_to_le32(hlen);
+
+	vunmap(z_hdr);
+	vunmap(src);
+
+	dbq->bv[0] = sbq->bv[0];
+	memset(&sbq->bv[0], 0, sizeof(sbq->bv[0]));
+	bvecq_shorten_buffer(dbq, 1, dlen);
+	bvecq_dump(dbq);
+
+	bvecq_put(sbq);
+	*bq = dbq;
+	return dlen;
+
+err_free:
+	vunmap(z_hdr);
+	vunmap(src);
+	bvecq_put(dbq);
 	return ret;
 }

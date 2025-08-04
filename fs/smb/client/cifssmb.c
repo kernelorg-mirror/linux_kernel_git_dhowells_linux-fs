@@ -1936,7 +1936,10 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
 	struct kvec iov[1];
 	struct smb_rqst rqst = { };
-	unsigned int in_len;
+	unsigned int in_len, flags = 0;
+
+	if (wdata->rreq->origin == NETFS_WRITEBACK)
+		flags |= CIFS_WRITEBACK;
 
 	if (tcon->ses->capabilities & CAP_LARGE_FILES) {
 		wct = 14;
@@ -1998,7 +2001,7 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 	}
 
 	rc = cifs_call_async(tcon->ses->server, &rqst,
-			     cifs_writev_callback, wdata, 0, NULL, NULL);
+			     cifs_writev_callback, wdata, flags, NULL, NULL);
 	/* Can't touch wdata if rc == 0 */
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_writes);

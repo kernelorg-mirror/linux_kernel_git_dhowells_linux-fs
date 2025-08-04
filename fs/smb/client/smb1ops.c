@@ -142,6 +142,7 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	       struct smb_rqst *rqst, struct smb_message *smb,
 	       unsigned int xid)
 {
+	struct iov_iter iter;
 	struct smb_hdr *in_buf = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
 	struct kvec iov[1];
 	struct smb_rqst crqst = { .rq_iov = iov, .rq_nvec = 1 };
@@ -162,13 +163,15 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		return rc;
 	}
 
+	iov_iter_kvec(&iter, ITER_SOURCE, iov, 1, iov[0].iov_len);
+
 	/*
 	 * The response to this call was already factored into the sequence
 	 * number when the call went out, so we must adjust it back downward
 	 * after signing here.
 	 */
 	--server->sequence_number;
-	rc = __smb_send_rqst(server, 1, &crqst);
+	rc = __smb_send_rqst(server, &iter);
 	if (rc < 0)
 		server->sequence_number--;
 

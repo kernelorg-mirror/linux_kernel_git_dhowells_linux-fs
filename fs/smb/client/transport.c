@@ -23,6 +23,9 @@
 #include <linux/sched/signal.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/task_work.h>
+#include <linux/iov_iter.h>
+#include "rfc1002pdu.h"
+#include "cifspdu.h"
 #include "cifsglob.h"
 #include "cifsproto.h"
 #include "cifs_debug.h"
@@ -252,51 +255,100 @@ smb_send_kvec(struct TCP_Server_Info *server, struct msghdr *smb_msg,
 	return 0;
 }
 
-unsigned long
-smb_rqst_len(struct TCP_Server_Info *server, struct smb_rqst *rqst)
+/*
+ * smb_sendmsg - send a buffer to the socket
+ * @server:	Server to send the data to
+ * @iter:	The data to send (not advanced)
+ * @sent:	The amount of data sent
+ *
+ * Our basic "send data to server" function. Should be called with srv_mutex
+ * held. The caller is responsible for handling the results.
+ */
+static int smb_sendmsg(struct TCP_Server_Info *server, const struct iov_iter *iter,
+		       size_t *sent)
 {
-	unsigned int i;
-	struct kvec *iov;
-	int nvec;
-	unsigned long buflen = 0;
+	struct socket *ssocket = server->ssocket;
+	struct msghdr msg = {
+		/*
+		 * MSG_SPLICE_PAGES causes tcp_sendmsg() to splice in the pages
+		 * in the iterator rather than copying from them.
+		 */
+		.msg_flags	= MSG_NOSIGNAL | MSG_SPLICE_PAGES,
+		.msg_iter	= *iter,
+	};
+	int retries = 0;
+	int rc = 0;
 
-	if (!is_smb1(server) && rqst->rq_nvec >= 2 &&
-	    rqst->rq_iov[0].iov_len == 4) {
-		iov = &rqst->rq_iov[1];
-		nvec = rqst->rq_nvec - 1;
-	} else {
-		iov = rqst->rq_iov;
-		nvec = rqst->rq_nvec;
+	*sent = 0;
+	if (server->noblocksnd)
+		msg.msg_flags = MSG_DONTWAIT;
+
+	while (msg_data_left(&msg)) {
+		/*
+		 * If blocking send, we try 3 times, since each can block for 5
+		 * seconds. For nonblocking we have to try more but wait
+		 * increasing amounts of time allowing time for socket to
+		 * clear.  The overall time we wait in either case to send on
+		 * the socket is about 15 seconds.  Similarly we wait for 15
+		 * seconds for a response from the server in SendReceive[2] for
+		 * the server to send a response back for most types of
+		 * requests (except SMB Write past end of file which can be
+		 * slow, and blocking lock operations). NFS waits slightly
+		 * longer than CIFS, but this can make it take longer for
+		 * nonresponsive servers to be detected and 15 seconds is more
+		 * than enough time for modern networks to send a packet.  In
+		 * most cases if we fail to send after the retries we will kill
+		 * the socket and reconnect which may clear the network
+		 * problem.
+		 */
+		rc = sock_sendmsg(ssocket, &msg);
+		if (rc == -EAGAIN) {
+			retries++;
+			if (retries >= 14 ||
+			    (!server->noblocksnd && (retries > 2))) {
+				cifs_server_dbg(VFS, "sends on sock %p stuck for 15 seconds\n",
+					 ssocket);
+				return -EAGAIN;
+			}
+			msleep(1 << retries);
+			continue;
+		}
+
+		if (rc < 0)
+			return rc;
+
+		if (rc == 0) {
+			/* should never happen, letting socket clear before
+			   retrying is our only obvious option here */
+			cifs_server_dbg(VFS, "tcp sent no data\n");
+			msleep(500);
+			continue;
+		}
+
+		*sent += rc;
+
+		/* send was at least partially successful */
+		retries = 0; /* in case we get ENOSPC on the next send */
 	}
-
-	/* total up iov array first */
-	for (i = 0; i < nvec; i++)
-		buflen += iov[i].iov_len;
-
-	buflen += iov_iter_count(&rqst->rq_iter);
-	return buflen;
+	return 0;
 }
 
-int __smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
-		    struct smb_rqst *rqst)
+int
+__smb_send_rqst(struct TCP_Server_Info *server, struct iov_iter *iter)
 {
-	int rc;
-	struct kvec *iov;
-	int n_vec;
-	unsigned int send_length = 0;
-	unsigned int i, j;
-	sigset_t mask, oldmask;
-	size_t total_len = 0, sent, size;
 	struct socket *ssocket = server->ssocket;
-	struct msghdr smb_msg = {};
-	__be32 rfc1002_marker;
+	sigset_t mask, oldmask;
+	size_t total_to_send = iov_iter_count(iter), sent = 0;
+	int rc;
 
 	cifs_in_send_inc(server);
 	if (cifs_rdma_enabled(server)) {
 		/* return -EAGAIN when connecting or reconnecting */
 		rc = -EAGAIN;
-		if (server->smbd_conn)
-			rc = smbd_send(server, num_rqst, rqst);
+		if (server->smbd_conn) {
+			iov_iter_advance(iter, 4);
+			rc = smbd_send(server, iter);
+		}
 		goto smbd_done;
 	}
 
@@ -314,10 +366,6 @@ int __smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 	/* cork the socket */
 	tcp_sock_set_cork(ssocket->sk, true);
 
-	for (j = 0; j < num_rqst; j++)
-		send_length += smb_rqst_len(server, &rqst[j]);
-	rfc1002_marker = cpu_to_be32(send_length);
-
 	/*
 	 * We should not allow signals to interrupt the network send because
 	 * any partial send will cause session reconnects thus increasing
@@ -328,83 +376,44 @@ int __smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 	sigfillset(&mask);
 	sigprocmask(SIG_BLOCK, &mask, &oldmask);
 
-	/* Generate a rfc1002 marker */
-	{
-		struct kvec hiov = {
-			.iov_base = &rfc1002_marker,
-			.iov_len  = 4
-		};
-		iov_iter_kvec(&smb_msg.msg_iter, ITER_SOURCE, &hiov, 1, 4);
-		rc = smb_send_kvec(server, &smb_msg, &sent);
-		if (rc < 0)
-			goto unmask;
+	cifs_dbg(FYI, "Sending smb: smb_len=%zu\n", iov_iter_count(iter));
+	rc = smb_sendmsg(server, iter, &sent);
 
-		total_len += sent;
-		send_length += 4;
-	}
-
-	cifs_dbg(FYI, "Sending smb: smb_len=%u\n", send_length);
-
-	for (j = 0; j < num_rqst; j++) {
-		iov = rqst[j].rq_iov;
-		n_vec = rqst[j].rq_nvec;
-
-		size = 0;
-		for (i = 0; i < n_vec; i++) {
-			dump_smb(iov[i].iov_base, iov[i].iov_len);
-			size += iov[i].iov_len;
-		}
-
-		iov_iter_kvec(&smb_msg.msg_iter, ITER_SOURCE, iov, n_vec, size);
-
-		rc = smb_send_kvec(server, &smb_msg, &sent);
-		if (rc < 0)
-			goto unmask;
-
-		total_len += sent;
-
-		if (iov_iter_count(&rqst[j].rq_iter) > 0) {
-			smb_msg.msg_iter = rqst[j].rq_iter;
-			rc = smb_send_kvec(server, &smb_msg, &sent);
-			if (rc < 0)
-				break;
-			total_len += sent;
-		}
-	}
-
-unmask:
 	sigprocmask(SIG_SETMASK, &oldmask, NULL);
-
-	/*
-	 * If signal is pending but we have already sent the whole packet to
-	 * the server we need to return success status to allow a corresponding
-	 * mid entry to be kept in the pending requests queue thus allowing
-	 * to handle responses from the server by the client.
-	 *
-	 * If only part of the packet has been sent there is no need to hide
-	 * interrupt because the session will be reconnected anyway, so there
-	 * won't be any response from the server to handle.
-	 */
-
-	if (signal_pending(current) && (total_len != send_length)) {
-		cifs_dbg(FYI, "signal is pending after attempt to send\n");
-		rc = -ERESTARTSYS;
-	}
 
 	/* uncork it */
 	tcp_sock_set_cork(ssocket->sk, false);
 
-	if ((total_len > 0) && (total_len != send_length)) {
-		cifs_dbg(FYI, "partial send (wanted=%u sent=%zu): terminating session\n",
-			 send_length, total_len);
+	if (sent > 0) {
+		/*
+		 * If signal is pending but we have already sent the whole
+		 * packet to the server we need to return success status to
+		 * allow a corresponding mid entry to be kept in the pending
+		 * requests queue thus allowing to handle responses from the
+		 * server by the client.
+		 *
+		 * If only part of the packet has been sent there is no need to
+		 * hide interrupt because the session will be reconnected
+		 * anyway, so there won't be any response from the server to
+		 * handle.
+		 */
+		if (signal_pending(current)) {
+			cifs_dbg(FYI, "signal is pending after attempt to send\n");
+			rc = -ERESTARTSYS;
+		}
+
 		/*
 		 * If we have only sent part of an SMB then the next SMB could
 		 * be taken as the remainder of this one. We need to kill the
 		 * socket so the server throws away the partial SMB
 		 */
-		cifs_signal_cifsd_for_reconnect(server, false);
-		trace_smb3_partial_send_reconnect(server->current_mid,
-						  server->conn_id, server->hostname);
+		if (sent != total_to_send) {
+			cifs_dbg(FYI, "partial send (wanted=%zu sent=%zu): terminating session\n",
+				 total_to_send, sent);
+			cifs_signal_cifsd_for_reconnect(server, false);
+			trace_smb3_partial_send_reconnect(server->current_mid,
+							  server->conn_id, server->hostname);
+		}
 	}
 smbd_done:
 	/*
@@ -424,41 +433,168 @@ out:
 	return rc;
 }
 
+static size_t smb3_copy_data_iter(void *iter_from, size_t progress, size_t len,
+				  void *priv, void *priv2)
+{
+	struct iov_iter *iter = priv;
+	return copy_to_iter(iter_from, len, iter) == len ? 0 : len;
+}
+
+/*
+ * Copy the data into a buffer that we can use for encryption in place and also
+ * pass to sendmsg() with MSG_SPLICE_PAGES.  This avoids a lot of copies in TCP
+ * at the expense of doing it upfront here.  A spare slot is left in the bvec
+ * queue at the front for the header(s).
+ *
+ * TODO: In future, the buffers should be allocated by the marshalling code.
+ */
+static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
+				     int num_rqst, struct smb_rqst *rqst,
+				     struct iov_iter *iter, struct bvecq **_bq,
+				     unsigned int flags)
+{
+	struct bvecq *bq;
+	size_t total_len = 0, offset = 0;
+
+	for (int i = 0; i < num_rqst; i++) {
+		struct smb_rqst *req = &rqst[i];
+		size_t size = iov_iter_count(&req->rq_iter);
+
+		for (int j = 0; j < req->rq_nvec; j++)
+			size += req->rq_iov[j].iov_len;
+		total_len = ALIGN8(total_len);
+		total_len += size;
+	}
+
+	bq = bvecq_alloc_buffer(total_len, GFP_NOFS, flags & CIFS_WRITEBACK);
+	if (!bq)
+		return -ENOMEM;
+
+	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
+
+	for (int i = 0; i < num_rqst; i++) {
+		struct smb_rqst *req = &rqst[i];
+		size_t size = iov_iter_count(&req->rq_iter);
+
+		if (offset & 7) {
+			unsigned int tmp = offset;
+			offset = ALIGN8(offset);
+			iov_iter_zero(offset - tmp, iter);
+		}
+
+		for (int j = 0; j < req->rq_nvec; j++) {
+			size_t len = req->rq_iov[j].iov_len;
+			if (copy_to_iter(req->rq_iov[j].iov_base, len, iter) != len)
+				goto error;
+			offset += len;
+		}
+
+		if (iterate_and_advance_kernel(&req->rq_iter,
+					       size, iter, NULL,
+					       smb3_copy_data_iter) != size)
+			goto error;
+
+		offset += size;
+	}
+
+	if (WARN_ONCE(offset != total_len,
+		      "offset=%zx total_len=%zx\n", offset, total_len)) {
+		goto error;
+	}
+	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
+	*_bq = bq;
+	return 0;
+error:
+	bvecq_put(bq);
+	*_bq = NULL;
+	return -EIO;
+}
+
 static int
 smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 	      struct smb_rqst *rqst, int flags)
 {
-	struct smb2_transform_hdr tr_hdr;
-	struct smb_rqst new_rqst[MAX_COMPOUND] = {};
-	struct kvec iov = {
-		.iov_base = &tr_hdr,
-		.iov_len = sizeof(tr_hdr),
-	};
+	struct iov_iter iter;
+	struct bvecq *bq;
+	u32 content_len;
 	int rc;
 
-	if (flags & CIFS_COMPRESS_REQ)
-		return smb_compress(server, &rqst[0], __smb_send_rqst);
-
-	if (!(flags & CIFS_TRANSFORM_REQ))
-		return __smb_send_rqst(server, num_rqst, rqst);
-
-	if (WARN_ON_ONCE(num_rqst > MAX_COMPOUND - 1))
-		return smb_EIO1(smb_eio_trace_tx_max_compound, num_rqst);
-
-	if (!server->ops->init_transform_rq) {
+	if ((flags & CIFS_TRANSFORM_REQ) &&
+	    !server->ops->init_transform_rq) {
 		cifs_server_dbg(VFS, "Encryption requested but transform callback is missing\n");
 		return smb_EIO(smb_eio_trace_tx_need_transform);
 	}
 
-	new_rqst[0].rq_iov = &iov;
-	new_rqst[0].rq_nvec = 1;
+	rc = smb_copy_data_into_buffer(server, num_rqst, rqst, &iter, &bq, flags);
+	if (rc)
+		return rc;
+	content_len = iov_iter_count(&iter);
 
-	rc = server->ops->init_transform_rq(server, num_rqst + 1,
-					    new_rqst, rqst);
-	if (!rc) {
-		rc = __smb_send_rqst(server, num_rqst + 1, new_rqst);
-		smb3_free_compound_rqst(num_rqst, &new_rqst[1]);
+	{
+		struct smb2_transform_hdr *tr_hdr;
+		unsigned int hdr_len = 4, troff = 0;
+		__le32 *rfc1002;
+		void *hdr_blob;
+
+		if (flags & CIFS_TRANSFORM_REQ) {
+			troff = hdr_len;
+			hdr_len += sizeof(*tr_hdr);
+		}
+
+		/* TODO: Allocate netmem here */
+		rc = -ENOMEM;
+		hdr_blob = (void *)__get_free_page(GFP_NOFS);
+		if (!hdr_blob)
+			goto error;
+		bvec_set_virt(&bq->bv[0], hdr_blob, hdr_len);
+
+		if (flags & CIFS_COMPRESS_REQ) {
+			struct smb2_write_req *whdr = bvec_virt(&bq->bv[1]);
+			size_t doff = le16_to_cpu(whdr->DataOffset);
+
+			iov_iter_bvec_queue(&iter, ITER_SOURCE, bq, 1, doff,
+					    content_len - doff);
+
+			if (is_compressible(&iter)) {
+				iov_iter_bvec_queue(&iter, ITER_SOURCE, bq, 1, 0,
+						    content_len);
+
+				rc = smb_compress(server, &iter, &bq, flags);
+				if (rc > 0) {
+					content_len = rc;
+				} else if (rc == -EMSGSIZE) {
+					/* Fall back to uncompressed. */
+				} else {
+					if (rc == 0)
+						rc = -EIO;
+					goto error;
+				}
+			}
+		}
+
+		if (flags & CIFS_TRANSFORM_REQ) {
+			iov_iter_bvec_queue(&iter, ITER_SOURCE, bq, 0, 0,
+					    hdr_len + content_len);
+			iov_iter_advance(&iter, troff);
+			tr_hdr = hdr_blob + troff;
+
+			rc = server->ops->init_transform_rq(server, num_rqst, rqst, tr_hdr, &iter);
+			if (rc)
+				goto error;
+			content_len += sizeof(*tr_hdr);
+		} else {
+			bvec_set_virt(&bq->bv[0], hdr_blob, hdr_len);
+		}
+
+		/* Set the RFC1002 header at the front. */
+		rfc1002 = hdr_blob;
+		*rfc1002 = cpu_to_be32(RFC1002_SESSION_MESSAGE << 24 | content_len);
+
+		iov_iter_bvec_queue(&iter, ITER_SOURCE, bq, 0, 0, 4 + content_len);
 	}
+	rc = __smb_send_rqst(server, &iter);
+error:
+	bvecq_put(bq);
 	return rc;
 }
 
@@ -748,6 +884,7 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 	smb->callback = callback;
 	smb->callback_data = cbdata;
 	smb->mid_state = MID_REQUEST_SUBMITTED;
+	smb->writeback = flags & CIFS_WRITEBACK;
 	if (resp_buf) {
 		smb->copy_to_bufs = true;
 		smb->response_iter = *resp_buf;

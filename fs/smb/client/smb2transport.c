@@ -889,6 +889,119 @@ static void *smb2_get_aead_req_new(struct crypto_aead *tfm, const struct iov_ite
 }
 
 /*
+ * Encrypt the message in the buffer described by the iterator.
+ * On success return encrypted data in iov[1-N] and pages, leave iov[0]
+ * untouched.
+ */
+static int
+encrypt_message(struct TCP_Server_Info *server,
+		struct smb2_transform_hdr *tr_hdr,
+		struct iov_iter *iter, struct crypto_aead *tfm)
+{
+	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
+	int rc = 0;
+	struct scatterlist *sg;
+	u8 key[SMB3_ENC_DEC_KEY_SIZE];
+	struct aead_request *req;
+	u8 *iv;
+	DECLARE_CRYPTO_WAIT(wait);
+	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
+	void *creq;
+	size_t sensitive_size;
+
+	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 1, key);
+	if (rc) {
+		cifs_server_dbg(FYI, "%s: Could not get encryption key. sid: 0x%llx\n",
+				__func__, le64_to_cpu(tr_hdr->SessionId));
+		return rc;
+	}
+
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES256_CCM) ||
+		(server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM256_CRYPTKEY_SIZE);
+	else
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM128_CRYPTKEY_SIZE);
+
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set aead key %d\n", __func__, rc);
+		return rc;
+	}
+
+	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set authsize %d\n", __func__, rc);
+		return rc;
+	}
+
+	creq = smb2_get_aead_req_new(tfm, iter, tr_hdr->Signature, &iv, &req, &sg,
+				     &sensitive_size);
+	if (IS_ERR(creq))
+		return PTR_ERR(creq);
+
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
+	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		memcpy(iv, (char *)tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
+	else {
+		iv[0] = 3;
+		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
+	}
+
+	aead_request_set_tfm(req, tfm);
+	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
+	aead_request_set_ad(req, assoc_data_len);
+
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
+
+	rc = crypto_wait_req(crypto_aead_encrypt(req), &wait);
+
+	kvfree_sensitive(creq, sensitive_size);
+	return rc;
+}
+
+static void
+fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, unsigned int orig_len,
+		   const struct smb_rqst *old_rq, __le16 cipher_type)
+{
+	struct smb2_hdr *shdr = (struct smb2_hdr *)old_rq->rq_iov[0].iov_base;
+
+	*tr_hdr = (struct smb2_transform_hdr){
+		.ProtocolId		= SMB2_TRANSFORM_PROTO_NUM,
+		.OriginalMessageSize	= cpu_to_le32(orig_len),
+		.Flags			= cpu_to_le16(0x01),
+		.SessionId		= shdr->SessionId,
+	};
+	if ((cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
+	    (cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
+	else
+		get_random_bytes(&tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
+}
+
+/*
+ * This function encrypts the content in the buffer described by the iterator
+ * and fills in the transform header.  The source request buffers are provided
+ * for reference.
+ */
+int
+smb3_init_transform_rq(struct TCP_Server_Info *server,
+		       int num_rqst, const struct smb_rqst *rqst,
+		       struct smb2_transform_hdr *tr_hdr,
+		       struct iov_iter *iter)
+{
+	size_t orig_len = iov_iter_count(iter) - sizeof(*tr_hdr);
+	int rc;
+
+	fill_transform_hdr(tr_hdr, orig_len, rqst, server->cipher_type);
+
+	iov_iter_advance(iter, offsetof(struct smb2_transform_hdr, Nonce));
+
+	rc = encrypt_message(server, tr_hdr, iter, server->secmech.enc);
+	cifs_dbg(FYI, "Encrypt message returned %d\n", rc);
+	return rc;
+}
+
+/*
  * Decrypt the PDU in the iterator.  The PDU begins with the transform header.
  */
 static int decrypt_pdu(struct TCP_Server_Info *server,

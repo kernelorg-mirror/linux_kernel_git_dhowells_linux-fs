@@ -5145,6 +5145,9 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 	struct cifs_io_parms *io_parms = NULL;
 	int credit_request;
 
+	if (wdata->rreq->origin == NETFS_WRITEBACK)
+		flags |= CIFS_WRITEBACK;
+
 	/*
 	 * in future we may get cifs_io_parms passed in from the caller,
 	 * but for now we construct it here...

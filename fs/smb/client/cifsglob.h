@@ -572,8 +572,10 @@ struct smb_version_operations {
 	long (*fallocate)(struct file *, struct cifs_tcon *, int, loff_t,
 			  loff_t);
 	/* init transform (compress/encrypt) request */
-	int (*init_transform_rq)(struct TCP_Server_Info *, int num_rqst,
-				 struct smb_rqst *, struct smb_rqst *);
+	int (*init_transform_rq)(struct TCP_Server_Info *server,
+				 int num_rqst, const struct smb_rqst *rqst,
+				 struct smb2_transform_hdr *tr_hdr,
+				 struct iov_iter *iter);
 	enum securityEnum (*select_sectype)(struct TCP_Server_Info *,
 			    enum securityEnum);
 	int (*next_header)(struct TCP_Server_Info *server, char *buf,
@@ -1937,6 +1939,7 @@ enum cifs_find_flags {
 #define   CIFS_COMPRESS_REQ       0x4000 /* compress request before sending */
 #define   CIFS_INTERRUPTIBLE_WAIT 0x8000 /* Interruptible wait (e.g. lock request) */
 #define   CIFS_WINDOWS_LOCK       0x10000 /* We're trying to get a Windows lock */
+#define   CIFS_WRITEBACK	  0x20000 /* We're doing writeback */
 
 /* Security Flags: indicate type of session setup needed */
 #define   CIFSSEC_MAY_SIGN	0x00001

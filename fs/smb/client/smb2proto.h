@@ -115,6 +115,10 @@ int smb2_unlock_range(struct cifsFileInfo *cfile, struct file_lock *flock,
 int smb2_push_mandatory_locks(struct cifsFileInfo *cfile);
 void smb2_reconnect_server(struct work_struct *work);
 int smb3_crypto_aead_allocate(struct TCP_Server_Info *server);
+int smb3_init_transform_rq(struct TCP_Server_Info *server,
+			   int num_rqst, const struct smb_rqst *rqst,
+			   struct smb2_transform_hdr *tr_hdr,
+			   struct iov_iter *iter);
 unsigned long smb_rqst_len(struct TCP_Server_Info *server,
 			   struct smb_rqst *rqst);
 void smb2_set_next_command(struct cifs_tcon *tcon, struct smb_rqst *rqst);
