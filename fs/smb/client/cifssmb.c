@@ -737,7 +737,6 @@ CIFSSMBEcho(struct TCP_Server_Info *server)
 	smb->request		= req;
 	smb->total_len		= in_len;
 	smb->callback		= cifs_echo_callback;
-	smb->callback_data	= server;
 
 	rc = cifs_call_async(server, smb, CIFS_NON_BLOCKING | CIFS_ECHO_OP, NULL);
 	if (rc)
@@ -1428,7 +1427,7 @@ openRetry:
 static void
 cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *rdata = smb->callback_data;
+	struct cifs_io_subrequest *rdata = smb->subreq;
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct inode *inode = &ictx->inode;
@@ -1595,7 +1594,6 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 	smb->request		= req;
 	smb->total_len		= in_len;
 	smb->callback		= cifs_readv_callback;
-	smb->callback_data	= rdata;
 	smb->copy_to_bufs	= true;
 
 	iov_iter_bvec_queue(&smb->response_iter, ITER_DEST,
@@ -1864,7 +1862,7 @@ CIFSSMBWrite(const unsigned int xid, struct cifs_io_parms *io_parms,
 static void
 cifs_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *wdata = smb->callback_data;
+	struct cifs_io_subrequest *wdata = smb->subreq;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
 	WRITE_RSP *rsp = (WRITE_RSP *)smb->response;
 	struct cifs_credits credits = {
@@ -1982,7 +1980,6 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 	smb->total_len		= in_len + 1;
 	smb->total_len		+= wdata->subreq.len;
 	smb->callback		= cifs_writev_callback;
-	smb->callback_data	= wdata;
 
 	iov_iter_bvec_queue(&smb->rqst.rq_iter, ITER_DEST,
 			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,

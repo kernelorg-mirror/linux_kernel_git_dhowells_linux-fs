@@ -4423,7 +4423,6 @@ SMB2_echo(struct TCP_Server_Info *server)
 	smb->request		= req;
 	smb->total_len		= total_len;
 	smb->callback		= smb2_echo_callback;
-	smb->callback_data	= server;
 
 	req->hdr.CreditRequest = cpu_to_le16(1);
 
@@ -4668,7 +4667,7 @@ smb2_new_read_req(void **buf, unsigned int *total_len,
 static void
 smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *rdata = smb->callback_data;
+	struct cifs_io_subrequest *rdata = smb->subreq;
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct smb2_hdr *shdr = smb->response;
@@ -4867,7 +4866,7 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 	smb->request		= buf;
 	smb->total_len		= total_len;
 	smb->callback		= smb2_readv_callback;
-	smb->callback_data	= rdata;
+	smb->subreq		= rdata;
 	smb->copy_to_bufs	= true;
 
 	iov_iter_bvec_queue(&smb->response_iter, ITER_DEST,
@@ -5020,7 +5019,7 @@ SMB2_read(const unsigned int xid, struct cifs_io_parms *io_parms,
 static void
 smb2_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct cifs_io_subrequest *wdata = smb->callback_data;
+	struct cifs_io_subrequest *wdata = smb->subreq;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
 	struct smb2_write_rsp *rsp = (struct smb2_write_rsp *)smb->response;
 	struct cifs_credits credits = {
@@ -5202,7 +5201,7 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 	smb->request		= req;
 	smb->total_len		= total_len;
 	smb->callback		= smb2_writev_callback;
-	smb->callback_data	= wdata;
+	smb->subreq		= wdata;
 
 	iov_iter_bvec_queue(&smb->rqst.rq_iter, ITER_SOURCE,
 			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,

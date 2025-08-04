@@ -53,8 +53,8 @@ struct smb_message *smb_message_alloc(enum smb_command_trace cmd, gfp_t gfp)
 		 * callback just wakes up the current task.
 		 */
 		smb->callback		= cifs_wake_up_task;
-		smb->callback_data	= current;
 		smb->mid_state		= MID_REQUEST_ALLOCATED;
+		init_waitqueue_head(&smb->waitq);
 		trace_smb3_message(smb->debug_id, 1, (enum smb_message_trace)cmd);
 	}
 	return smb;
@@ -122,7 +122,7 @@ cifs_wake_up_task(struct TCP_Server_Info *server, struct smb_message *smb)
 	if (smb->mid_state == MID_RESPONSE_RECEIVED)
 		smb->mid_state = MID_RESPONSE_READY;
 	smb_see_message(smb, smb_message_trace_see_wake_up_task);
-	wake_up_process(smb->callback_data);
+	wake_up_all(&smb->waitq);
 }
 
 static void smb_clear_mid(struct TCP_Server_Info *server, struct smb_message *smb)
@@ -199,7 +199,6 @@ static void smb_clear_mid(struct TCP_Server_Info *server, struct smb_message *sm
 		}
 	}
 #endif
-	put_task_struct(smb->creator);
 }
 
 static bool discard_message(struct TCP_Server_Info *server, struct smb_message *smb)
@@ -901,7 +900,7 @@ int wait_for_response(struct TCP_Server_Info *server, struct smb_message *smb)
 	if (smb->sr_flags & CIFS_INTERRUPTIBLE_WAIT)
 		sleep_state = TASK_INTERRUPTIBLE;
 
-	error = wait_event_state(server->response_q,
+	error = wait_event_state(smb->waitq,
 				 smb->mid_state != MID_REQUEST_SUBMITTED &&
 				 smb->mid_state != MID_RESPONSE_RECEIVED,
 				 (sleep_state | TASK_FREEZABLE_UNSAFE));

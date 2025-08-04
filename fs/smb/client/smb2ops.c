@@ -485,11 +485,12 @@ void smb2_dump_mids(struct TCP_Server_Info *server)
 			.data_offset	= smb->resp_data_offset,
 		};
 
-		cifs_dbg(VFS, "State: %d Cmd: %d Pid: %d Cbdata: %p Mid %llu\n",
+		cifs_dbg(VFS, "State: %d Cmd: %d Pid: %d R=%x[%x] Mid %llu\n",
 			 smb->mid_state,
 			 smb->command,
 			 smb->pid,
-			 smb->callback_data,
+			 smb->subreq ? smb->subreq->rreq->debug_id : 0,
+			 smb->subreq ? smb->subreq->subreq.debug_index : 0,
 			 smb->mid);
 #ifdef CONFIG_CIFS_STATS2
 		cifs_dbg(VFS, "IsLarge: %d buf: %p time rcv: %ld now: %ld\n",

@@ -1641,7 +1641,8 @@ static inline void cifs_stats_bytes_read(struct cifs_tcon *tcon,
  * - it will be called by cifsd, with no locks held
  * - the mid will be removed from any lists
  */
-typedef void (*mid_callback_t)(struct TCP_Server_Info *srv, struct smb_message *smb);
+typedef void (*mid_callback_t)(struct TCP_Server_Info *server,
+			       struct smb_message *smb);
 
 /*
  * Definition of an SMB request message to be transmitted.  These may be
@@ -1673,11 +1674,17 @@ struct smb_message {
 	struct smb_message	*next;		/* Next message in compound */
 	struct cifs_credits	credits;	/* Credit requirements for this message */
 	void			*request;	/* Pointer to request message body */
+	wait_queue_head_t	waitq;		/* Wait queue for message events */
 	refcount_t		ref;
 	unsigned int		debug_id;	/* Debugging ID for tracing */
 	bool			sensitive;	/* Request contains sensitive data */
 	bool			cancelled;	/* T if cancelled */
 	unsigned int		sr_flags;	/* Flags passed to send_recv() */
+
+	/* PDU-type specific data */
+	union {
+		struct cifs_io_subrequest *subreq; /* Read/write subrequest */
+	};
 
 	/* Queue state */
 	struct list_head	qhead;		/* mids waiting on reply from this server */
@@ -1692,8 +1699,6 @@ struct smb_message {
 	unsigned long		when_received;	/* when demux complete (taken off wire) */
 #endif
 	mid_callback_t		callback;	/* call completion callback */
-	void			*callback_data;	/* general purpose pointer for callback */
-	struct task_struct	*creator;
 	int			mid_state;	/* wish this were enum but can not pass to wait_event */
 	int			mid_rc;		/* rc for MID_RC */
 	unsigned int		optype;		/* operation type */

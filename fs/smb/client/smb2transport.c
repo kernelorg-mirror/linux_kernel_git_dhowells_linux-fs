@@ -613,12 +613,6 @@ static void smb2_init_mid(struct smb_message *smb,
 
 	smb->credits_consumed = credits > 0 ? credits : 1;
 
-	/*
-	 * The default is for the mid to be synchronous, so the
-	 * default callback just wakes up the current task.
-	 */
-	smb->creator = get_task_struct(current);
-
 	atomic_inc(&mid_count);
 	trace_smb3_cmd_enter(le32_to_cpu(shdr->Id.SyncId.TreeId),
 			     le64_to_cpu(shdr->SessionId),

@@ -659,11 +659,10 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 					   chan_server->conn_id);
 				spin_lock(&chan_server->mid_queue_lock);
 				list_for_each_entry(smb, &chan_server->pending_mid_q, qhead) {
-					seq_printf(m, "\n\t\tState: %d com: %d pid: %d cbdata: %p mid %llu",
+					seq_printf(m, "\n\t\tState: %d com: %d pid: %d mid %llu",
 						   smb->mid_state,
 						   le16_to_cpu(smb->command),
 						   smb->pid,
-						   smb->callback_data,
 						   smb->mid);
 				}
 				spin_unlock(&chan_server->mid_queue_lock);
