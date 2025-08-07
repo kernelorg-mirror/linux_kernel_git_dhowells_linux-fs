@@ -271,9 +271,11 @@ static int smb_sendmsg(struct TCP_Server_Info *server, const struct iov_iter *it
 	struct msghdr msg = {
 		/*
 		 * MSG_SPLICE_PAGES causes tcp_sendmsg() to splice in the pages
-		 * in the iterator rather than copying from them.
+		 * in the iterator rather than copying from them; MSG_EOR
+		 * indicates that the last TCP packet we create should be
+		 * marked no-append with regards to the next sendmsg.
 		 */
-		.msg_flags	= MSG_NOSIGNAL | MSG_SPLICE_PAGES,
+		.msg_flags	= MSG_NOSIGNAL | MSG_SPLICE_PAGES | MSG_EOR,
 		.msg_iter	= *iter,
 	};
 	int retries = 0;
@@ -362,10 +364,6 @@ __smb_send_rqst(struct TCP_Server_Info *server, struct iov_iter *iter)
 		goto out;
 	}
 
-	rc = 0;
-	/* cork the socket */
-	tcp_sock_set_cork(ssocket->sk, true);
-
 	/*
 	 * We should not allow signals to interrupt the network send because
 	 * any partial send will cause session reconnects thus increasing
@@ -380,9 +378,6 @@ __smb_send_rqst(struct TCP_Server_Info *server, struct iov_iter *iter)
 	rc = smb_sendmsg(server, iter, &sent);
 
 	sigprocmask(SIG_SETMASK, &oldmask, NULL);
-
-	/* uncork it */
-	tcp_sock_set_cork(ssocket->sk, false);
 
 	if (sent > 0) {
 		/*
