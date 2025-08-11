@@ -450,6 +450,7 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 {
 	struct bvecq *bq;
 	size_t total_len = 0, offset = 0;
+	bool writeback = flags & CIFS_WRITEBACK;
 
 	for (int i = 0; i < num_rqst; i++) {
 		struct smb_rqst *req = &rqst[i];
@@ -461,9 +462,31 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 		total_len += size;
 	}
 
-	bq = bvecq_alloc_buffer(total_len, GFP_NOFS, flags & CIFS_WRITEBACK);
-	if (!bq)
-		return -ENOMEM;
+	if (total_len <= PAGE_SIZE / 2) {
+		/* TODO: Choose algo-based alignment. */
+		unsigned int align = (flags & CIFS_TRANSFORM_REQ) ? 32 : 1;
+		size_t alen = (flags & CIFS_TRANSFORM_REQ) ?
+			round_up(total_len, align) : total_len;
+
+		bq = bvecq_alloc_chain(2, GFP_NOFS, writeback);
+		if (!bq)
+			return -ENOMEM;
+		mutex_lock(&server->tx_alloc_lock);
+		void *p = page_frag_alloc_align(&server->tx_alloc, alen,
+						GFP_NOFS, align);
+		mutex_unlock(&server->tx_alloc_lock);
+		if (!p) {
+			bvecq_put(bq);
+			return -ENOMEM;
+		}
+		bvec_set_virt(&bq->bv[1], p, total_len);
+		bq->nr_slots = 2;
+		bq->mem_type = BVECQ_MEM_PAGECACHE;
+	} else {
+		bq = bvecq_alloc_buffer2(total_len, 1, GFP_NOFS, writeback);
+		if (!bq)
+			return -ENOMEM;
+	}
 
 	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
 
@@ -496,6 +519,7 @@ static int smb_copy_data_into_buffer(struct TCP_Server_Info *server,
 		      "offset=%zx total_len=%zx\n", offset, total_len)) {
 		goto error;
 	}
+
 	iov_iter_bvec_queue(iter, ITER_DEST, bq, 1, 0, total_len);
 	*_bq = bq;
 	return 0;
@@ -538,7 +562,9 @@ smb_send_rqst(struct TCP_Server_Info *server, int num_rqst,
 
 		/* TODO: Allocate netmem here */
 		rc = -ENOMEM;
-		hdr_blob = (void *)__get_free_page(GFP_NOFS);
+		mutex_lock(&server->tx_alloc_lock);
+		hdr_blob = page_frag_alloc(&server->tx_alloc, hdr_len, GFP_NOFS);
+		mutex_unlock(&server->tx_alloc_lock);
 		if (!hdr_blob)
 			goto error;
 		bvec_set_virt(&bq->bv[0], hdr_blob, hdr_len);

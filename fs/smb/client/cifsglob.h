@@ -663,6 +663,8 @@ struct TCP_Server_Info {
 	/* updates to tcpStatus protected by cifs_tcp_ses_lock */
 	enum statusEnum tcpStatus; /* what we think the status is */
 	char *hostname; /* hostname portion of UNC string */
+	struct page_frag_cache tx_alloc; /* Transmission buffer allocator */
+	struct mutex tx_alloc_lock; /* Lock for ->tx_alloc */
 	struct socket *ssocket;
 	struct sockaddr_storage dstaddr;
 	struct sockaddr_storage srcaddr; /* locally bind to this IP */
