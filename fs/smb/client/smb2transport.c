@@ -814,3 +814,72 @@ smb3_crypto_aead_allocate(struct TCP_Server_Info *server)
 
 	return 0;
 }
+
+/*
+ * Allocate the context info needed for the encryption operation, along with a
+ * scatterlist to point to the buffer.
+ */
+static void *smb2_aead_req_alloc_new(struct crypto_aead *tfm, const struct iov_iter *iter,
+				 u8 **iv,
+				 struct aead_request **req, struct sg_table *sgt,
+				 unsigned int *num_sgs, size_t *sensitive_size)
+{
+	unsigned int req_size = sizeof(**req) + crypto_aead_reqsize(tfm);
+	unsigned int iv_size = crypto_aead_ivsize(tfm);
+	unsigned int len;
+	u8 *p;
+
+	*num_sgs = iov_iter_npages(iter, INT_MAX);
+
+	len = iv_size;
+	len += crypto_aead_alignmask(tfm) & ~(crypto_tfm_ctx_alignment() - 1);
+	len = ALIGN(len, crypto_tfm_ctx_alignment());
+	len += req_size;
+	len = ALIGN(len, __alignof__(struct scatterlist));
+	len += array_size(*num_sgs + 2, sizeof(struct scatterlist));
+	*sensitive_size = len;
+
+	p = kvzalloc(len, GFP_NOFS);
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+
+	*iv = (u8 *)PTR_ALIGN(p, crypto_aead_alignmask(tfm) + 1);
+	*req = (struct aead_request *)PTR_ALIGN(*iv + iv_size,
+						crypto_tfm_ctx_alignment());
+	sgt->sgl = (struct scatterlist *)PTR_ALIGN((u8 *)*req + req_size,
+						   __alignof__(struct scatterlist));
+	return p;
+}
+
+/*
+ * Set up for doing a crypto operation, building a scatterlist from the
+ * supplied iterator.
+ */
+static void *smb2_get_aead_req_new(struct crypto_aead *tfm, const struct iov_iter *iter,
+				   const u8 *sig, u8 **iv,
+				   struct aead_request **req, struct scatterlist **sgl,
+				   size_t *sensitive_size)
+{
+	struct sg_table sgtable = {};
+	struct iov_iter tmp = *iter;
+	unsigned int num_sgs;
+	ssize_t rc;
+	void *p;
+
+	p = smb2_aead_req_alloc_new(tfm, iter, iv, req, &sgtable,
+				    &num_sgs, sensitive_size);
+	if (IS_ERR(p))
+		return ERR_CAST(p);
+
+	sg_init_marker(sgtable.sgl, num_sgs + 2);
+
+	rc = extract_iter_to_sg(&tmp, iov_iter_count(iter), &sgtable, num_sgs, 0);
+	sgtable.orig_nents = sgtable.nents + 1;
+	if (rc < 0)
+		return ERR_PTR(rc);
+
+	cifs_sg_set_buf(&sgtable, sig, SMB2_SIGNATURE_SIZE);
+	sg_mark_end(&sgtable.sgl[sgtable.nents - 1]);
+	*sgl = sgtable.sgl;
+	return p;
+}
