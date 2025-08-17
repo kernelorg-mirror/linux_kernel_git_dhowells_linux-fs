@@ -23,6 +23,7 @@
 enum netfs_sreq_ref_trace;
 typedef struct mempool mempool_t;
 struct readahead_control;
+struct socket;
 struct netfs_io_request;
 struct netfs_io_subrequest;
 struct fscache_occupancy;
@@ -499,6 +500,11 @@ void netfs_end_io_direct(struct inode *inode);
 /* Writeback exclusion API. */
 bool netfs_wb_begin(struct netfs_inode *ictx, bool nowait);
 void netfs_wb_end(struct netfs_inode *ictx);
+
+/* TCP transport helper API. */
+#ifdef CONFIG_INET
+ssize_t netfs_tcp_splice_to_bvecq(struct socket *sock, struct bvecq *bvecq, size_t len);
+#endif
 
 /**
  * netfs_inode - Get the netfs inode context from the inode
