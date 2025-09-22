@@ -332,40 +332,6 @@ smb_init_no_reconnect(int smb_command, int wct, struct cifs_tcon *tcon,
 	return __smb_init(smb_command, wct, tcon, request_buf, response_buf);
 }
 
-static int validate_t2(struct smb_t2_rsp *pSMB)
-{
-	unsigned int total_size;
-
-	return 0; /* Checking now done in reception routine. */
-
-	/* check for plausible wct */
-	if (pSMB->hdr.WordCount < 10)
-		goto vt2_err;
-
-	/* check for parm and data offset going beyond end of smb */
-	if (get_unaligned_le16(&pSMB->t2_rsp.ParameterOffset) > 1024 ||
-	    get_unaligned_le16(&pSMB->t2_rsp.DataOffset) > 1024)
-		goto vt2_err;
-
-	total_size = get_unaligned_le16(&pSMB->t2_rsp.ParameterCount);
-	if (total_size >= 512)
-		goto vt2_err;
-
-	/* check that bcc is at least as big as parms + data, and that it is
-	 * less than negotiated smb buffer
-	 */
-	total_size += get_unaligned_le16(&pSMB->t2_rsp.DataCount);
-	if (total_size > get_bcc(&pSMB->hdr) ||
-	    total_size >= CIFSMaxBufSize + MAX_CIFS_HDR_SIZE)
-		goto vt2_err;
-
-	return 0;
-vt2_err:
-	cifs_dump_mem("Invalid transact2 SMB: ", (char *)pSMB,
-		sizeof(struct smb_t2_rsp) + 16);
-	return -EINVAL;
-}
-
 static int
 decode_ext_sec_blob(struct cifs_ses *ses, SMB_NEGOTIATE_RSP *pSMBr)
 {
@@ -1122,9 +1088,7 @@ PsxCreat:
 	}
 
 	cifs_dbg(FYI, "copying inode info\n");
-	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-	if (rc || get_bcc(&pSMBr->hdr) < sizeof(OPEN_PSX_RSP)) {
+	if (get_bcc(&pSMBr->hdr) < sizeof(OPEN_PSX_RSP)) {
 		rc = smb_EIO2(smb_eio_trace_create_rsp_too_small,
 			      get_bcc(&pSMBr->hdr), sizeof(OPEN_PSX_RSP));
 		goto psx_create_err;
@@ -2378,9 +2342,7 @@ CIFSSMBPosixLock(const unsigned int xid, struct cifs_tcon *tcon,
 		/* lock structure can be returned on get */
 		__u16 data_offset;
 		__u16 data_count;
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < sizeof(*parm_data)) {
+		if (get_bcc(&pSMBr->hdr) < sizeof(*parm_data)) {
 			rc = smb_EIO2(smb_eio_trace_lock_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), sizeof(*parm_data));
 			goto plk_err_exit;
@@ -2945,9 +2907,8 @@ querySymLinkRetry:
 	} else {
 		/* decode response */
 
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
 		/* BB also check enough total bytes returned */
-		if (rc || get_bcc(&pSMBr->hdr) < 2)
+		if (get_bcc(&pSMBr->hdr) < 2)
 			rc = smb_EIO2(smb_eio_trace_qsym_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 2);
 		else {
@@ -3530,9 +3491,8 @@ queryAclRetry:
 	} else {
 		/* decode response */
 
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
 		/* BB also check enough total bytes returned */
-		if (rc || get_bcc(&pSMBr->hdr) < 2)
+		if (get_bcc(&pSMBr->hdr) < 2)
 			rc = smb_EIO2(smb_eio_trace_getacl_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 2);
 		else {
@@ -3702,9 +3662,8 @@ GetExtAttrRetry:
 		cifs_dbg(FYI, "error %d in GetExtAttr\n", rc);
 	} else {
 		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
 		/* BB also check enough total bytes returned */
-		if (rc || get_bcc(&pSMBr->hdr) < 2)
+		if (get_bcc(&pSMBr->hdr) < 2)
 			/* If rc should we check for EOPNOSUPP and
 			   disable the srvino flag? or in caller? */
 			rc = smb_EIO2(smb_eio_trace_getextattr_bcc_too_small,
@@ -4105,12 +4064,7 @@ QFileInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QFileInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc) /* BB add auto retry on EOPNOTSUPP? */
-			rc = smb_EIO2(smb_eio_trace_qfileinfo_invalid,
-				      get_bcc(&pSMBr->hdr), 40);
-		else if (get_bcc(&pSMBr->hdr) < 40)
+		if (get_bcc(&pSMBr->hdr) < 40)
 			rc = smb_EIO2(smb_eio_trace_qfileinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 40);
 		else if (pFindData) {
@@ -4194,12 +4148,7 @@ QPathInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QPathInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc) /* BB add auto retry on EOPNOTSUPP? */
-			rc = smb_EIO2(smb_eio_trace_qpathinfo_invalid,
-				      get_bcc(&pSMBr->hdr), 40);
-		else if (!legacy && get_bcc(&pSMBr->hdr) < 40)
+		if (!legacy && get_bcc(&pSMBr->hdr) < 40)
 			rc = smb_EIO2(smb_eio_trace_qpathinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 40);
 		else if (legacy && get_bcc(&pSMBr->hdr) < 24)
@@ -4281,9 +4230,7 @@ UnixQFileInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in UnixQFileInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < sizeof(FILE_UNIX_BASIC_INFO)) {
+		if (get_bcc(&pSMBr->hdr) < sizeof(FILE_UNIX_BASIC_INFO)) {
 			cifs_dbg(VFS, "Malformed FILE_UNIX_BASIC_INFO response. Unix Extensions can be disabled on mount by specifying the nosfu mount option.\n");
 			rc = smb_EIO2(smb_eio_trace_unixqfileinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), sizeof(FILE_UNIX_BASIC_INFO));
@@ -4366,9 +4313,7 @@ UnixQPathInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in UnixQPathInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < sizeof(FILE_UNIX_BASIC_INFO)) {
+		if (get_bcc(&pSMBr->hdr) < sizeof(FILE_UNIX_BASIC_INFO)) {
 			cifs_dbg(VFS, "Malformed FILE_UNIX_BASIC_INFO response. Unix Extensions can be disabled on mount by specifying the nosfu mount option.\n");
 			rc = smb_EIO2(smb_eio_trace_unixqpathinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), sizeof(FILE_UNIX_BASIC_INFO));
@@ -4510,13 +4455,8 @@ findFirstRetry:
 			goto findFirstRetry;
 		return rc;
 	}
-	/* decode response */
-	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-	if (rc) {
-		cifs_buf_release(pSMB);
-		return rc;
-	}
 
+	/* decode response */
 	psrch_inf->unicode = !!(pSMBr->hdr.Flags2 & SMBFLG2_UNICODE);
 	psrch_inf->ntwrk_buf_start = (char *)pSMBr;
 	psrch_inf->smallBuf = false;
@@ -4625,11 +4565,6 @@ int CIFSFindNext(const unsigned int xid, struct cifs_tcon *tcon,
 	}
 
 	/* decode response */
-	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-	if (rc) {
-		cifs_buf_release(pSMB);
-		return rc;
-	}
 	/* BB fixme add lock for file (srch_info) struct here */
 	psrch_inf->unicode = !!(pSMBr->hdr.Flags2 & SMBFLG2_UNICODE);
 	response_data = (char *)&pSMBr->hdr.Protocol +
@@ -4769,9 +4704,8 @@ GetInodeNumberRetry:
 		cifs_dbg(FYI, "error %d in QueryInternalInfo\n", rc);
 	} else {
 		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
 		/* BB also check enough total bytes returned */
-		if (rc || get_bcc(&pSMBr->hdr) < 2)
+		if (get_bcc(&pSMBr->hdr) < 2)
 			/* If rc should we check for EOPNOSUPP and
 			disable the srvino flag? or in caller? */
 			rc = smb_EIO2(smb_eio_trace_getsrvinonum_bcc_too_small,
@@ -4889,10 +4823,9 @@ getDFSRetry:
 		cifs_dbg(FYI, "Send error in GetDFSRefer = %d\n", rc);
 		goto GetDFSRefExit;
 	}
-	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
 
 	/* BB Also check if enough total bytes returned? */
-	if (rc || get_bcc(&pSMBr->hdr) < 17) {
+	if (get_bcc(&pSMBr->hdr) < 17) {
 		rc = smb_EIO2(smb_eio_trace_getdfsrefer_bcc_too_small,
 			      get_bcc(&pSMBr->hdr), 17);
 		goto GetDFSRefExit;
@@ -4967,12 +4900,10 @@ oldQFSInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QFSInfo = %d\n", rc);
 	} else {                /* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < 18)
+		if (get_bcc(&pSMBr->hdr) < 18) {
 			rc = smb_EIO2(smb_eio_trace_oldqfsinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 18);
-		else {
+		} else {
 			__u16 data_offset = le16_to_cpu(pSMBr->t2.DataOffset);
 			cifs_dbg(FYI, "qfsinf resp BCC: %d  Offset %d\n",
 				 get_bcc(&pSMBr->hdr), data_offset);
@@ -5057,12 +4988,10 @@ QFSInfoRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QFSInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < 24)
+		if (get_bcc(&pSMBr->hdr) < 24) {
 			rc = smb_EIO2(smb_eio_trace_qfsinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 24);
-		else {
+		} else {
 			__u16 data_offset = le16_to_cpu(pSMBr->t2.DataOffset);
 
 			response_data =
@@ -5147,9 +5076,7 @@ QFSAttributeRetry:
 	if (rc) {
 		cifs_dbg(VFS, "Send error in QFSAttributeInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < 13) {
+		if (get_bcc(&pSMBr->hdr) < 13) {
 			/* BB also check if enough bytes returned */
 			rc = smb_EIO2(smb_eio_trace_qfsattrinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 13);
@@ -5221,9 +5148,7 @@ QFSDeviceRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QFSDeviceInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) <
+		if (get_bcc(&pSMBr->hdr) <
 			  sizeof(FILE_SYSTEM_DEVICE_INFO))
 			rc = smb_EIO2(smb_eio_trace_qfsdevinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr),
@@ -5295,9 +5220,7 @@ QFSUnixRetry:
 	if (rc) {
 		cifs_dbg(VFS, "Send error in QFSUnixInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < 13) {
+		if (get_bcc(&pSMBr->hdr) < 13) {
 			rc = smb_EIO2(smb_eio_trace_qfsunixinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 13);
 		} else {
@@ -5377,13 +5300,8 @@ SETFSUnixRetry:
 
 	rc = SendReceive(xid, tcon->ses, (struct smb_hdr *) pSMB, in_len,
 			 (struct smb_hdr *) pSMBr, &bytes_returned, 0);
-	if (rc) {
+	if (rc)
 		cifs_dbg(VFS, "Send error in SETFSUnixInfo = %d\n", rc);
-	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-		if (rc)
-			rc = -EIO;	/* bad smb */
-	}
 	cifs_buf_release(pSMB);
 
 	if (rc == -EAGAIN)
@@ -5444,9 +5362,7 @@ QFSPosixRetry:
 	if (rc) {
 		cifs_dbg(FYI, "Send error in QFSUnixInfo = %d\n", rc);
 	} else {		/* decode response */
-		rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-
-		if (rc || get_bcc(&pSMBr->hdr) < 13) {
+		if (get_bcc(&pSMBr->hdr) < 13) {
 			rc = smb_EIO2(smb_eio_trace_qfsposixinfo_bcc_too_small,
 				      get_bcc(&pSMBr->hdr), 13);
 		} else {
@@ -6207,11 +6123,7 @@ QAllEAsRetry:
 
 
 	/* BB also check enough total bytes returned */
-	/* BB we need to improve the validity checking
-	of these trans2 responses */
-
-	rc = validate_t2((struct smb_t2_rsp *)pSMBr);
-	if (rc || get_bcc(&pSMBr->hdr) < 4) {
+	if (get_bcc(&pSMBr->hdr) < 4) {
 		rc = smb_EIO2(smb_eio_trace_qalleas_bcc_too_small,
 			      get_bcc(&pSMBr->hdr), 4);
 		goto QAllEAsOut;
