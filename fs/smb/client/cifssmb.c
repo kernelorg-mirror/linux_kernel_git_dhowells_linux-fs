@@ -1432,11 +1432,6 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct inode *inode = &ictx->inode;
-	struct kvec iov = {
-		.iov_base = smb->response,
-		.iov_len  = smb->resp_len,
-	};
-	struct smb_rqst rqst = { .rq_iov = &iov, .rq_nvec = 1 };
 	struct cifs_credits credits = {
 		.value = 1,
 		.instance = 0,
@@ -1450,19 +1445,13 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		 __func__, smb->mid, smb->mid_state, rdata->result,
 		 rdata->subreq.len);
 
-	if (smb->resp_data_len)
-		iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
-				    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-				    rdata->subreq.content.offset, rdata->subreq.len);
-
 	switch (smb->mid_state) {
 	case MID_RESPONSE_RECEIVED:
 		/* result already set, check signature */
 		if (server->sign) {
 			int rc;
 
-			iov_iter_truncate(&rqst.rq_iter, smb->resp_data_len);
-			rc = cifs_verify_signature(&rqst, server,
+			rc = cifs_verify_signature(smb, server,
 						   smb->sequence_number);
 			if (rc)
 				cifs_dbg(VFS, "SMB signature verification returned error = %d\n",

@@ -156,22 +156,14 @@ int
 cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		   bool log_error)
 {
-	unsigned int len = smb->resp_len;
-
-	dump_smb(smb->response, min_t(u32, 92, len));
+	dump_smb(smb->response, min_t(u32, 92, smb->resp_len));
 
 	/* convert the length into a more usable form */
 	if (server->sign && !smb->sig_checked) {
-		struct kvec iov[1];
-		int rc = 0;
-		struct smb_rqst rqst = { .rq_iov = iov,
-					 .rq_nvec = ARRAY_SIZE(iov) };
+		int rc;
 
-		iov[0].iov_base = smb->response;
-		iov[0].iov_len = len;
-
-		rc = cifs_verify_signature(&rqst, server,
-					   smb->sequence_number);
+		/* FIXME: add code to kill session */
+		rc = cifs_verify_signature(smb, server, smb->sequence_number);
 		if (rc) {
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
 				 rc);

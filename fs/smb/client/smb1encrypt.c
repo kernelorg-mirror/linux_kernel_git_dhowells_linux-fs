@@ -106,14 +106,23 @@ int cifs_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server,
 	return rc;
 }
 
-int cifs_verify_signature(struct smb_rqst *rqst,
+int cifs_verify_signature(struct smb_message *smb,
 			  struct TCP_Server_Info *server,
 			  __u32 expected_sequence_number)
 {
-	unsigned int rc;
-	char server_response_sig[8];
+	struct smb_hdr *cifs_pdu = smb->response;
+	struct kvec iov = {
+		.iov_base = smb->response,
+		.iov_len  = smb->resp_len,
+	};
+	struct smb_rqst rqst = {
+		.rq_iov = &iov,
+		.rq_nvec = 1,
+		.rq_iter = smb->response_iter
+	};
 	char what_we_think_sig_should_be[20];
-	struct smb_hdr *cifs_pdu = (struct smb_hdr *)rqst->rq_iov[0].iov_base;
+	char server_response_sig[8];
+	int rc;
 
 	if (cifs_pdu == NULL || server == NULL)
 		return -EINVAL;
@@ -145,7 +154,7 @@ int cifs_verify_signature(struct smb_rqst *rqst,
 	cifs_pdu->Signature.Sequence.Reserved = 0;
 
 	cifs_server_lock(server);
-	rc = cifs_calc_signature(rqst, server, what_we_think_sig_should_be);
+	rc = cifs_calc_signature(&rqst, server, what_we_think_sig_should_be);
 	cifs_server_unlock(server);
 
 	if (rc)

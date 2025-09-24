@@ -227,7 +227,7 @@ void cifs_dump_mids(struct TCP_Server_Info *server);
  */
 int cifs_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server,
 		   __u32 *pexpected_response_sequence_number);
-int cifs_verify_signature(struct smb_rqst *rqst,
+int cifs_verify_signature(struct smb_message *smb,
 			  struct TCP_Server_Info *server,
 			  __u32 expected_sequence_number);
 int cifs_verify_trans_signature(struct TCP_Server_Info *server,
