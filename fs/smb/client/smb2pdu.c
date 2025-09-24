@@ -4710,10 +4710,9 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 				trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 		}
 
-		rdata->got_bytes = smb->resp_data_len;
 		/* FIXME: should this be counted toward the initiating task? */
-		task_io_account_read(rdata->got_bytes);
-		cifs_stats_bytes_read(tcon, rdata->got_bytes);
+		task_io_account_read(smb->resp_data_len);
+		cifs_stats_bytes_read(tcon, smb->resp_data_len);
 		break;
 	case MID_REQUEST_SUBMITTED:
 		trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_req_submitted);
@@ -4723,12 +4722,12 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 do_retry:
 		__set_bit(NETFS_SREQ_NEED_RETRY, &rdata->subreq.flags);
 		rdata->result = -EAGAIN;
-		if (server->sign && rdata->got_bytes)
+		if (server->sign && smb->resp_data_len)
 			/* reset bytes number since we can not check a sign */
-			rdata->got_bytes = 0;
+			smb->resp_data_len = 0;
 		/* FIXME: should this be counted toward the initiating task? */
-		task_io_account_read(rdata->got_bytes);
-		cifs_stats_bytes_read(tcon, rdata->got_bytes);
+		task_io_account_read(smb->resp_data_len);
+		cifs_stats_bytes_read(tcon, smb->resp_data_len);
 		break;
 	case MID_RESPONSE_MALFORMED:
 		trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_malformed);
@@ -4770,19 +4769,19 @@ do_retry:
 				     rdata->req->cfile->fid.persistent_fid,
 				     tcon->tid, tcon->ses->Suid,
 				     rdata->subreq.start + rdata->subreq.transferred,
-				     rdata->got_bytes);
+				     smb->resp_data_len);
 
 	if (rdata->result == -ENODATA) {
 		__set_bit(NETFS_SREQ_HIT_EOF, &rdata->subreq.flags);
 		rdata->result = 0;
 	} else {
-		size_t trans = rdata->subreq.transferred + rdata->got_bytes;
+		size_t trans = rdata->subreq.transferred + smb->resp_data_len;
 		if (trans < rdata->subreq.len &&
 		    rdata->subreq.start + trans >= netfs_read_remote_i_size(inode)) {
 			__set_bit(NETFS_SREQ_HIT_EOF, &rdata->subreq.flags);
 			rdata->result = 0;
 		}
-		if (rdata->got_bytes)
+		if (smb->resp_data_len)
 			__set_bit(NETFS_SREQ_MADE_PROGRESS, &rdata->subreq.flags);
 	}
 
@@ -4798,7 +4797,7 @@ do_retry:
 			      0, cifs_trace_rw_credits_read_response_clear);
 	rdata->credits.value = 0;
 	rdata->subreq.error = rdata->result;
-	rdata->subreq.transferred += rdata->got_bytes;
+	rdata->subreq.transferred += smb->resp_data_len;
 	trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 	netfs_read_subreq_terminated(&rdata->subreq);
 	release_mid(server, smb);
@@ -4853,7 +4852,6 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 
 	rdata->iov[0].iov_base = buf;
 	rdata->iov[0].iov_len = total_len;
-	rdata->got_bytes = 0;
 	rdata->result = 0;
 
 	shdr = (struct smb2_hdr *)buf;

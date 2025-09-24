@@ -1471,7 +1471,6 @@ struct cifs_io_subrequest {
 		struct netfs_io_request *rreq;
 		struct cifs_io_request *req;
 	};
-	ssize_t				got_bytes;
 	unsigned int			xid;
 	int				result;
 	bool				have_xid;
