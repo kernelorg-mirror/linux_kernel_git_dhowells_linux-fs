@@ -1803,4 +1803,34 @@ struct smb2_lease_ack {
 #define SET_MINIMUM_RIGHTS (FILE_READ_EA | FILE_READ_ATTRIBUTES \
 				| READ_CONTROL | SYNCHRONIZE)
 
+union smb2_response_hdr {
+	struct {
+		struct smb2_hdr		hdr;
+		 /* size of wct area (varies, request specific) */
+		__le16			StructureSize2;
+	} __packed;
+	struct smb2_pdu			pdu;
+	struct smb2_err_rsp		err;
+	struct smb2_negotiate_rsp	neg;
+	struct smb2_sess_setup_rsp	sess;
+	struct smb2_logoff_rsp		logoff;
+	struct smb2_tree_connect_rsp	tcon;
+	struct smb2_tree_disconnect_rsp	tdis;
+	struct smb2_create_rsp		create;
+	struct smb2_close_rsp		close;
+	struct smb2_flush_rsp		flush;
+	struct smb2_read_rsp		read;
+	struct smb2_write_rsp		write;
+	struct smb2_lock_rsp		lock;
+	struct smb2_ioctl_rsp		ioctl;
+	/* No cancel response */
+	struct smb2_echo_rsp		echo;
+	struct smb2_query_directory_rsp	qdir;
+	struct smb2_change_notify_rsp	change;
+	struct smb2_query_info_rsp	qinfo;
+	struct smb2_set_info_rsp	sinfo;
+	struct smb2_oplock_break	oplock;
+	struct smb2_lease_break		lease;
+};
+
 #endif				/* _COMMON_SMB2PDU_H */

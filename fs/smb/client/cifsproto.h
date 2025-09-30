@@ -89,17 +89,14 @@ void smb_put_messages(struct smb_message *smb);
 void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb);
 void cifs_wake_up_task(struct TCP_Server_Info *server,
 		       struct smb_message *smb);
-int cifs_handle_standard(struct TCP_Server_Info *server,
-			 struct smb_message *smb);
 char *smb3_fs_context_fullpath(const struct smb3_fs_context *ctx, char dirsep);
 int smb3_parse_devname(const char *devname, struct smb3_fs_context *ctx);
 int cifs_ipaddr_cmp(struct sockaddr *srcaddr, struct sockaddr *rhs);
 bool cifs_match_ipaddr(struct sockaddr *srcaddr, struct sockaddr *rhs);
-int cifs_discard_remaining_data(struct TCP_Server_Info *server);
 int cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
-		    mid_receive_t receive, mid_callback_t callback,
-		    mid_handle_t handle, void *cbdata, const int flags,
-		    const struct cifs_credits *exist_credits);
+		    mid_callback_t callback, void *cbdata, const int flags,
+		    const struct cifs_credits *exist_credits,
+		    struct iov_iter *resp_buf);
 struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses);
 int cifs_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		   struct TCP_Server_Info *server, struct smb_rqst *rqst,
@@ -228,12 +225,7 @@ unsigned int setup_special_user_owner_ACE(struct smb_ace *pntace);
 
 void dequeue_mid(struct TCP_Server_Info *server, struct smb_message *smb,
 		 bool malformed);
-int cifs_read_from_socket(struct TCP_Server_Info *server, char *buf,
-			  unsigned int to_read);
-ssize_t cifs_discard_from_socket(struct TCP_Server_Info *server,
-				 size_t to_read);
-int cifs_read_iter_from_socket(struct TCP_Server_Info *server,
-			       struct iov_iter *iter, unsigned int to_read);
+bool allocate_buffers(struct TCP_Server_Info *server);
 int cifs_setup_cifs_sb(struct cifs_sb_info *cifs_sb);
 void cifs_mount_put_conns(struct cifs_mount_ctx *mnt_ctx);
 int cifs_mount_get_session(struct cifs_mount_ctx *mnt_ctx);
@@ -609,5 +601,10 @@ find_readable_file(struct cifsInodeInfo *cinode, unsigned int find_flags)
 	find_flags |= FIND_NO_PENDING_DELETE;
 	return __find_readable_file(cinode, find_flags, 0);
 }
+
+int smb_rxqueue_refill(struct TCP_Server_Info *server, struct netfs_rxqueue *rxq,
+		       size_t min_size);
+int smb_rxqueue_consume(struct TCP_Server_Info *server, struct netfs_rxqueue *rxq,
+			size_t amount);
 
 #endif			/* _CIFSPROTO_H */

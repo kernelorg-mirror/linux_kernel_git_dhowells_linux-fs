@@ -28,47 +28,11 @@
 #include "cached_dir.h"
 
 void
-cifs_dump_mem(char *label, void *data, int length)
+cifs_dump_mem(const char *label, void *data, int length)
 {
 	pr_debug("%s: dump of %d bytes of data at 0x%p\n", label, length, data);
 	print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_OFFSET, 16, 4,
 		       data, length, true);
-}
-
-void cifs_dump_mids(struct TCP_Server_Info *server)
-{
-#ifdef CONFIG_CIFS_DEBUG2
-	struct smb_message *smb;
-
-	if (server == NULL)
-		return;
-
-	cifs_dbg(VFS, "Dump pending requests:\n");
-	spin_lock(&server->mid_queue_lock);
-	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
-		cifs_dbg(VFS, "State: %d Cmd: %d Pid: %d Cbdata: %p Mid %llu\n",
-			 smb->mid_state,
-			 le16_to_cpu(smb->command),
-			 smb->pid,
-			 smb->callback_data,
-			 smb->mid);
-#ifdef CONFIG_CIFS_STATS2
-		cifs_dbg(VFS, "IsLarge: %d buf: %p time rcv: %ld now: %ld\n",
-			 smb->large_buf,
-			 smb->resp_buf,
-			 smb->when_received,
-			 jiffies);
-#endif /* STATS2 */
-		cifs_dbg(VFS, "IsMult: %d IsEnd: %d\n",
-			 smb->multiRsp, smb->multiEnd);
-		if (smb->resp_buf) {
-			server->ops->dump_detail(smb->resp_buf,
-						 smb->response_pdu_len, server);
-			cifs_dump_mem("existing buf: ", smb->resp_buf, 62);
-		}
-	}
-	spin_unlock(&server->mid_queue_lock);
-#endif /* CONFIG_CIFS_DEBUG2 */
 }
 
 #ifdef CONFIG_PROC_FS

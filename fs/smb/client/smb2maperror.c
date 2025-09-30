@@ -50,9 +50,8 @@ static const struct status_to_posix_error *smb2_get_err_map(__u32 smb2_status)
 }
 
 int
-map_smb2_to_linux_error(char *buf, bool log_err)
+map_smb2_to_linux_error(const struct smb2_hdr *shdr, bool log_err)
 {
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	int rc = -EIO;
 	__le32 smb2err = shdr->Status;
 	const struct status_to_posix_error *err_map;

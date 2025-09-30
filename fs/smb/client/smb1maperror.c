@@ -100,9 +100,8 @@ search_mapping_table_ERRSRV(__u16 smb_err)
 }
 
 int
-map_smb_to_linux_error(char *buf, bool logErr)
+map_smb_to_linux_error(const struct smb_hdr *smb, bool logErr)
 {
-	struct smb_hdr *smb = (struct smb_hdr *)buf;
 	int rc = -EIO;	/* if transport error smb error may not be set */
 	__u8 smberrclass;
 	__u16 smberrcode;
@@ -178,9 +177,9 @@ map_and_check_smb_error(struct TCP_Server_Info *server,
 			struct smb_message *smb, bool logErr)
 {
 	int rc;
-	struct smb_hdr *rhdr = (struct smb_hdr *)smb->resp_buf;
+	struct smb_hdr *rhdr = (struct smb_hdr *)smb->response;
 
-	rc = map_smb_to_linux_error((char *)rhdr, logErr);
+	rc = map_smb_to_linux_error(rhdr, logErr);
 	if (rc == -EACCES && !(rhdr->Flags2 & SMBFLG2_ERR_STATUS)) {
 		/* possible ERRBaduid */
 		__u8 class = rhdr->Status.DosError.ErrorClass;

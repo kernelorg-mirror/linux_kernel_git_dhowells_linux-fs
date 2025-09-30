@@ -47,6 +47,7 @@
 	EM(smb_eio_trace_lock_data_too_small,		"lock_data_too_small") \
 	EM(smb_eio_trace_malformed_ksid_key,		"malformed_ksid_key") \
 	EM(smb_eio_trace_malformed_sid_key,		"malformed_sid_key") \
+	EM(smb_eio_trace_md5_iter,			"md5_iter") \
 	EM(smb_eio_trace_mkdir_no_rsp,			"mkdir_no_rsp") \
 	EM(smb_eio_trace_neg_bad_rsplen,		"neg_bad_rsplen") \
 	EM(smb_eio_trace_neg_decode_token,		"neg_decode_token") \
@@ -1963,6 +1964,68 @@ TRACE_EVENT(smb3_eio,
 	    TP_printk("%s info=%lx,%lx",
 		      __print_symbolic(__entry->trace, smb_eio_traces),
 		      __entry->info, __entry->info2)
+	    );
+
+TRACE_EVENT(smb3_data_ready,
+	    TP_PROTO(int dummy),
+	    TP_ARGS(dummy),
+	    TP_STRUCT__entry(
+		    __field(unsigned int, dummy)
+			     ),
+	    TP_fast_assign(
+		    __entry->dummy		= dummy;
+			   ),
+	    TP_printk("%d", __entry->dummy)
+	    );
+
+TRACE_EVENT(smb3_tcp_splice,
+	    TP_PROTO(int len),
+	    TP_ARGS(len),
+	    TP_STRUCT__entry(
+		    __field(unsigned int, len)
+			     ),
+	    TP_fast_assign(
+		    __entry->len		= len;
+			   ),
+	    TP_printk("l=%d", __entry->len)
+	    );
+
+TRACE_EVENT(smb3_rx_pdu,
+	    TP_PROTO(const struct netfs_rxqueue *rxq),
+	    TP_ARGS(rxq),
+	    TP_STRUCT__entry(
+		    __field(unsigned int,	len)
+			     ),
+	    TP_fast_assign(
+		    __entry->len	= rxq->pdu_remain;
+			   ),
+	    TP_printk("l=%x",
+		      __entry->len)
+	    );
+
+TRACE_EVENT(smb3_reply,
+	    TP_PROTO(const struct smb_message *smb, const struct cifs_receive *recv),
+	    TP_ARGS(smb, recv),
+	    TP_STRUCT__entry(
+		    __field(unsigned int,	msg_id)
+		    __field(unsigned int,	cmd)
+		    __field(unsigned int,	doff)
+		    __field(unsigned int,	dlen)
+		    __field(unsigned int,	len)
+		    __field(unsigned int,	extr)
+			     ),
+	    TP_fast_assign(
+		    __entry->msg_id	= 0; /* TODO: fill in */
+		    __entry->cmd	= smb->command;
+		    __entry->doff	= recv->data_offset;
+		    __entry->dlen	= recv->data_len;
+		    __entry->len	= recv->msg_len;
+		    __entry->extr	= recv->extracted;
+			   ),
+	    TP_printk("MSG=%08x cmd=%x d=%x-%x l=%x/%x",
+		      __entry->msg_id, __entry->cmd,
+		      __entry->doff, __entry->doff + __entry->dlen,
+		      __entry->extr, __entry->len)
 	    );
 
 #undef EM

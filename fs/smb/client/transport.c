@@ -87,7 +87,7 @@ void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 	unsigned long roundtrip_time;
 #endif
 
-	if (smb->resp_buf && smb->wait_cancelled &&
+	if (smb->response && smb->wait_cancelled &&
 	    (smb->mid_state == MID_RESPONSE_RECEIVED ||
 	     smb->mid_state == MID_RESPONSE_READY) &&
 	    server->ops->handle_cancelled_mid)
@@ -96,9 +96,11 @@ void __release_mid(struct TCP_Server_Info *server, struct smb_message *smb)
 	smb->mid_state = MID_FREE;
 	atomic_dec(&mid_count);
 	if (smb->large_buf)
-		cifs_buf_release(smb->resp_buf);
+		cifs_buf_release(smb->response);
 	else
-		cifs_small_buf_release(smb->resp_buf);
+		cifs_small_buf_release(smb->response);
+	if (smb->response_data)
+		netfs_put_rx_bvecq(smb->response_data);
 #ifdef CONFIG_CIFS_STATS2
 	now = jiffies;
 	if (now < smb->when_alloc)
@@ -701,9 +703,9 @@ int wait_for_response(struct TCP_Server_Info *server, struct smb_message *smb)
  */
 int
 cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
-		mid_receive_t receive, mid_callback_t callback,
-		mid_handle_t handle, void *cbdata, const int flags,
-		const struct cifs_credits *exist_credits)
+		mid_callback_t callback, void *cbdata, const int flags,
+		const struct cifs_credits *exist_credits,
+		struct iov_iter *resp_buf)
 {
 	int rc;
 	struct smb_message *smb;
@@ -743,11 +745,13 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 	}
 
 	smb->sr_flags = flags;
-	smb->receive = receive;
 	smb->callback = callback;
 	smb->callback_data = cbdata;
-	smb->handle = handle;
 	smb->mid_state = MID_REQUEST_SUBMITTED;
+	if (resp_buf) {
+		smb->copy_to_bufs = true;
+		smb->response_iter = *resp_buf;
+	}
 
 	/* put it on the pending_mid_q */
 	spin_lock(&server->mid_queue_lock);
@@ -912,7 +916,6 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 		{ .value = 0, .instance = 0 }
 	};
 	unsigned int instance;
-	char *buf;
 
 	optype = flags & CIFS_OP_MASK;
 
@@ -1079,7 +1082,7 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 			goto out;
 		}
 
-		if (!smb[i]->resp_buf ||
+		if (!smb[i]->response ||
 		    smb[i]->mid_state != MID_RESPONSE_READY) {
 			rc = smb_EIO1(smb_eio_trace_rx_mid_unready, smb[i]->mid_state);
 			cifs_dbg(FYI, "Bad MID state?\n");
@@ -1088,11 +1091,9 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 
 		rc = server->ops->check_receive(smb[i], server,
 						flags & CIFS_LOG_ERROR);
-
 		if (resp_iov) {
-			buf = (char *)smb[i]->resp_buf;
-			resp_iov[i].iov_base = buf;
-			resp_iov[i].iov_len = smb[i]->resp_buf_size;
+			resp_iov[i].iov_base = smb[i]->response;
+			resp_iov[i].iov_len = smb[i]->resp_len;
 
 			if (smb[i]->large_buf)
 				resp_buf_type[i] = CIFS_LARGE_BUFFER;
@@ -1101,7 +1102,7 @@ compound_send_recv(const unsigned int xid, struct cifs_ses *ses,
 
 			/* mark it so buf will not be freed by delete_mid */
 			if ((flags & CIFS_NO_RSP_BUF) == 0)
-				smb[i]->resp_buf = NULL;
+				smb[i]->response = NULL;
 		}
 	}
 
@@ -1145,194 +1146,4 @@ cifs_send_recv(const unsigned int xid, struct cifs_ses *ses,
 {
 	return compound_send_recv(xid, ses, server, flags, 1,
 				  rqst, resp_buf_type, resp_iov);
-}
-
-
-/*
- * Discard any remaining data in the current SMB. To do this, we borrow the
- * current bigbuf.
- */
-int
-cifs_discard_remaining_data(struct TCP_Server_Info *server)
-{
-	unsigned int rfclen = server->pdu_size;
-	size_t remaining = rfclen - server->total_read;
-
-	while (remaining > 0) {
-		ssize_t length;
-
-		length = cifs_discard_from_socket(server,
-				min_t(size_t, remaining,
-				      CIFSMaxBufSize + MAX_HEADER_SIZE(server)));
-		if (length < 0)
-			return length;
-		server->total_read += length;
-		remaining -= length;
-	}
-
-	return 0;
-}
-
-static int
-__cifs_readv_discard(struct TCP_Server_Info *server, struct smb_message *smb,
-		     bool malformed)
-{
-	int length;
-
-	length = cifs_discard_remaining_data(server);
-	dequeue_mid(server, smb, malformed);
-	smb->resp_buf = server->smallbuf;
-	server->smallbuf = NULL;
-	return length;
-}
-
-static int
-cifs_readv_discard(struct TCP_Server_Info *server, struct smb_message *smb)
-{
-	struct cifs_io_subrequest *rdata = smb->callback_data;
-
-	return  __cifs_readv_discard(server, smb, rdata->result);
-}
-
-int
-cifs_readv_receive(struct TCP_Server_Info *server, struct smb_message *smb)
-{
-	int length, len;
-	unsigned int data_offset, data_len, end_off;
-	struct cifs_io_subrequest *rdata = smb->callback_data;
-	char *buf = server->smallbuf;
-	unsigned int buflen = server->pdu_size;
-	bool use_rdma_mr = false;
-
-	cifs_dbg(FYI, "%s: mid=%llu offset=%llu bytes=%zu\n",
-		 __func__, smb->mid, rdata->subreq.start, rdata->subreq.len);
-
-	/*
-	 * read the rest of READ_RSP header (sans Data array), or whatever we
-	 * can if there's not enough data. At this point, we've read down to
-	 * the Mid.
-	 */
-	len = min_t(unsigned int, buflen, server->vals->read_rsp_size) -
-							HEADER_SIZE(server) + 1;
-
-	length = cifs_read_from_socket(server,
-				       buf + HEADER_SIZE(server) - 1, len);
-	if (length < 0)
-		return length;
-	server->total_read += length;
-
-	if (server->ops->is_session_expired &&
-	    server->ops->is_session_expired(buf)) {
-		cifs_reconnect(server, true);
-		return -1;
-	}
-
-	if (server->ops->is_status_pending &&
-	    server->ops->is_status_pending(buf, server)) {
-		cifs_discard_remaining_data(server);
-		return -1;
-	}
-
-	/* set up first two iov for signature check and to get credits */
-	rdata->iov[0].iov_base = buf;
-	rdata->iov[0].iov_len = server->total_read;
-	cifs_dbg(FYI, "0: iov_base=%p iov_len=%zu\n",
-		 rdata->iov[0].iov_base, rdata->iov[0].iov_len);
-
-	/* Was the SMB read successful? */
-	rdata->result = server->ops->map_error(buf, false);
-	if (rdata->result != 0) {
-		cifs_dbg(FYI, "%s: server returned error %d\n",
-			 __func__, rdata->result);
-		/* normal error on read response */
-		return __cifs_readv_discard(server, smb, false);
-	}
-
-	/* Is there enough to get to the rest of the READ_RSP header? */
-	if (server->total_read < server->vals->read_rsp_size) {
-		cifs_dbg(FYI, "%s: server returned short header. got=%u expected=%zu\n",
-			 __func__, server->total_read,
-			 server->vals->read_rsp_size);
-		rdata->result = smb_EIO2(smb_eio_trace_read_rsp_short,
-					 server->total_read, server->vals->read_rsp_size);
-		return cifs_readv_discard(server, smb);
-	}
-
-	data_offset = server->ops->read_data_offset(buf);
-	if (data_offset < server->total_read) {
-		/*
-		 * win2k8 sometimes sends an offset of 0 when the read
-		 * is beyond the EOF. Treat it as if the data starts just after
-		 * the header.
-		 */
-		cifs_dbg(FYI, "%s: data offset (%u) inside read response header\n",
-			 __func__, data_offset);
-		data_offset = server->total_read;
-	} else if (data_offset > MAX_CIFS_SMALL_BUFFER_SIZE) {
-		/* data_offset is beyond the end of smallbuf */
-		cifs_dbg(FYI, "%s: data offset (%u) beyond end of smallbuf\n",
-			 __func__, data_offset);
-		rdata->result = smb_EIO1(smb_eio_trace_read_overlarge,
-					 data_offset);
-		return cifs_readv_discard(server, smb);
-	}
-
-	cifs_dbg(FYI, "%s: total_read=%u data_offset=%u\n",
-		 __func__, server->total_read, data_offset);
-
-	len = data_offset - server->total_read;
-	if (len > 0) {
-		/* read any junk before data into the rest of smallbuf */
-		length = cifs_read_from_socket(server,
-					       buf + server->total_read, len);
-		if (length < 0)
-			return length;
-		server->total_read += length;
-		rdata->iov[0].iov_len = server->total_read;
-	}
-
-	/* how much data is in the response? */
-#ifdef CONFIG_CIFS_SMB_DIRECT
-	use_rdma_mr = rdata->mr;
-#endif
-	data_len = server->ops->read_data_length(buf, use_rdma_mr);
-	if (!use_rdma_mr) {
-		if (check_add_overflow(data_offset, data_len, &end_off) ||
-		    end_off > buflen) {
-			/* data_len is corrupt -- discard frame */
-			rdata->result = smb_EIO2(smb_eio_trace_read_rsp_malformed,
-						 end_off, buflen);
-			return cifs_readv_discard(server, smb);
-		}
-	}
-
-#ifdef CONFIG_CIFS_SMB_DIRECT
-	if (rdata->mr) {
-		length = data_len; /* An RDMA read is already done. */
-	} else {
-#endif
-		struct iov_iter iter;
-
-		iov_iter_bvec_queue(&iter, ITER_DEST, rdata->subreq.content.bvecq,
-				    rdata->subreq.content.slot, rdata->subreq.content.offset,
-				    data_len);
-		length = cifs_read_iter_from_socket(server, &iter, data_len);
-#ifdef CONFIG_CIFS_SMB_DIRECT
-	}
-#endif
-	if (length > 0)
-		rdata->got_bytes += length;
-	server->total_read += length;
-
-	cifs_dbg(FYI, "total_read=%u buflen=%u remaining=%u\n",
-		 server->total_read, buflen, data_len);
-
-	/* discard anything left over */
-	if (server->total_read < buflen)
-		return cifs_readv_discard(server, smb);
-
-	dequeue_mid(server, smb, false);
-	smb->resp_buf = server->smallbuf;
-	server->smallbuf = NULL;
-	return length;
 }

@@ -35,6 +35,9 @@
 #define CIFS_PORT 445
 #define RFC1001_PORT 139
 
+/* Drop the connection to not overload the server */
+#define MAX_STATUS_IO_TIMEOUT   5
+
 /*
  * The sizes of various internal tables and strings
  */
@@ -332,35 +335,16 @@ struct smb_version_operations {
 	__u64 (*get_next_mid)(struct TCP_Server_Info *);
 	void (*revert_current_mid)(struct TCP_Server_Info *server,
 				   const unsigned int val);
-	/* data offset from read response message */
-	unsigned int (*read_data_offset)(char *);
-	/*
-	 * Data length from read response message
-	 * When in_remaining is true, the returned data length is in
-	 * message field DataRemaining for out-of-band data read (e.g through
-	 * Memory Registration RDMA write in SMBD).
-	 * Otherwise, the returned data length is in message field DataLength.
-	 */
-	unsigned int (*read_data_length)(char *, bool in_remaining);
-	/* map smb to linux error */
-	int (*map_error)(char *, bool);
-	/* find mid corresponding to the response message */
-	struct smb_message *(*find_mid)(struct TCP_Server_Info *server, char *buf);
-	void (*dump_detail)(void *buf, size_t buf_len, struct TCP_Server_Info *ptcp_info);
+	/* Finish receiving a PDU and decrypt and decompress and parse it. */
+	int (*receive_pdu)(struct TCP_Server_Info *server, unsigned int len);
 	void (*clear_stats)(struct cifs_tcon *);
 	void (*print_stats)(struct seq_file *m, struct cifs_tcon *);
 	void (*dump_share_caps)(struct seq_file *, struct cifs_tcon *);
 	/* verify the message */
-	int (*check_message)(char *buf, unsigned int pdu_len, unsigned int len,
-			     struct TCP_Server_Info *server);
-	bool (*is_oplock_break)(char *, struct TCP_Server_Info *);
 	int (*handle_cancelled_mid)(struct smb_message *smb, struct TCP_Server_Info *server);
 	void (*downgrade_oplock)(struct TCP_Server_Info *server,
 				 struct cifsInodeInfo *cinode, __u32 oplock,
 				 __u16 epoch, bool *purge_cache);
-	/* process transaction2 response */
-	bool (*check_trans2)(struct smb_message *smb, struct TCP_Server_Info *server,
-			     char *buf, int malformed);
 	/* check if we need to negotiate */
 	bool (*need_neg)(struct TCP_Server_Info *);
 	/* negotiate to the server */
@@ -509,10 +493,6 @@ struct smb_version_operations {
 			 struct cifs_fid *);
 	/* calculate a size of SMB message */
 	unsigned int (*calc_smb_size)(void *buf);
-	/* check for STATUS_PENDING and process the response if yes */
-	bool (*is_status_pending)(char *buf, struct TCP_Server_Info *server);
-	/* check for STATUS_NETWORK_SESSION_EXPIRED */
-	bool (*is_session_expired)(char *);
 	/* send oplock break response */
 	int (*oplock_response)(struct cifs_tcon *tcon, __u64 persistent_fid,
 			       __u64 volatile_fid, __u16 net_fid,
@@ -594,9 +574,6 @@ struct smb_version_operations {
 	/* init transform (compress/encrypt) request */
 	int (*init_transform_rq)(struct TCP_Server_Info *, int num_rqst,
 				 struct smb_rqst *, struct smb_rqst *);
-	int (*is_transform_hdr)(void *buf);
-	int (*receive_transform)(struct TCP_Server_Info *,
-				 struct smb_message **smb, char **, int *);
 	enum securityEnum (*select_sectype)(struct TCP_Server_Info *,
 			    enum securityEnum);
 	int (*next_header)(struct TCP_Server_Info *server, char *buf,
@@ -620,10 +597,6 @@ struct smb_version_operations {
 		      struct fiemap_extent_info *, u64, u64);
 	/* version specific llseek implementation */
 	loff_t (*llseek)(struct file *, struct cifs_tcon *, loff_t, int);
-	/* Check for STATUS_IO_TIMEOUT */
-	bool (*is_status_io_timeout)(char *buf);
-	/* Check for STATUS_NETWORK_NAME_DELETED */
-	bool (*is_network_name_deleted)(char *buf, struct TCP_Server_Info *srv);
 	struct reparse_data_buffer * (*get_reparse_point_buffer)(const struct kvec *rsp_iov,
 								 u32 *plen);
 	struct inode * (*create_reparse_inode)(struct cifs_open_info_data *data,
@@ -691,6 +664,15 @@ struct TCP_Server_Info {
 	struct socket *ssocket;
 	struct sockaddr_storage dstaddr;
 	struct sockaddr_storage srcaddr; /* locally bind to this IP */
+	void (*rx_old_data_ready)(struct sock *sock);
+	void (*rx_old_error_report)(struct sock *sock);
+	wait_queue_head_t	rx_waitq;	/* Wait for data ready */
+	struct netfs_rxqueue	rx_queue;	/* Rx queue grabbed from socket */
+	atomic_t		num_io_timeout;	/* Number of I/O timeout responses received */
+	unsigned long		flags;
+#define SMB_SERVER_NEED_RECONNECT	0	/* Reconnect required */
+#define SMB_SERVER_SESSION_RECONNECT	1	/* Session reconnect required */
+#define SMB_SERVER_DATA_READY		2	/* Data ready notification given */
 #ifdef CONFIG_NET_NS
 	struct net *net;
 #endif
@@ -756,7 +738,6 @@ struct TCP_Server_Info {
 	bool	sec_kerberos;		/* supports plain Kerberos */
 	bool	sec_mskerberos;		/* supports legacy MS Kerberos */
 	bool	sec_iakerb;		/* supports pass-through auth for Kerberos (krb5 proxy) */
-	bool	large_buf;		/* is current buffer large? */
 	/* use SMBD connection instead of socket */
 	bool	rdma;
 	/* point to the SMBD connection if RDMA is used instead of socket */
@@ -764,9 +745,6 @@ struct TCP_Server_Info {
 	struct delayed_work	echo; /* echo ping workqueue job */
 	char	*smallbuf;	/* pointer to current "small" buffer */
 	char	*bigbuf;	/* pointer to current "big" buffer */
-	/* Total size of this PDU. Only valid from cifs_demultiplex_thread */
-	unsigned int pdu_size;
-	unsigned int total_read; /* total amount of data read in this pass */
 	atomic_t in_send; /* requests trying to send */
 	atomic_t num_waiters;   /* blocked waiting to get in sendrecv */
 #ifdef CONFIG_CIFS_STATS2
@@ -1675,21 +1653,6 @@ static inline void cifs_stats_bytes_read(struct cifs_tcon *tcon,
 
 
 /*
- * This is the prototype for the mid receive function. This function is for
- * receiving the rest of the SMB frame, starting with the WordCount (which is
- * just after the MID in struct smb_hdr). Note:
- *
- * - This will be called by cifsd, with no locks held.
- * - The mid will still be on the pending_mid_q.
- * - mid->resp_buf will point to the current buffer.
- *
- * Returns zero on a successful receive, or an error. The receive state in
- * the TCP_Server_Info will also be updated.
- */
-typedef int (*mid_receive_t)(struct TCP_Server_Info *server,
-			     struct smb_message *msg);
-
-/*
  * This is the prototype for the mid callback function. This is called once the
  * mid has been received off of the socket. When creating one, take special
  * care to avoid deadlocks. Things to bear in mind:
@@ -1698,13 +1661,6 @@ typedef int (*mid_receive_t)(struct TCP_Server_Info *server,
  * - the mid will be removed from any lists
  */
 typedef void (*mid_callback_t)(struct TCP_Server_Info *srv, struct smb_message *smb);
-
-/*
- * This is the protopyte for mid handle function. This is called once the mid
- * has been recognized after decryption of the message.
- */
-typedef int (*mid_handle_t)(struct TCP_Server_Info *server,
-			    struct smb_message *smb);
 
 /*
  * Definition of an SMB request message to be transmitted.  These may be
@@ -1753,13 +1709,9 @@ struct smb_message {
 	unsigned long		when_sent;	/* time when smb send finished */
 	unsigned long		when_received;	/* when demux complete (taken off wire) */
 #endif
-	mid_receive_t		receive;	/* call receive callback */
 	mid_callback_t		callback;	/* call completion callback */
-	mid_handle_t		handle;		/* call handle mid callback */
 	void			*callback_data;	/* general purpose pointer for callback */
 	struct task_struct	*creator;
-	void			*resp_buf;	/* pointer to received SMB header */
-	unsigned int		resp_buf_size;
 	int			mid_state;	/* wish this were enum but can not pass to wait_event */
 	int			mid_rc;		/* rc for MID_RC */
 	unsigned int		optype;		/* operation type */
@@ -1770,6 +1722,8 @@ struct smb_message {
 	bool			multiRsp:1;	/* multiple trans2 responses for one request  */
 	bool			multiEnd:1;	/* both received */
 	bool			decrypted:1;	/* decrypted entry */
+	bool			sig_checked:1;	/* T if sig already checked */
+	bool			copy_to_bufs:1;	/* Copy to prepared buffer in response_iter */
 	bool			writeback:1;	/* Performing writeback (ENOMEM workarounds) */
 
 	/* Request details */
@@ -1778,11 +1732,17 @@ struct smb_message {
 	s16			pre_offset;	/* Offset of pre-headers from ->body (negative) */
 	unsigned int		total_len;	/* Total length of from hdr_offset onwards */
 	/* Response */
-	u32			response_pdu_len; /* Size of response PDU */
+	//u32			response_pdu_len; /* Size of response PDU */
+	void			*response;	/* Protocol part of response */
+	u32			resp_len;	/* Size of response */
+	u32			resp_data_len;	/* Length of response data */
+	u32			resp_data_offset; /* Offset of response data (or 0) */
+	__le32			status;		/* Completion status */
+	short			error;		/* Linux error */
+	struct iov_iter		response_iter;	/* Data part of response */
+	struct bvecq		*response_data;	/* Storage for response data (or NULL) */
 	/* Compat with old code */
 	struct smb_rqst		rqst;
-	int			*resp_buf_type;
-	struct kvec		*resp_iov;
 };
 
 struct close_cancelled_open {
@@ -2445,5 +2405,21 @@ static inline int cifs_open_create_options(unsigned int oflags, int opts)
 #define CIFS_INO_BYTES(blocks) ((u64)(blocks) * CIFS_INO_BLOCK_SIZE)
 
 #define ALIGN8(x) ALIGN((x), 8)
+
+/*
+ * Received message handling context.
+ */
+struct cifs_receive {
+	void		*response;	/* Response buffer */
+	unsigned char	resp_buf_type;	/* Type of response buffer (CIFS_*_BUFFER) */
+	bool		malformed:1;	/* Message is malformed */
+	short		error;		/* Error code */
+	unsigned int	msg_len;	/* Size of current (sub-)message */
+	unsigned int	hdr_len;	/* Length of header */
+	unsigned int	data_offset;	/* Offset of data part */
+	unsigned int	data_len;	/* Length of data part */
+	unsigned int	calc_len;	/* Calculated length */
+	unsigned int	extracted;	/* How much of msg_len had been extracted */
+};
 
 #endif	/* _CIFS_GLOB_H */

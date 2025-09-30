@@ -21,7 +21,7 @@ struct smb_rqst;
  * All Prototypes
  *****************************************************************
  */
-int map_smb2_to_linux_error(char *buf, bool log_err);
+int map_smb2_to_linux_error(const struct smb2_hdr *shdr, bool log_err);
 int smb2_init_maperror(void);
 #if IS_ENABLED(CONFIG_SMB_KUNIT_TESTS)
 const struct status_to_posix_error *smb2_get_err_map_test(__u32 smb2_status);
@@ -29,13 +29,13 @@ extern const struct status_to_posix_error *smb2_error_map_table_test;
 extern unsigned int smb2_error_map_num;
 #endif
 
-int smb2_check_message(char *buf, unsigned int pdu_len, unsigned int len,
-		       struct TCP_Server_Info *server);
-unsigned int smb2_calc_size(void *buf);
-char *smb2_get_data_area_len(int *off, int *len, struct smb2_hdr *shdr);
+int smb2_check_message(struct TCP_Server_Info *server, struct cifs_receive *recv);
+void smb2_calc_size(struct cifs_receive *recv);
+char *smb2_get_data_area_len(struct cifs_receive *recv);
 __le16 *cifs_convert_path_to_utf16(const char *from,
 				   struct cifs_sb_info *cifs_sb);
 
+int smb2_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
 int smb2_verify_signature(struct smb_rqst *rqst,
 			  struct TCP_Server_Info *server);
 int smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
@@ -48,7 +48,8 @@ struct smb_message *smb2_setup_async_request(struct TCP_Server_Info *server,
 struct cifs_tcon *smb2_find_smb_tcon(struct TCP_Server_Info *server,
 				     __u64 ses_id, __u32  tid);
 __le32 smb2_get_lease_state(struct cifsInodeInfo *cinode, unsigned int oplock);
-bool smb2_is_valid_oplock_break(char *buffer, struct TCP_Server_Info *server);
+void smb2_is_valid_oplock_break(struct TCP_Server_Info *server,
+				union smb2_response_hdr *h);
 int smb3_handle_read_data(struct TCP_Server_Info *server,
 			  struct smb_message *smb);
 struct inode *smb2_create_reparse_inode(struct cifs_open_info_data *data,
@@ -121,6 +122,16 @@ void smb2_set_related(struct smb_rqst *rqst);
 void smb2_set_replay(struct TCP_Server_Info *server, struct smb_rqst *rqst);
 bool smb2_should_replay(struct cifs_tcon *tcon, int *pretries,
 			int *pcur_sleep);
+void smb2_add_credits_from_hdr(struct smb2_hdr *shdr,
+			       struct TCP_Server_Info *server);
+struct smb_message *smb2_find_mid(struct TCP_Server_Info *server,
+				  struct smb2_hdr *shdr, bool dequeue);
+#ifdef CONFIG_CIFS_DEBUG2
+void smb2_dump_detail(struct TCP_Server_Info *server, const struct cifs_receive *recv);
+void smb2_dump_mids(struct TCP_Server_Info *server);
+#endif /* CONFIG_CIFS_DEBUG2 */
+bool smb2_status_pending(struct smb2_hdr *shdr, struct TCP_Server_Info *server);
+bool smb2_network_name_is_deleted(struct smb2_hdr *shdr, struct TCP_Server_Info *server);
 
 /*
  * SMB2 Worker functions - most of protocol specific implementation details
@@ -268,6 +279,8 @@ int smb2_query_info_compound(const unsigned int xid, struct cifs_tcon *tcon,
 			     const char *path, u32 desired_access, u32 class,
 			     u32 type, u32 output_len, struct kvec *rsp,
 			     int *buftype, struct cifs_sb_info *cifs_sb);
+int smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc,
+		     u8 *key);
 /* query path info from the server using SMB311 POSIX extensions*/
 int posix_info_parse(const void *beg, const void *end,
 		     struct smb2_posix_info_parsed *out);

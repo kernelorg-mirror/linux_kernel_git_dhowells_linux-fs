@@ -590,7 +590,7 @@ finished:
 		char *buf = rsp_iov[i + 1].iov_base;
 
 		if (buf && resp_buftype[i + 1] != CIFS_NO_BUFFER)
-			rc = server->ops->map_error(buf, false);
+			rc = map_smb2_to_linux_error((struct smb2_hdr *)buf, false);
 		else
 			rc = tmp_rc;
 		switch (cmds[i]) {

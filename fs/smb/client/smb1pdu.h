@@ -424,7 +424,7 @@ typedef struct smb_negotiate_rsp {
 #define CAP_EXTENDED_SECURITY  0x80000000
 
 typedef union smb_com_session_setup_andx {
-	struct {		/* request format */
+	struct smb1_session_req {	/* request format */
 		struct smb_hdr hdr;	/* wct = 12 */
 		__u8 AndXCommand;
 		__u8 AndXReserved;
@@ -443,7 +443,7 @@ typedef union smb_com_session_setup_andx {
 	} __packed req;	/* NTLM request format (with
 					extended security */
 
-	struct {		/* request format */
+	struct smb1_session_no_secext_req {	/* request format */
 		struct smb_hdr hdr;	/* wct = 13 */
 		__u8 AndXCommand;
 		__u8 AndXReserved;
@@ -466,7 +466,7 @@ typedef union smb_com_session_setup_andx {
 	} __packed req_no_secext; /* NTLM request format (without
 							extended security */
 
-	struct {		/* default (NTLM) response format */
+	struct smb1_session_rsp {		/* default (NTLM) response format */
 		struct smb_hdr hdr;	/* wct = 4 */
 		__u8 AndXCommand;
 		__u8 AndXReserved;
@@ -481,7 +481,7 @@ typedef union smb_com_session_setup_andx {
 	} __packed resp;	/* NTLM response
 					   (with or without extended sec) */
 
-	struct {		/* request format */
+	struct smb1_old_session_req {		/* request format */
 		struct smb_hdr hdr;	/* wct = 10 */
 		__u8 AndXCommand;
 		__u8 AndXReserved;
@@ -500,7 +500,7 @@ typedef union smb_com_session_setup_andx {
 		/* STRING NativeLanMan */
 	} __packed old_req; /* pre-NTLM (LANMAN2.1) req format */
 
-	struct {		/* default (NTLM) response format */
+	struct smb1_old_session_rsp {		/* default (NTLM) response format */
 		struct smb_hdr hdr;	/* wct = 3 */
 		__u8 AndXCommand;
 		__u8 AndXReserved;
@@ -668,7 +668,7 @@ typedef union smb_com_tree_disconnect {	/* as an alternative can use flag on
 		struct smb_hdr hdr;	/* wct = 0 */
 		__u16 ByteCount;	/* bcc = 0 */
 	} __packed req;
-	struct {
+	struct smb1_tree_disconnect_rsp {
 		struct smb_hdr hdr;	/* wct = 0 */
 		__u16 ByteCount;	/* bcc = 0 */
 	} __packed resp;
@@ -2336,5 +2336,55 @@ typedef struct file_chattr_info {
 	__le64	mode; /* list of actual attribute bits on this inode */
 } __packed FILE_CHATTR_INFO;  /* ext attributes (chattr, chflags) level 0x206 */
 #endif				/* POSIX */
+
+union smb1_response_hdr {
+	__be32						rfc1002;
+	struct smb_hdr					hdr;
+	struct {
+		struct smb_hdr				hdr;
+		union {
+			u8				short_bcc;
+			__le16				bcc;
+		};
+	} __packed trivial_rsp;
+	struct smb_negotiate_rsp			neg;
+	struct smb1_session_rsp				session;
+	struct smb1_old_session_rsp			old_session;
+	struct smb_com_tconx_rsp			tconx;
+	struct smb_com_tconx_rsp_ext			tconx_ext;
+	struct smb_com_echo_rsp				echo;
+	struct smb_com_logoff_andx_rsp			logoff;
+	struct smb1_tree_disconnect_rsp			tdis;
+	struct smb_com_close_rsp			close;
+	struct smb_com_open_rsp				open;
+	struct smb_com_open_rsp_ext			open_ext;
+	struct smb_com_openx_rsp			openx;
+	struct smb_com_write_rsp			write;
+	struct smb_com_read_rsp				read;
+	struct smb_com_lock_rsp				lock;
+	struct smb_com_copy_rsp				copy;
+	struct smb_com_rename_rsp			rename;
+	struct smb_com_delete_file_rsp			del_file;
+	struct smb_com_delete_directory_rsp		rmdir;
+	struct smb_com_create_directory_rsp		mkdir;
+	struct smb_com_query_information_rsp		qinfo;
+	struct smb_com_setattr_rsp			setattr;
+	struct smb_com_ntransact_rsp			ntransact;
+	struct smb_com_transaction_ioctl_rsp		ioctl;
+	struct smb_com_transaction_change_notify_rsp	change;
+	struct smb_t2_rsp				trans2;
+	struct smb_com_transaction2_qpi_rsp		qpi;
+	struct smb_com_transaction2_spi_rsp		spi;
+	struct smb_com_transaction2_sfi_rsp		sfi;
+	struct smb_t2_qfi_rsp				qfi;
+	struct smb_com_transaction2_ffirst_rsp		ffirst;
+	struct smb_com_transaction2_ffirst_rsp_parms	ffirst_parms;
+	struct smb_com_transaction2_fnext_rsp		fnext;
+	struct smb_com_transaction2_fnext_rsp_parms	fnext_parms;
+	struct smb_com_transaction_qfsi_rsp		qfsi;
+	struct smb_com_transaction2_setfsi_rsp		setfsi;
+	struct smb_com_transaction_get_dfs_refer_rsp	get_dfs_referral;
+	struct smb_com_lock_req				oplock_break;
+};
 
 #endif /* _SMB1PDU_H */

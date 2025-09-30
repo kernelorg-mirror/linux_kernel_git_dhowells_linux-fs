@@ -18,6 +18,7 @@
 #include <asm/processor.h>
 #include <linux/mempool.h>
 #include <linux/highmem.h>
+#include <linux/iov_iter.h>
 #include <crypto/aead.h>
 #include <crypto/aes-cbc-macs.h>
 #include <crypto/sha2.h>
@@ -28,6 +29,9 @@
 #include "cifs_debug.h"
 #include "../common/smb2status.h"
 #include "smb2glob.h"
+
+static void smb2_parse_pdu(struct TCP_Server_Info *server,
+			   struct netfs_rxqueue *rxq);
 
 static
 int smb3_get_sign_key(__u64 ses_id, struct TCP_Server_Info *server, u8 *key)
@@ -547,7 +551,7 @@ smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 int
 smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 {
-	unsigned int rc;
+	int rc;
 	char server_response_sig[SMB2_SIGNATURE_SIZE];
 	struct smb2_hdr *shdr =
 			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
@@ -694,15 +698,15 @@ int
 smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		   bool log_error)
 {
-	unsigned int len = smb->resp_buf_size;
+	unsigned int len = smb->resp_len;
 	struct kvec iov[1];
 	struct smb_rqst rqst = { .rq_iov = iov,
 				 .rq_nvec = 1 };
 
-	iov[0].iov_base = (char *)smb->resp_buf;
+	iov[0].iov_base = (char *)smb->response;
 	iov[0].iov_len = len;
 
-	dump_smb(smb->resp_buf, min_t(u32, 80, len));
+	dump_smb(smb->response, min_t(u32, 80, len));
 	/* convert the length into a more usable form */
 	if (len > 24 && server->sign && !smb->decrypted) {
 		int rc;
@@ -710,10 +714,10 @@ smb2_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		rc = smb2_verify_signature(&rqst, server);
 		if (rc)
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
-				 rc);
+					rc);
 	}
 
-	return map_smb2_to_linux_error(smb->resp_buf, log_error);
+	return map_smb2_to_linux_error(smb->response, log_error);
 }
 
 struct smb_message *
@@ -882,4 +886,621 @@ static void *smb2_get_aead_req_new(struct crypto_aead *tfm, const struct iov_ite
 	sg_mark_end(&sgtable.sgl[sgtable.nents - 1]);
 	*sgl = sgtable.sgl;
 	return p;
+}
+
+/*
+ * Decrypt the PDU in the iterator.  The PDU begins with the transform header.
+ */
+static int decrypt_pdu(struct TCP_Server_Info *server,
+		       struct smb2_transform_hdr *tr_hdr,
+		       struct netfs_rxqueue *rxq)
+{
+	DECLARE_CRYPTO_WAIT(wait);
+	struct aead_request *req;
+	struct crypto_aead *tfm = server->secmech.dec;
+	struct scatterlist *sg;
+	struct iov_iter iter;
+	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
+	unsigned int crypt_len;
+	size_t sensitive_size;
+	void *creq;
+	int rc = 0;
+	u8 sign[SMB2_SIGNATURE_SIZE] = {};
+	u8 key[SMB3_ENC_DEC_KEY_SIZE];
+	u8 *iv;
+
+	crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
+
+	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 0, key);
+	if (rc) {
+		cifs_server_dbg(FYI, "%s: Could not get decryption key. sid: 0x%llx\n",
+				__func__, le64_to_cpu(tr_hdr->SessionId));
+		return rc;
+	}
+
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES256_CCM) ||
+		(server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM256_CRYPTKEY_SIZE);
+	else
+		rc = crypto_aead_setkey(tfm, key, SMB3_GCM128_CRYPTKEY_SIZE);
+
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set aead key %d\n", __func__, rc);
+		return rc;
+	}
+
+	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Failed to set authsize %d\n", __func__, rc);
+		return rc;
+	}
+
+	netfs_rxqueue_discard(rxq, offsetof(struct smb2_transform_hdr, Nonce));
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, rxq->take_from, rxq->take_slot,
+			    rxq->take_offset, rxq->pdu_remain);
+
+	creq = smb2_get_aead_req_new(tfm, &iter, sign, &iv, &req, &sg,
+				     &sensitive_size);
+	if (IS_ERR(creq))
+		return PTR_ERR(creq);
+
+	memcpy(sign, &tr_hdr->Signature, SMB2_SIGNATURE_SIZE);
+	crypt_len += SMB2_SIGNATURE_SIZE;
+
+	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
+	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
+		memcpy(iv, (char *)tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
+	else {
+		iv[0] = 3;
+		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
+	}
+
+	aead_request_set_tfm(req, tfm);
+	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
+	aead_request_set_ad(req, assoc_data_len);
+
+	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
+
+	rc = crypto_wait_req(crypto_aead_decrypt(req), &wait);
+
+	netfs_rxqueue_discard(rxq, sizeof(*tr_hdr) - offsetof(struct smb2_transform_hdr, Nonce));
+
+	kvfree_sensitive(creq, sensitive_size);
+	return rc;
+}
+
+struct smb2_decrypt_work {
+	struct work_struct	decrypt;
+	struct TCP_Server_Info	*server;
+	struct netfs_rxqueue	rx_subset;
+};
+
+static void smb2_decrypt_offload(struct work_struct *work)
+{
+	struct smb2_transform_hdr tr_hdr;
+	struct smb2_decrypt_work *dw =
+		container_of(work, struct smb2_decrypt_work, decrypt);
+	struct netfs_rxqueue *rxq = &dw->rx_subset;
+	int rc;
+
+	if (netfs_rxqueue_read(rxq, &tr_hdr, 0, sizeof(tr_hdr)) != sizeof(tr_hdr))
+		goto out;
+
+	rc = decrypt_pdu(dw->server, &tr_hdr, rxq);
+	if (rc < 0) {
+		cifs_dbg(VFS, "error decrypting rc=%d\n", rc);
+		goto out;
+	}
+
+	smb2_parse_pdu(dw->server, rxq);
+out:
+	netfs_put_rx_bvecq(rxq->take_from);
+	kfree(dw);
+}
+
+static bool smb3_offload_decrypt(struct TCP_Server_Info *server,
+				 struct smb2_transform_hdr *tr_hdr,
+				 struct netfs_rxqueue *rxq)
+{
+	struct smb2_decrypt_work *dw;
+	struct bvecq *head_bq;
+	size_t remain = rxq->pdu_remain;
+
+	dw = kzalloc(sizeof(struct smb2_decrypt_work), GFP_KERNEL);
+	if (!dw)
+		return false;
+	INIT_WORK(&dw->decrypt, smb2_decrypt_offload);
+	dw->server = server;
+
+	head_bq = netfs_rxqueue_decant(rxq, remain);
+	if (!head_bq) {
+		kfree(dw);
+		return -ENOMEM;
+	}
+
+	dw->rx_subset.take_from		= head_bq;
+	dw->rx_subset.add_to		= NULL;
+	dw->rx_subset.take_slot		= 0;
+	dw->rx_subset.take_offset	= 0;
+	dw->rx_subset.refillable	= false;
+	dw->rx_subset.qsize		= remain;
+	dw->rx_subset.pdu_remain	= remain;
+
+	queue_work(decrypt_wq, &dw->decrypt);
+	return true;
+}
+
+/*
+ * Reverse the transformation the sender made to a PDU we just received, such
+ * as decrypting it.  The PDU body is currently in residence upon the server
+ * receive queue.
+ */
+static int smb3_reverse_transform(struct TCP_Server_Info *server,
+				  struct netfs_rxqueue *rxq)
+{
+	struct smb2_transform_hdr tr_hdr;
+	unsigned int orig_len;
+	size_t got;
+	int rc;
+
+	if (!server->secmech.dec) {
+		cifs_server_dbg(VFS, "%s: Decryption TFM not allocated\n", __func__);
+		return -EIO;
+	}
+
+	rc = smb_rxqueue_refill(server, rxq, rxq->pdu_remain);
+	if (rc < 0)
+		return rc;
+
+	got = netfs_rxqueue_read(rxq, &tr_hdr, 0, sizeof(tr_hdr));
+	if (got != sizeof(tr_hdr)) {
+		cifs_server_dbg(VFS, "Too short for transform header (%u)\n",
+				rxq->pdu_remain);
+		return -EIO;
+	}
+
+	orig_len = le32_to_cpu(tr_hdr.OriginalMessageSize);
+	if (orig_len > rxq->pdu_remain - sizeof(tr_hdr)) {
+		cifs_server_dbg(VFS, "Transform message is broken\n");
+		return -EIO;
+	}
+
+	/*
+	 * For large reads, offload to different thread for better performance,
+	 * use more cores decrypting which can be expensive
+	 */
+	if (server->min_offload && server->in_flight > 1 &&
+	    rxq->pdu_remain >= server->min_offload &&
+	    smb3_offload_decrypt(server, &tr_hdr, rxq))
+		return 0;
+
+	rxq->refillable = false;
+	decrypt_pdu(server, &tr_hdr, rxq);
+	smb2_parse_pdu(server, rxq);
+	return 0;
+}
+
+/*
+ * Copy data directly into prepared buffers.
+ *
+ * Ideally, we'd wait for sufficient data to be present in the queue before
+ * doing this, but that causes a performance loss as we don't receive data and
+ * copy in parallel.
+ */
+static void smb2_copy_to_prepped_buffers(struct TCP_Server_Info *server,
+					 struct smb_message *smb,
+					 struct netfs_rxqueue *rxq,
+					 struct cifs_receive *recv)
+{
+	const union smb2_response_hdr *h = recv->response;
+	struct iov_iter dest = smb->response_iter;
+	unsigned int to_copy, skip;
+	int rc;
+
+	switch (smb->command) {
+	case SMB2_READ:
+		to_copy = recv->data_len;
+		skip = recv->data_offset;
+
+		switch (h->read.Flags) {
+		case SMB2_READFLAG_RESPONSE_NONE:
+			break;
+		case SMB2_READFLAG_RESPONSE_RDMA_TRANSFORM:
+			if (to_copy)
+				cifs_dbg(FYI, "%s: Read.DataLength != 0 for RDMA\n", __func__);
+			return;
+		default:
+			cifs_dbg(FYI, "%s: Unknown Read.Flags value (%x)\n",
+				 __func__, le32_to_cpu(h->read.Flags));
+			recv->malformed = true;
+			return;
+		}
+		skip -= recv->extracted;
+		break;
+	default:
+		cifs_dbg(FYI, "%s: Non-Read copy\n", __func__);
+		return;
+	}
+
+	if (skip < recv->hdr_len) {
+		if (skip != 0) {
+			cifs_dbg(FYI, "%s: Read.DataOffset too small\n", __func__);
+			return;
+		}
+		skip = recv->hdr_len;
+	}
+	if (skip > recv->msg_len) {
+		cifs_dbg(FYI, "%s: Read.DataOffset beyond end\n", __func__);
+		return;
+	}
+	if (to_copy > recv->msg_len - skip) {
+		cifs_dbg(FYI, "%s: Read.DataLength beyond end\n", __func__);
+		return;
+	}
+
+	if (!rxq->refillable) {
+		size_t got;
+
+		got = netfs_rxqueue_read_iter(rxq, &smb->response_iter, 0, to_copy);
+		if (got > 0)
+			netfs_rxqueue_discard(rxq, got);
+		recv->extracted += got;
+		if (got < to_copy) {
+			cifs_dbg(VFS, "Copy to buffer was short %zu/%u\n",
+				 got, to_copy);
+			recv->malformed = true;
+		}
+		return;
+	}
+
+	while (to_copy) {
+		size_t got, part = umin(to_copy, rxq->qsize);
+
+		got = netfs_rxqueue_read_iter(rxq, &dest, 0, part);
+		if (got > 0) {
+			recv->extracted += got;
+			to_copy -= got;
+			netfs_rxqueue_discard(rxq, got);
+		}
+		if (!to_copy)
+			break;
+		if (got < part) {
+			cifs_dbg(VFS, "Copy to buffer was short %zu/%zu\n",
+				 part, to_copy + part);
+			recv->malformed = true;
+			return;
+		}
+
+		rc = smb_rxqueue_refill(server, rxq, 1);
+		if (rc < 0) {
+			recv->malformed = true;
+			return;
+		}
+		if (!rxq->qsize || !rxq->pdu_remain)
+			break;
+	}
+}
+
+/*
+ * Parse an SMB2/3 message that's at least partially extracted.  For successful
+ * reads, the data part is still in the receive queue or even not yet received.
+ */
+static void smb2_parse_one_message(struct TCP_Server_Info *server,
+				   struct cifs_receive *recv,
+				   struct netfs_rxqueue *rxq)
+{
+	union smb2_response_hdr *h = recv->response;
+	struct smb_message *smb;
+	struct smb2_hdr *shdr = &h->hdr;
+	int rc;
+
+	smb = smb2_find_mid(server, shdr, false);
+	if (!smb) {
+		cifs_dbg(VFS, "%s: Unqueued mid (%llx)\n",
+			 __func__, le64_to_cpu(shdr->MessageId));
+		rxq->msg_id = 0;
+	} else {
+		rxq->msg_id = 0; /* TODO: smb->debug_id */
+	}
+
+	/*
+	 * We know that we received enough to get to the MID as we checked the
+	 * pdu_length earlier. Now check to see if the rest of the header is OK
+	 * and determine the general layout of the message.
+	 *
+	 * 48 bytes is enough to display the header and a little bit into the
+	 * payload for debugging purposes.
+	 */
+	rc = smb2_check_message(server, recv);
+	if (rc) {
+		cifs_dump_mem("Bad SMB: ", h, umin(recv->extracted, 48));
+		recv->malformed = true;
+		recv->error = -EPROTO;
+	}
+
+	/* Check the status codes for server/connection-level information. */
+	switch (shdr->Status) {
+	case 0:
+		trace_smb3_cmd_done(le32_to_cpu(shdr->Id.SyncId.TreeId),
+			      le64_to_cpu(shdr->SessionId),
+			      le16_to_cpu(shdr->Command),
+			      le64_to_cpu(shdr->MessageId));
+		break;
+	case STATUS_NETWORK_SESSION_EXPIRED:
+	case STATUS_USER_SESSION_DELETED:
+		trace_smb3_ses_expired(le32_to_cpu(shdr->Id.SyncId.TreeId),
+				       le64_to_cpu(shdr->SessionId),
+				       le16_to_cpu(shdr->Command),
+				       le64_to_cpu(shdr->MessageId));
+		cifs_dbg(FYI, "Session expired or deleted\n");
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		release_mid(server, smb);
+		return;
+	case STATUS_PENDING:
+		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
+		smb2_status_pending(shdr, server);
+		release_mid(server, smb);
+		return;
+	case STATUS_IO_TIMEOUT:
+		int iotimo = atomic_inc_return(&server->num_io_timeout);
+		if (iotimo > MAX_STATUS_IO_TIMEOUT) {
+			cifs_server_dbg(VFS,
+					"Number of request timeouts exceeded %d. Reconnecting",
+					MAX_STATUS_IO_TIMEOUT);
+
+			set_bit(SMB_SERVER_SESSION_RECONNECT, &server->flags);
+			set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+			atomic_set(&server->num_io_timeout, 0);
+		}
+		break;
+	case STATUS_NETWORK_NAME_DELETED:
+		cifs_server_dbg(FYI, "Share deleted. Reconnect needed");
+		smb2_network_name_is_deleted(shdr, server);
+		break;
+	default:
+		recv->error = map_smb2_to_linux_error(shdr, false);
+		if (recv->error) {
+			cifs_dbg(FYI, "%s: server returned error %d\n",
+				 __func__, recv->error);
+			/* normal error on read response */
+		}
+		break;
+	}
+
+	if (smb) {
+		size_t resp_len;
+
+		/* handle_mid */
+		smb->status		= shdr->Status;
+		smb->error		= recv->error;
+		smb->credits_received	= le16_to_cpu(shdr->CreditRequest);
+		smb->resp_data_len	= recv->data_len;
+		smb->resp_data_offset	= recv->data_offset;
+
+		trace_smb3_reply(smb, recv);
+
+		/* For a successful Read, we only grab the header. */
+		resp_len = recv->msg_len;
+		if (smb->status != 0)
+			smb->copy_to_bufs = false;
+		if (smb->copy_to_bufs)
+			resp_len = recv->hdr_len;
+
+		if (resp_len <= MAX_CIFS_SMALL_BUFFER_SIZE) {
+			server->smallbuf = NULL;
+		} else if (resp_len <= CIFSMaxBufSize + MAX_SMB2_HDR_SIZE) {
+			memcpy(server->bigbuf, server->smallbuf, recv->extracted);
+			recv->response = server->bigbuf;
+			server->bigbuf = NULL;
+			recv->resp_buf_type = CIFS_LARGE_BUFFER;
+			h = recv->response;
+			shdr = &h->hdr;
+		} else {
+			/* Too big - should parse directly from iterator. */
+			smb->error = -EMSGSIZE;
+			cifs_dbg(FYI, "%s: Message too big\n", __func__);
+		}
+
+		smb->response = recv->response;
+		smb->resp_len = resp_len;
+
+		if (recv->extracted < recv->msg_len) {
+			size_t part = resp_len - recv->extracted, got;
+
+			got = netfs_rxqueue_read(rxq, recv->response + recv->extracted,
+						 recv->extracted, part);
+			recv->extracted += got;
+			netfs_rxqueue_discard(rxq, recv->extracted);
+
+			if (WARN_ON(got != part)) {
+				smb->error = -EIO;
+				smb->resp_len = recv->extracted;
+				recv->malformed = true;
+			} else if (smb->copy_to_bufs) {
+				smb2_copy_to_prepped_buffers(server, smb, rxq,
+							     recv);
+			} else if (rxq->pdu_remain) {
+				iov_iter_bvec_queue(&smb->response_iter, ITER_SOURCE,
+						    rxq->take_from, rxq->take_slot,
+						    rxq->take_offset, rxq->pdu_remain);
+				smb->response_data = rxq->take_from;
+				refcount_inc(&smb->response_data->ref);
+			}
+		} else {
+			netfs_rxqueue_discard(rxq, recv->extracted);
+		}
+
+		dequeue_mid(server, smb, recv->malformed);
+		mid_execute_callback(server, smb);
+
+		release_mid(server, smb);
+	} else if (shdr->Command == cpu_to_le32(SMB2_OPLOCK_BREAK)) {
+		smb2_is_valid_oplock_break(server, h);
+		smb2_add_credits_from_hdr(shdr, server);
+		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
+		cifs_dbg(FYI, "Received oplock break\n");
+	} else {
+		cifs_server_dbg(VFS, "No task to wake, unknown frame received! NumMids %d\n",
+				atomic_read(&mid_count));
+		cifs_dump_mem("Received Data is: ", h, HEADER_SIZE(server));
+		smb2_add_credits_from_hdr(shdr, server);
+#ifdef CONFIG_CIFS_DEBUG2
+		smb2_dump_detail(server, recv);
+		smb2_dump_mids(server);
+#endif /* CIFS_DEBUG2 */
+		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
+	}
+}
+
+/*
+ * Receive and parse a received SMB2/3 PDU.
+ *
+ * At this point all the data has been read, any transformation unapplied,
+ * decompression performed and some of it is stored in the receive queue
+ * (excerpt) without either the rfc1002, transform or compression headers,
+ * though some may yet to be received.
+ */
+static void smb2_parse_pdu(struct TCP_Server_Info *server,
+			   struct netfs_rxqueue *rxq)
+{
+	u32 next_command, ssize2, next_len;
+	int rc;
+
+	server->lstrp = jiffies;
+
+	do {
+		union smb2_response_hdr *h;
+		struct smb2_hdr *shdr;
+		size_t want, got;
+
+		while (!allocate_buffers(server))
+			if (server->tcpStatus == CifsExiting)
+				return;
+
+		struct cifs_receive recv = {
+			.resp_buf_type	= CIFS_SMALL_BUFFER,
+			.response	= server->smallbuf,
+			.msg_len	= rxq->pdu_remain,
+			.hdr_len	= sizeof(*shdr) + sizeof(h->StructureSize2),
+		};
+		h = recv.response;
+		shdr = &h->hdr;
+
+		rc = smb_rxqueue_refill(server, rxq, recv.hdr_len);
+		if (rc < 0)
+			goto failed;
+
+		got = netfs_rxqueue_read(rxq, recv.response, 0, recv.hdr_len);
+		if (got != recv.hdr_len) {
+			cifs_server_dbg(VFS, "SMB response too short (%u bytes)\n",
+					rxq->qsize);
+			goto failed;
+		}
+		recv.extracted = recv.hdr_len;
+
+		switch (shdr->ProtocolId) {
+		case SMB2_PROTO_NUMBER:
+			break;
+		case SMB2_TRANSFORM_PROTO_NUM:
+		case SMB2_COMPRESSION_TRANSFORM_ID:
+		default:
+			cifs_server_dbg(VFS, "SMB unsupported ProtocolId (%x)\n",
+					le32_to_cpu(shdr->ProtocolId));
+			goto failed;
+		}
+
+		/* Extract message from a compound. */
+		next_command = le32_to_cpu(shdr->NextCommand);
+		next_len = 0;
+		if (next_command) {
+			if (next_command < sizeof(*shdr) + 4 ||
+			    next_command + sizeof(*shdr) >= rxq->pdu_remain ||
+			    (next_command & 0x7)) {
+				cifs_dbg(VFS, "%s: malformed response (next_command=%u)\n",
+					 __func__, next_command);
+				goto failed;
+			}
+			next_len = rxq->pdu_remain - next_command;
+			rxq->pdu_remain = next_command;
+			recv.msg_len = next_command;
+		}
+
+		/* Get the rest of the command-specific response header. */
+		ssize2 = le16_to_cpu(h->StructureSize2);
+		ssize2 &= ~SMB2_STRUCT_HAS_DYNAMIC_PART;
+		if (ssize2 < 4 ||
+		    ssize2 > sizeof(*h) - sizeof(h->hdr)) {
+			cifs_dbg(VFS, "%s: malformed response (structsize2=%u)\n",
+				 __func__, ssize2);
+			goto failed;
+		}
+		ssize2 -= sizeof(h->StructureSize2);
+
+		/* If it's not a successful read, then wait for the entire message. */
+		if (le16_to_cpu(shdr->Command) != SMB2_READ ||
+		    shdr->Status != 0)
+			want = recv.msg_len;
+		else
+			want = recv.hdr_len + ssize2;
+
+		rc = smb_rxqueue_refill(server, rxq, want);
+		if (rc < 0)
+			goto failed;
+
+		got = netfs_rxqueue_read(rxq, &h->pdu + 1, recv.hdr_len, ssize2);
+		if (got != ssize2) {
+			cifs_server_dbg(VFS, "SMB response too short (%u bytes)\n",
+					rxq->qsize);
+			goto failed;
+		}
+		recv.hdr_len += ssize2;
+		recv.extracted += ssize2;
+
+		smb2_parse_one_message(server, &recv, rxq);
+
+		WARN(rxq->pdu_remain > 0, "MSG=%08x pdu_remain=%x",
+		     rxq->msg_id, rxq->pdu_remain);
+		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
+		rxq->pdu_remain = next_len;
+	} while (next_command);
+	return;
+
+failed:
+	set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+}
+
+/*
+ * Receive and parse an SMB2/3 PDU.  We need to wait for data to come in until
+ * we have enough and then we have to reverse transformations and perform
+ * decompression before we can fully parse the message contents.
+ */
+int smb2_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len)
+{
+	struct netfs_rxqueue *rxq = &server->rx_queue;
+	__le32 protocol_id;
+	size_t got;
+	int rc;
+
+	rc = smb_rxqueue_refill(server, rxq, sizeof(struct smb2_pdu));
+	if (rc < 0)
+		return rc;
+
+	got = netfs_rxqueue_read(rxq, &protocol_id, 0, sizeof(protocol_id));
+	if (got != sizeof(protocol_id)) {
+		cifs_dbg(VFS, "%s: Couldn't extract ProtocolId\n", __func__);
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		return -EIO;
+	}
+
+	/* Reverse any transformation made to the content.  We set up an
+	 * iterator to define the buffer, but anyone looking at the buffer
+	 * *should not* assume that they can simply poke around in it as it may
+	 * be assembled from raw network packet Rx buffers.
+	 */
+	if (protocol_id == SMB2_TRANSFORM_PROTO_NUM)
+		return smb3_reverse_transform(server, rxq);
+	smb2_parse_pdu(server, rxq);
+	return 0;
 }

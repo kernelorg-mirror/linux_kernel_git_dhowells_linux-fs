@@ -218,8 +218,9 @@ int CIFSSMBSetEA(const unsigned int xid, struct cifs_tcon *tcon,
 /*
  * smb1debug.c
  */
-void cifs_dump_detail(void *buf, size_t buf_len,
-		      struct TCP_Server_Info *server);
+void cifs_dump_detail(struct TCP_Server_Info *server,
+		      const struct cifs_receive *recv);
+void cifs_dump_mids(struct TCP_Server_Info *server);
 
 /*
  * smb1encrypt.c
@@ -229,11 +230,15 @@ int cifs_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server,
 int cifs_verify_signature(struct smb_rqst *rqst,
 			  struct TCP_Server_Info *server,
 			  __u32 expected_sequence_number);
+int cifs_verify_trans_signature(struct TCP_Server_Info *server,
+				struct cifs_receive *recv,
+				struct netfs_rxqueue *rxq,
+				__u32 expected_sequence_number);
 
 /*
  * smb1maperror.c
  */
-int map_smb_to_linux_error(char *buf, bool logErr);
+int map_smb_to_linux_error(const struct smb_hdr *smb, bool logErr);
 int smb1_init_maperror(void);
 int map_and_check_smb_error(struct TCP_Server_Info *server,
 			    struct smb_message *smb, bool logErr);
@@ -257,7 +262,9 @@ search_mapping_table_ERRSRV_test(__u16 smb_err);
  */
 unsigned int header_assemble(struct smb_hdr *buffer, char smb_command,
 			     const struct cifs_tcon *treeCon, int word_count);
-bool is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv);
+bool
+smb1_is_valid_oplock_break(union smb1_response_hdr *buf, unsigned int pdu_len,
+			   struct TCP_Server_Info *srv);
 unsigned int smbCalcSize(void *buf);
 
 /*
@@ -284,6 +291,7 @@ struct smb_message *cifs_setup_async_request(struct TCP_Server_Info *server,
 					     struct smb_rqst *rqst);
 int SendReceiveNoRsp(const unsigned int xid, struct cifs_ses *ses,
 		     char *in_buf, unsigned int in_len, int flags);
+int checkSMB(const struct TCP_Server_Info *server, struct cifs_receive *recv);
 int cifs_check_receive(struct smb_message *smb, struct TCP_Server_Info *server,
 		       bool log_error);
 struct smb_message *cifs_setup_request(struct cifs_ses *ses,
@@ -296,30 +304,13 @@ int SendReceive(const unsigned int xid, struct cifs_ses *ses,
 		struct smb_hdr *in_buf, unsigned int in_len,
 		struct smb_hdr *out_buf, int *pbytes_returned,
 		const int flags);
-bool cifs_check_trans2(struct smb_message *smb, struct TCP_Server_Info *server,
-		       char *buf, int malformed);
-int checkSMB(char *buf, unsigned int pdu_len, unsigned int total_read,
-	     struct TCP_Server_Info *server);
-
-
-static inline __u16
-get_mid(const struct smb_hdr *smb)
-{
-	return le16_to_cpu(smb->Mid);
-}
-
-static inline bool
-compare_mid(__u16 mid, const struct smb_hdr *smb)
-{
-	return mid == le16_to_cpu(smb->Mid);
-}
 
 #define GETU16(var)  (*((__u16 *)var))	/* BB check for endian issues */
 #define GETU32(var)  (*((__u32 *)var))	/* BB check for endian issues */
 
 /* given a pointer to an smb_hdr, retrieve a void pointer to the ByteCount */
 static inline void *
-BCC(struct smb_hdr *smb)
+BCC(const struct smb_hdr *smb)
 {
 	return (void *)smb + sizeof(*smb) + 2 * smb->WordCount;
 }
@@ -329,9 +320,9 @@ BCC(struct smb_hdr *smb)
 
 /* get the unconverted ByteCount for a SMB packet and return it */
 static inline __u16
-get_bcc(struct smb_hdr *hdr)
+get_bcc(const struct smb_hdr *hdr)
 {
-	__le16 *bc_ptr = (__le16 *)BCC(hdr);
+	const __le16 *bc_ptr = (__le16 *)BCC(hdr);
 
 	return get_unaligned_le16(bc_ptr);
 }
@@ -344,6 +335,10 @@ put_bcc(__u16 count, struct smb_hdr *hdr)
 
 	put_unaligned_le16(count, bc_ptr);
 }
+
+struct smb_message *cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr);
+bool cifs_is_network_name_deleted(const struct smb_hdr *shdr, struct TCP_Server_Info *server);
+int smb1_receive_pdu(struct TCP_Server_Info *server, unsigned int pdu_len);
 
 #endif /* CONFIG_CIFS_ALLOW_INSECURE_LEGACY */
 

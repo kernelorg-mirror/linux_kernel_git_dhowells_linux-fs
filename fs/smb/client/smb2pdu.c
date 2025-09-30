@@ -24,6 +24,7 @@
 #include <linux/pagemap.h>
 #include <linux/xattr.h>
 #include <linux/netfs.h>
+#include <linux/iov_iter.h>
 #include <trace/events/netfs.h>
 #include "cifsglob.h"
 #include "cifsproto.h"
@@ -1110,7 +1111,6 @@ SMB2_negotiate(const unsigned int xid,
 	struct kvec rsp_iov;
 	int rc;
 	int resp_buftype;
-	int blob_offset, blob_length;
 	char *security_blob;
 	int flags = CIFS_NEG_OP;
 	unsigned int total_len;
@@ -1310,8 +1310,13 @@ SMB2_negotiate(const unsigned int xid,
 	    (server->capabilities & SMB2_GLOBAL_CAP_ENCRYPTION))
 		server->cipher_type = SMB2_ENCRYPTION_AES128_CCM;
 
-	security_blob = smb2_get_data_area_len(&blob_offset, &blob_length,
-					       (struct smb2_hdr *)rsp);
+	struct cifs_receive recv = {
+		/* TODO: This should be returned into smb_message */
+		.response = rsp_iov.iov_base,
+		.msg_len = rsp_iov.iov_len,
+	};
+
+	security_blob = smb2_get_data_area_len(&recv);
 	/*
 	 * See MS-SMB2 section 2.2.4: if no blob, client picks default which
 	 * for us will be
@@ -1319,7 +1324,7 @@ SMB2_negotiate(const unsigned int xid,
 	 * but for time being this is our only auth choice so doesn't matter.
 	 * We just found a server which sets blob length to zero expecting raw.
 	 */
-	if (blob_length == 0) {
+	if (recv.data_len == 0) {
 		cifs_dbg(FYI, "missing security blob on negprot\n");
 		server->sec_ntlmssp = true;
 	}
@@ -1327,8 +1332,8 @@ SMB2_negotiate(const unsigned int xid,
 	rc = cifs_enable_signing(server, ses->sign);
 	if (rc)
 		goto neg_exit;
-	if (blob_length) {
-		rc = decode_negTokenInit(security_blob, blob_length, server);
+	if (recv.data_len) {
+		rc = decode_negTokenInit(security_blob, recv.data_len, server);
 		if (rc == 1)
 			rc = 0;
 		else if (rc == 0)
@@ -4211,7 +4216,7 @@ replay_again:
 static void
 smb2_echo_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
-	struct smb2_echo_rsp *rsp = (struct smb2_echo_rsp *)smb->resp_buf;
+	struct smb2_echo_rsp *rsp = (struct smb2_echo_rsp *)smb->response;
 	struct cifs_credits credits = { .value = 0, .instance = 0 };
 
 	if (smb->mid_state == MID_RESPONSE_RECEIVED
@@ -4406,8 +4411,8 @@ SMB2_echo(struct TCP_Server_Info *server)
 	iov[0].iov_len = total_len;
 	iov[0].iov_base = (char *)req;
 
-	rc = cifs_call_async(server, &rqst, NULL, smb2_echo_callback, NULL,
-			     server, CIFS_ECHO_OP, NULL);
+	rc = cifs_call_async(server, &rqst, smb2_echo_callback, server,
+			     CIFS_ECHO_OP, NULL, NULL);
 	if (rc)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
@@ -4650,7 +4655,7 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 	struct cifs_io_subrequest *rdata = smb->callback_data;
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
-	struct smb2_hdr *shdr = (struct smb2_hdr *)rdata->iov[0].iov_base;
+	struct smb2_hdr *shdr = smb->response;
 	struct inode *inode = &ictx->inode;
 	struct cifs_credits credits = {
 		.value = 0,
@@ -4658,22 +4663,28 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		.rreq_debug_id = rdata->rreq->debug_id,
 		.rreq_debug_index = rdata->subreq.debug_index,
 	};
-	struct smb_rqst rqst = { .rq_iov = &rdata->iov[0], .rq_nvec = 1 };
+	struct kvec kv = {
+		.iov_base = smb->response,
+		.iov_len  = smb->resp_len,
+	};
+	struct smb_rqst rqst = {
+		.rq_iov  = &kv,
+		.rq_nvec = 1
+	};
 	unsigned int rreq_debug_id = rdata->rreq->debug_id;
 	unsigned int subreq_debug_index = rdata->subreq.debug_index;
 
-	if (rdata->got_bytes)
-		iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
-				    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-				    rdata->subreq.content.offset, rdata->subreq.len);
+	iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
 
 	WARN_ONCE(rdata->server != server,
 		  "rdata server %p != mid server %p",
 		  rdata->server, server);
 
-	cifs_dbg(FYI, "%s: mid=%llu state=%d result=%d bytes=%zu/%zu\n",
-		 __func__, smb->mid, smb->mid_state, rdata->result,
-		 rdata->got_bytes, rdata->subreq.len - rdata->subreq.transferred);
+	cifs_dbg(FYI, "%s: mid=%llu state=%d result=%d bytes=%u/%zu\n",
+		 __func__, smb->mid, smb->mid_state, smb->error,
+		 smb->resp_data_len, rdata->subreq.len - rdata->subreq.transferred);
 
 	switch (smb->mid_state) {
 	case MID_RESPONSE_RECEIVED:
@@ -4683,7 +4694,6 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 		if (server->sign && !smb->decrypted) {
 			int rc;
 
-			iov_iter_truncate(&rqst.rq_iter, rdata->got_bytes);
 			rc = smb2_verify_signature(&rqst, server);
 			if (rc) {
 				cifs_tcon_dbg(VFS, "SMB signature verification returned error = %d\n",
@@ -4699,6 +4709,8 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 			} else
 				trace_netfs_sreq(&rdata->subreq, netfs_sreq_trace_io_progress);
 		}
+
+		rdata->got_bytes = smb->resp_data_len;
 		/* FIXME: should this be counted toward the initiating task? */
 		task_io_account_read(rdata->got_bytes);
 		cifs_stats_bytes_read(tcon, rdata->got_bytes);
@@ -4807,6 +4819,7 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 	struct cifs_io_parms io_parms;
 	struct smb_rqst rqst = { .rq_iov = rdata->iov,
 				 .rq_nvec = 1 };
+	struct iov_iter iter;
 	struct TCP_Server_Info *server;
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	unsigned int total_len;
@@ -4814,6 +4827,10 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 
 	cifs_dbg(FYI, "%s: offset=%llu bytes=%zu\n",
 		 __func__, subreq->start, subreq->len);
+
+	iov_iter_bvec_queue(&iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
 
 	if (!rdata->server)
 		rdata->server = cifs_pick_channel(tcon->ses);
@@ -4866,10 +4883,8 @@ smb2_async_readv(struct cifs_io_subrequest *rdata)
 		flags |= CIFS_HAS_CREDITS;
 	}
 
-	rc = cifs_call_async(server, &rqst,
-			     cifs_readv_receive, smb2_readv_callback,
-			     smb3_handle_read_data, rdata, flags,
-			     &rdata->credits);
+	rc = cifs_call_async(server, &rqst, smb2_readv_callback, rdata, flags,
+			     &rdata->credits, &iter);
 	if (rc) {
 		cifs_stats_fail_inc(io_parms.tcon, SMB2_READ_HE);
 		trace_smb3_read_err(rdata->rreq->debug_id,
@@ -4989,7 +5004,7 @@ smb2_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	struct cifs_io_subrequest *wdata = smb->callback_data;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
-	struct smb2_write_rsp *rsp = (struct smb2_write_rsp *)smb->resp_buf;
+	struct smb2_write_rsp *rsp = (struct smb2_write_rsp *)smb->response;
 	struct cifs_credits credits = {
 		.value = 0,
 		.instance = 0,
@@ -5263,8 +5278,8 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 	if (((flags & CIFS_TRANSFORM_REQ) != CIFS_TRANSFORM_REQ) && should_compress(tcon, &rqst))
 		flags |= CIFS_COMPRESS_REQ;
 
-	rc = cifs_call_async(server, &rqst, NULL, smb2_writev_callback, NULL,
-			     wdata, flags, &wdata->credits);
+	rc = cifs_call_async(server, &rqst, smb2_writev_callback, wdata, flags,
+			     &wdata->credits, NULL);
 	/* Can't touch wdata if rc == 0 */
 	if (rc) {
 		trace_smb3_write_err(wdata->rreq->debug_id,

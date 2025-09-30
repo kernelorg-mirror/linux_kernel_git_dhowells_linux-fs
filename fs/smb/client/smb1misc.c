@@ -63,10 +63,11 @@ header_assemble(struct smb_hdr *buffer, char smb_command,
 }
 
 bool
-is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
+smb1_is_valid_oplock_break(union smb1_response_hdr *buf, unsigned int pdu_len,
+			   struct TCP_Server_Info *srv)
 {
-	struct smb_hdr *buf = (struct smb_hdr *)buffer;
-	struct smb_com_lock_req *pSMB = (struct smb_com_lock_req *)buf;
+	struct smb_hdr *hdr = &buf->hdr;
+	struct smb_com_lock_req *pSMB = &buf->oplock_break;
 	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
@@ -76,13 +77,12 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 	cifs_dbg(FYI, "Checking for oplock break or dnotify response\n");
 	if ((pSMB->hdr.Command == SMB_COM_NT_TRANSACT) &&
 	   (pSMB->hdr.Flags & SMBFLG_RESPONSE)) {
-		struct smb_com_transaction_change_notify_rsp *pSMBr =
-			(struct smb_com_transaction_change_notify_rsp *)buf;
+		struct smb_com_transaction_change_notify_rsp *pSMBr = &buf->change;
 		struct file_notify_information *pnotify;
 		__u32 data_offset = 0;
-		size_t len = srv->total_read - srv->pdu_size;
+		size_t len = pdu_len;
 
-		if (get_bcc(buf) > sizeof(struct file_notify_information)) {
+		if (get_bcc(hdr) > sizeof(struct file_notify_information)) {
 			data_offset = le32_to_cpu(pSMBr->DataOffset);
 
 			if (data_offset >
@@ -141,7 +141,7 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 		if (cifs_ses_exiting(ses))
 			continue;
 		list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
-			if (tcon->tid != buf->Tid)
+			if (tcon->tid != hdr->Tid)
 				continue;
 
 			cifs_stats_inc(&tcon->stats.cifs_stats.num_oplock_brks);
@@ -183,7 +183,7 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 unsigned int
 smbCalcSize(void *buf)
 {
-	struct smb_hdr *ptr = buf;
-	return (sizeof(struct smb_hdr) + (2 * ptr->WordCount) +
+	const struct smb_hdr *ptr = buf;
+	return (sizeof(*ptr) + (2 * ptr->WordCount) +
 		2 /* size of the bcc field */ + get_bcc(ptr));
 }

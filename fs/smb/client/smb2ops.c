@@ -13,6 +13,7 @@
 #include <linux/sort.h>
 #include <crypto/aead.h>
 #include <linux/fiemap.h>
+#include <linux/iov_iter.h>
 #include <uapi/linux/magic.h>
 #include "cifsfs.h"
 #include "cifsglob.h"
@@ -379,6 +380,28 @@ smb2_adjust_credits(struct TCP_Server_Info *server,
 	return 0;
 }
 
+void
+smb2_add_credits_from_hdr(struct smb2_hdr *shdr, struct TCP_Server_Info *server)
+{
+	int scredits, in_flight;
+
+	if (shdr->CreditRequest) {
+		spin_lock(&server->req_lock);
+		server->credits += le16_to_cpu(shdr->CreditRequest);
+		scredits = server->credits;
+		in_flight = server->in_flight;
+		spin_unlock(&server->req_lock);
+		wake_up(&server->request_q);
+
+		trace_smb3_hdr_credits(server->current_mid,
+				server->conn_id, server->hostname, scredits,
+				le16_to_cpu(shdr->CreditRequest), in_flight);
+		cifs_server_dbg(FYI, "%s: added %u credits total=%d\n",
+				__func__, le16_to_cpu(shdr->CreditRequest),
+				scredits);
+	}
+}
+
 static __u64
 smb2_get_next_mid(struct TCP_Server_Info *server)
 {
@@ -399,12 +422,11 @@ smb2_revert_current_mid(struct TCP_Server_Info *server, const unsigned int val)
 	spin_unlock(&server->mid_counter_lock);
 }
 
-static struct smb_message *
-__smb2_find_mid(struct TCP_Server_Info *server, char *buf, bool dequeue)
+struct smb_message *
+smb2_find_mid(struct TCP_Server_Info *server, struct smb2_hdr *shdr, bool dequeue)
 {
 	struct smb_message *smb;
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
-	__u64 wire_mid = le64_to_cpu(shdr->MessageId);
+	u64 wire_mid = le64_to_cpu(shdr->MessageId);
 
 	if (shdr->ProtocolId == SMB2_TRANSFORM_PROTO_NUM) {
 		cifs_server_dbg(VFS, "Encrypted frame parsing not supported yet\n");
@@ -429,33 +451,63 @@ __smb2_find_mid(struct TCP_Server_Info *server, char *buf, bool dequeue)
 	return NULL;
 }
 
-static struct smb_message *
-smb2_find_mid(struct TCP_Server_Info *server, char *buf)
-{
-	return __smb2_find_mid(server, buf, false);
-}
-
-static struct smb_message *
-smb2_find_dequeue_mid(struct TCP_Server_Info *server, char *buf)
-{
-	return __smb2_find_mid(server, buf, true);
-}
-
-static void
-smb2_dump_detail(void *buf, size_t buf_len, struct TCP_Server_Info *server)
-{
 #ifdef CONFIG_CIFS_DEBUG2
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
+void
+smb2_dump_detail(struct TCP_Server_Info *server, const struct cifs_receive *recv)
+{
+	const union smb2_response_hdr *h = recv->response;
+	const struct smb2_hdr *shdr = &h->hdr;
 
 	cifs_server_dbg(VFS, "Cmd: %d Err: 0x%x Flags: 0x%x Mid: %llu Pid: %d\n",
 		 shdr->Command, shdr->Status, shdr->Flags, shdr->MessageId,
 		 shdr->Id.SyncId.ProcessId);
-	if (!server->ops->check_message(buf, buf_len, server->total_read, server)) {
-		cifs_server_dbg(VFS, "smb buf %p len %u\n", buf,
-				server->ops->calc_smb_size(buf));
-	}
-#endif
+	if (recv->malformed)
+		cifs_server_dbg(VFS, "smb buf %p len %u\n",
+				recv->response, recv->calc_len);
 }
+
+void smb2_dump_mids(struct TCP_Server_Info *server)
+{
+	struct smb_message *smb;
+
+	if (server == NULL)
+		return;
+
+	cifs_dbg(VFS, "Dump pending requests:\n");
+	spin_lock(&server->mid_queue_lock);
+	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
+		struct cifs_receive recv = {
+			.response	= smb->response,
+			.msg_len	= smb->resp_len,
+			.error		= smb->error,
+			.data_len	= smb->resp_data_len,
+			.data_offset	= smb->resp_data_offset,
+		};
+
+		cifs_dbg(VFS, "State: %d Cmd: %d Pid: %d Cbdata: %p Mid %llu\n",
+			 smb->mid_state,
+			 smb->command,
+			 smb->pid,
+			 smb->callback_data,
+			 smb->mid);
+#ifdef CONFIG_CIFS_STATS2
+		cifs_dbg(VFS, "IsLarge: %d buf: %p time rcv: %ld now: %ld\n",
+			 smb->large_buf,
+			 smb->response,
+			 smb->when_received,
+			 jiffies);
+#endif /* STATS2 */
+		cifs_dbg(VFS, "IsMult: %d IsEnd: %d\n",
+			 smb->multiRsp, smb->multiEnd);
+		if (recv.response) {
+			smb2_dump_detail(server, &recv);
+			cifs_dump_mem("existing buf: ",
+				      recv.response, umin(recv.msg_len, 62));
+		}
+	}
+	spin_unlock(&server->mid_queue_lock);
+}
+#endif /* CONFIG_CIFS_DEBUG2 */
 
 static bool
 smb2_need_neg(struct TCP_Server_Info *server)
@@ -2074,26 +2126,6 @@ smb2_flush_file(const unsigned int xid, struct cifs_tcon *tcon,
 	return SMB2_flush(xid, tcon, fid->persistent_fid, fid->volatile_fid);
 }
 
-static unsigned int
-smb2_read_data_offset(char *buf)
-{
-	struct smb2_read_rsp *rsp = (struct smb2_read_rsp *)buf;
-
-	return rsp->DataOffset;
-}
-
-static unsigned int
-smb2_read_data_length(char *buf, bool in_remaining)
-{
-	struct smb2_read_rsp *rsp = (struct smb2_read_rsp *)buf;
-
-	if (in_remaining)
-		return le32_to_cpu(rsp->DataRemaining);
-
-	return le32_to_cpu(rsp->DataLength);
-}
-
-
 static int
 smb2_sync_read(const unsigned int xid, struct cifs_fid *pfid,
 	       struct cifs_io_parms *parms, unsigned int *bytes_read,
@@ -2641,14 +2673,10 @@ smb2_close_dir(const unsigned int xid, struct cifs_tcon *tcon,
  * If we negotiate SMB2 protocol and get STATUS_PENDING - update
  * the number of credits and return true. Otherwise - return false.
  */
-static bool
-smb2_is_status_pending(char *buf, struct TCP_Server_Info *server)
+bool
+smb2_status_pending(struct smb2_hdr *shdr, struct TCP_Server_Info *server)
 {
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	int scredits, in_flight;
-
-	if (shdr->Status != STATUS_PENDING)
-		return false;
 
 	if (shdr->CreditRequest) {
 		spin_lock(&server->req_lock);
@@ -2668,45 +2696,12 @@ smb2_is_status_pending(char *buf, struct TCP_Server_Info *server)
 	return true;
 }
 
-static bool
-smb2_is_session_expired(char *buf)
+bool
+smb2_network_name_is_deleted(struct smb2_hdr *shdr, struct TCP_Server_Info *server)
 {
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
-
-	if (shdr->Status != STATUS_NETWORK_SESSION_EXPIRED &&
-	    shdr->Status != STATUS_USER_SESSION_DELETED)
-		return false;
-
-	trace_smb3_ses_expired(le32_to_cpu(shdr->Id.SyncId.TreeId),
-			       le64_to_cpu(shdr->SessionId),
-			       le16_to_cpu(shdr->Command),
-			       le64_to_cpu(shdr->MessageId));
-	cifs_dbg(FYI, "Session expired or deleted\n");
-
-	return true;
-}
-
-static bool
-smb2_is_status_io_timeout(char *buf)
-{
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
-
-	if (shdr->Status == STATUS_IO_TIMEOUT)
-		return true;
-	else
-		return false;
-}
-
-static bool
-smb2_is_network_name_deleted(char *buf, struct TCP_Server_Info *server)
-{
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
-
-	if (shdr->Status != STATUS_NETWORK_NAME_DELETED)
-		return false;
 
 	/* If server is a channel, select the primary channel */
 	pserver = SERVER_IS_CHAN(server) ? server->primary_server : server;
@@ -4571,7 +4566,7 @@ static void *smb2_get_aead_req(struct crypto_aead *tfm, struct smb_rqst *rqst,
 	return p;
 }
 
-static int
+int
 smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc, u8 *key)
 {
 	struct TCP_Server_Info *pserver;
@@ -4677,82 +4672,6 @@ encrypt_message(struct TCP_Server_Info *server, int num_rqst,
 }
 
 /*
- * Decrypt @rqst message. @rqst[0] has the following format:
- * iov[0]   - transform header (associate data),
- * iov[1-N] - SMB2 header and pages - data to decrypt.
- * On success return encrypted data in iov[1-N] and pages, leave iov[0]
- * untouched.
- */
-static int
-decrypt_message(struct TCP_Server_Info *server, int num_rqst,
-		struct smb_rqst *rqst, struct crypto_aead *tfm)
-{
-	struct smb2_transform_hdr *tr_hdr =
-		(struct smb2_transform_hdr *)rqst[0].rq_iov[0].iov_base;
-	unsigned int assoc_data_len = sizeof(struct smb2_transform_hdr) - 20;
-	int rc = 0;
-	struct scatterlist *sg;
-	u8 sign[SMB2_SIGNATURE_SIZE] = {};
-	u8 key[SMB3_ENC_DEC_KEY_SIZE];
-	struct aead_request *req;
-	u8 *iv;
-	DECLARE_CRYPTO_WAIT(wait);
-	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
-	void *creq;
-
-	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), 0, key);
-	if (rc) {
-		cifs_server_dbg(FYI, "%s: Could not get decryption key. sid: 0x%llx\n",
-				__func__, le64_to_cpu(tr_hdr->SessionId));
-		return rc;
-	}
-
-	if ((server->cipher_type == SMB2_ENCRYPTION_AES256_CCM) ||
-		(server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-		rc = crypto_aead_setkey(tfm, key, SMB3_GCM256_CRYPTKEY_SIZE);
-	else
-		rc = crypto_aead_setkey(tfm, key, SMB3_GCM128_CRYPTKEY_SIZE);
-
-	if (rc) {
-		cifs_server_dbg(VFS, "%s: Failed to set aead key %d\n", __func__, rc);
-		return rc;
-	}
-
-	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
-	if (rc) {
-		cifs_server_dbg(VFS, "%s: Failed to set authsize %d\n", __func__, rc);
-		return rc;
-	}
-
-	creq = smb2_get_aead_req(tfm, rqst, num_rqst, sign, &iv, &req, &sg);
-	if (IS_ERR(creq))
-		return PTR_ERR(creq);
-
-	memcpy(sign, &tr_hdr->Signature, SMB2_SIGNATURE_SIZE);
-	crypt_len += SMB2_SIGNATURE_SIZE;
-
-	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
-	    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-		memcpy(iv, (char *)tr_hdr->Nonce, SMB3_AES_GCM_NONCE);
-	else {
-		iv[0] = 3;
-		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
-	}
-
-	aead_request_set_tfm(req, tfm);
-	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
-	aead_request_set_ad(req, assoc_data_len);
-
-	aead_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
-				  crypto_req_done, &wait);
-
-	rc = crypto_wait_req(crypto_aead_decrypt(req), &wait);
-
-	kfree_sensitive(creq);
-	return rc;
-}
-
-/*
  * Copy data from an iterator to the pages in a bvec queue buffer.
  */
 static bool cifs_copy_iter_to_bvecq(struct iov_iter *iter, size_t size,
@@ -4840,604 +4759,6 @@ smb3_init_transform_rq(struct TCP_Server_Info *server, int num_rqst,
 err_free:
 	smb3_free_compound_rqst(num_rqst - 1, &new_rq[1]);
 	return rc;
-}
-
-static int
-smb3_is_transform_hdr(void *buf)
-{
-	struct smb2_transform_hdr *trhdr = buf;
-
-	return trhdr->ProtocolId == SMB2_TRANSFORM_PROTO_NUM;
-}
-
-static int
-decrypt_raw_data(struct TCP_Server_Info *server, char *buf,
-		 unsigned int buf_data_size, struct iov_iter *iter,
-		 bool is_offloaded)
-{
-	struct crypto_aead *tfm;
-	struct smb_rqst rqst = {NULL};
-	struct kvec iov[2];
-	size_t iter_size = 0;
-	int rc;
-
-	iov[0].iov_base = buf;
-	iov[0].iov_len = sizeof(struct smb2_transform_hdr);
-	iov[1].iov_base = buf + sizeof(struct smb2_transform_hdr);
-	iov[1].iov_len = buf_data_size;
-
-	rqst.rq_iov = iov;
-	rqst.rq_nvec = 2;
-	if (iter) {
-		rqst.rq_iter = *iter;
-		iter_size = iov_iter_count(iter);
-	}
-
-	if (is_offloaded) {
-		if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
-		    (server->cipher_type == SMB2_ENCRYPTION_AES256_GCM))
-			tfm = crypto_alloc_aead("gcm(aes)", 0, 0);
-		else
-			tfm = crypto_alloc_aead("ccm(aes)", 0, 0);
-		if (IS_ERR(tfm)) {
-			rc = PTR_ERR(tfm);
-			cifs_server_dbg(VFS, "%s: Failed alloc decrypt TFM, rc=%d\n", __func__, rc);
-
-			return rc;
-		}
-	} else {
-		rc = smb3_crypto_aead_allocate(server);
-		if (unlikely(rc))
-			return rc;
-		tfm = server->secmech.dec;
-	}
-
-	rc = decrypt_message(server, 1, &rqst, tfm);
-	cifs_dbg(FYI, "Decrypt message returned %d\n", rc);
-
-	if (is_offloaded)
-		crypto_free_aead(tfm);
-
-	if (rc)
-		return rc;
-
-	memmove(buf, iov[1].iov_base, buf_data_size);
-
-	if (!is_offloaded)
-		server->total_read = buf_data_size + iter_size;
-
-	return rc;
-}
-
-static int
-cifs_copy_bvecq_to_iter(struct bvecq *bq, size_t data_size,
-			size_t skip, struct iov_iter *iter)
-{
-	for (; bq; bq = bq->next) {
-		for (int s = 0; s < bq->nr_slots; s++) {
-			struct bio_vec *bv = &bq->bv[s];
-			size_t n, len;
-
-			if (data_size == 0)
-				return 0;
-
-			len = umin(bv->bv_len - skip, data_size);
-
-			n = copy_page_to_iter(bv->bv_page, bv->bv_offset + skip, len, iter);
-			if (n != len) {
-				cifs_dbg(VFS, "%s: something went wrong\n", __func__);
-				return smb_EIO2(smb_eio_trace_rx_copy_to_iter,
-						n, len);
-			}
-			data_size -= n;
-			skip = 0;
-		}
-	}
-
-	if (data_size != 0) {
-		cifs_dbg(VFS, "%s: short copy, %zu bytes missing\n",
-			 __func__, data_size);
-		return smb_EIO2(smb_eio_trace_rx_copy_to_iter, 0, data_size);
-	}
-
-	return 0;
-}
-
-static int
-handle_read_data(struct TCP_Server_Info *server, struct smb_message *smb,
-		 char *buf, unsigned int buf_len, struct bvecq *buffer,
-		 unsigned int buffer_len, bool is_offloaded)
-{
-	unsigned int data_offset;
-	unsigned int data_len;
-	unsigned int end_off;
-	unsigned int cur_off;
-	unsigned int cur_page_idx;
-	unsigned int pad_len;
-	struct cifs_io_subrequest *rdata = smb->callback_data;
-	struct iov_iter iter;
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
-	size_t copied;
-	bool use_rdma_mr = false;
-
-	if (shdr->Command != SMB2_READ) {
-		cifs_server_dbg(VFS, "only big read responses are supported\n");
-		return -EOPNOTSUPP;
-	}
-
-	if (server->ops->is_session_expired &&
-	    server->ops->is_session_expired(buf)) {
-		if (!is_offloaded)
-			cifs_reconnect(server, true);
-		return -1;
-	}
-
-	if (server->ops->is_status_pending &&
-			server->ops->is_status_pending(buf, server))
-		return -1;
-
-	/* set up first two iov to get credits */
-	rdata->iov[0].iov_base = buf;
-	rdata->iov[0].iov_len = 0;
-	rdata->iov[1].iov_base = buf;
-	rdata->iov[1].iov_len =
-		min_t(unsigned int, buf_len, server->vals->read_rsp_size);
-	cifs_dbg(FYI, "0: iov_base=%p iov_len=%zu\n",
-		 rdata->iov[0].iov_base, rdata->iov[0].iov_len);
-	cifs_dbg(FYI, "1: iov_base=%p iov_len=%zu\n",
-		 rdata->iov[1].iov_base, rdata->iov[1].iov_len);
-
-	rdata->result = server->ops->map_error(buf, true);
-	if (rdata->result != 0) {
-		cifs_dbg(FYI, "%s: server returned error %d\n",
-			 __func__, rdata->result);
-		/* normal error on read response */
-		if (is_offloaded)
-			smb->mid_state = MID_RESPONSE_RECEIVED;
-		else
-			dequeue_mid(server, smb, false);
-		return 0;
-	}
-
-	data_offset = server->ops->read_data_offset(buf);
-#ifdef CONFIG_CIFS_SMB_DIRECT
-	use_rdma_mr = rdata->mr;
-#endif
-	data_len = server->ops->read_data_length(buf, use_rdma_mr);
-
-	if (data_offset < server->vals->read_rsp_size) {
-		/*
-		 * win2k8 sometimes sends an offset of 0 when the read
-		 * is beyond the EOF. Treat it as if the data starts just after
-		 * the header.
-		 */
-		cifs_dbg(FYI, "%s: data offset (%u) inside read response header\n",
-			 __func__, data_offset);
-		data_offset = server->vals->read_rsp_size;
-	} else if (data_offset > MAX_CIFS_SMALL_BUFFER_SIZE) {
-		/* data_offset is beyond the end of smallbuf */
-		cifs_dbg(FYI, "%s: data offset (%u) beyond end of smallbuf\n",
-			 __func__, data_offset);
-		rdata->result = smb_EIO1(smb_eio_trace_rx_overlong, data_offset);
-		if (is_offloaded)
-			smb->mid_state = MID_RESPONSE_MALFORMED;
-		else
-			dequeue_mid(server, smb, rdata->result);
-		return 0;
-	}
-
-	pad_len = data_offset - server->vals->read_rsp_size;
-
-	iov_iter_bvec_queue(&iter, ITER_DEST,
-			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
-			    rdata->subreq.content.offset, rdata->subreq.len);
-
-	if (buf_len <= data_offset) {
-		/* read response payload is in pages */
-		cur_page_idx = pad_len / PAGE_SIZE;
-		cur_off = pad_len % PAGE_SIZE;
-
-		if (cur_page_idx != 0) {
-			/* data offset is beyond the 1st page of response */
-			cifs_dbg(FYI, "%s: data offset (%u) beyond 1st page of response\n",
-				 __func__, data_offset);
-			rdata->result = smb_EIO1(smb_eio_trace_rx_overpage, data_offset);
-			if (is_offloaded)
-				smb->mid_state = MID_RESPONSE_MALFORMED;
-			else
-				dequeue_mid(server, smb, rdata->result);
-			return 0;
-		}
-
-		if (data_len > buffer_len - pad_len) {
-			/* data_len is corrupt -- discard frame */
-			rdata->result = smb_EIO1(smb_eio_trace_rx_bad_datalen, data_len);
-			if (is_offloaded)
-				smb->mid_state = MID_RESPONSE_MALFORMED;
-			else
-				dequeue_mid(server, smb, rdata->result);
-			return 0;
-		}
-
-		/* Copy the data to the output I/O iterator. */
-		rdata->result = cifs_copy_bvecq_to_iter(buffer, data_len,
-							cur_off, &iter);
-		if (rdata->result != 0) {
-			if (is_offloaded)
-				smb->mid_state = MID_RESPONSE_MALFORMED;
-			else
-				dequeue_mid(server, smb, rdata->result);
-			return 0;
-		}
-		rdata->got_bytes = data_len;
-
-	} else if (!check_add_overflow(data_offset, data_len, &end_off) &&
-		   buf_len >= end_off) {
-		/* read response payload is in buf */
-		WARN_ONCE(buffer, "read data can be either in buf or in buffer");
-		copied = copy_to_iter(buf + data_offset, data_len, &iter);
-		if (copied == 0)
-			return smb_EIO2(smb_eio_trace_rx_copy_to_iter, copied, data_len);
-		rdata->got_bytes = copied;
-	} else {
-		/* read response payload cannot be in both buf and pages */
-		WARN_ONCE(1, "buf can not contain only a part of read data");
-		rdata->result = smb_EIO(smb_eio_trace_rx_both_buf);
-		if (is_offloaded)
-			smb->mid_state = MID_RESPONSE_MALFORMED;
-		else
-			dequeue_mid(server, smb, rdata->result);
-		return 0;
-	}
-
-	if (is_offloaded)
-		smb->mid_state = MID_RESPONSE_RECEIVED;
-	else
-		dequeue_mid(server, smb, false);
-	return 0;
-}
-
-struct smb2_decrypt_work {
-	struct work_struct decrypt;
-	struct TCP_Server_Info *server;
-	struct bvecq *buffer;
-	char *buf;
-	unsigned int len;
-};
-
-
-static void smb2_decrypt_offload(struct work_struct *work)
-{
-	struct smb2_decrypt_work *dw = container_of(work,
-				struct smb2_decrypt_work, decrypt);
-	int rc;
-	struct smb_message *smb;
-	struct iov_iter iter;
-
-	iov_iter_bvec_queue(&iter, ITER_DEST, dw->buffer, 0, 0, dw->len);
-	rc = decrypt_raw_data(dw->server, dw->buf, dw->server->vals->read_rsp_size,
-			      &iter, true);
-	if (rc) {
-		cifs_dbg(VFS, "error decrypting rc=%d\n", rc);
-		goto free_pages;
-	}
-
-	dw->server->lstrp = jiffies;
-	smb = smb2_find_dequeue_mid(dw->server, dw->buf);
-	if (smb == NULL)
-		cifs_dbg(FYI, "mid not found\n");
-	else {
-		smb->decrypted = true;
-		rc = handle_read_data(dw->server, smb, dw->buf,
-				      dw->server->vals->read_rsp_size,
-				      dw->buffer, dw->len,
-				      true);
-		if (rc >= 0) {
-#ifdef CONFIG_CIFS_STATS2
-			smb->when_received = jiffies;
-#endif
-			if (dw->server->ops->is_network_name_deleted)
-				dw->server->ops->is_network_name_deleted(dw->buf,
-									 dw->server);
-
-			mid_execute_callback(dw->server, smb);
-		} else {
-			spin_lock(&dw->server->srv_lock);
-			if (dw->server->tcpStatus == CifsNeedReconnect) {
-				spin_lock(&dw->server->mid_queue_lock);
-				smb->mid_state = MID_RETRY_NEEDED;
-				spin_unlock(&dw->server->mid_queue_lock);
-				spin_unlock(&dw->server->srv_lock);
-				mid_execute_callback(dw->server, smb);
-			} else {
-				spin_lock(&dw->server->mid_queue_lock);
-				smb->mid_state = MID_REQUEST_SUBMITTED;
-				smb->deleted_from_q = false;
-				list_add_tail(&smb->qhead,
-					&dw->server->pending_mid_q);
-				spin_unlock(&dw->server->mid_queue_lock);
-				spin_unlock(&dw->server->srv_lock);
-			}
-		}
-		release_mid(dw->server, smb);
-	}
-
-free_pages:
-	bvecq_put(dw->buffer);
-	cifs_small_buf_release(dw->buf);
-	kfree(dw);
-}
-
-
-static int
-receive_encrypted_read(struct TCP_Server_Info *server, struct smb_message **smb,
-		       int *num_mids)
-{
-	char *buf = server->smallbuf;
-	struct smb2_transform_hdr *tr_hdr = (struct smb2_transform_hdr *)buf;
-	struct iov_iter iter;
-	unsigned int len;
-	unsigned int buflen = server->pdu_size;
-	int rc;
-	struct smb2_decrypt_work *dw;
-
-	dw = kzalloc_obj(struct smb2_decrypt_work);
-	if (!dw)
-		return -ENOMEM;
-	INIT_WORK(&dw->decrypt, smb2_decrypt_offload);
-	dw->server = server;
-
-	*num_mids = 1;
-	len = min_t(unsigned int, buflen, server->vals->read_rsp_size +
-		sizeof(struct smb2_transform_hdr)) - HEADER_SIZE(server) + 1;
-
-	rc = cifs_read_from_socket(server, buf + HEADER_SIZE(server) - 1, len);
-	if (rc < 0)
-		goto free_dw;
-	server->total_read += rc;
-
-	if (le32_to_cpu(tr_hdr->OriginalMessageSize) <
-	    server->vals->read_rsp_size) {
-		cifs_server_dbg(VFS, "OriginalMessageSize %u too small for read response (%zu)\n",
-			le32_to_cpu(tr_hdr->OriginalMessageSize),
-			server->vals->read_rsp_size);
-		rc = -EINVAL;
-		goto discard_data;
-	}
-	len = le32_to_cpu(tr_hdr->OriginalMessageSize) -
-		server->vals->read_rsp_size;
-	dw->len = len;
-	len = round_up(dw->len, PAGE_SIZE);
-
-	rc = -ENOMEM;
-	dw->buffer = bvecq_alloc_buffer(len, GFP_NOFS, false);
-	if (!dw->buffer)
-		goto discard_data;
-
-	iov_iter_bvec_queue(&iter, ITER_DEST, dw->buffer, 0, 0, len);
-
-	/* Read the data into the buffer and clear excess bufferage. */
-	rc = cifs_read_iter_from_socket(server, &iter, dw->len);
-	if (rc < 0)
-		goto discard_data;
-
-	server->total_read += rc;
-	if (rc < len) {
-		struct iov_iter tmp = iter;
-
-		iov_iter_advance(&tmp, rc);
-		iov_iter_zero(len - rc, &tmp);
-	}
-	iov_iter_truncate(&iter, dw->len);
-
-	rc = cifs_discard_remaining_data(server);
-	if (rc)
-		goto free_pages;
-
-	/*
-	 * For large reads, offload to different thread for better performance,
-	 * use more cores decrypting which can be expensive
-	 */
-
-	if ((server->min_offload) && (server->in_flight > 1) &&
-	    (server->pdu_size >= server->min_offload)) {
-		dw->buf = server->smallbuf;
-		server->smallbuf = (char *)cifs_small_buf_get();
-
-		queue_work(decrypt_wq, &dw->decrypt);
-		*num_mids = 0; /* worker thread takes care of finding mid */
-		return -1;
-	}
-
-	rc = decrypt_raw_data(server, buf, server->vals->read_rsp_size,
-			      &iter, false);
-	if (rc)
-		goto free_pages;
-
-	*smb = smb2_find_mid(server, buf);
-	if (*smb == NULL) {
-		cifs_dbg(FYI, "mid not found\n");
-	} else {
-		cifs_dbg(FYI, "mid found\n");
-		(*smb)->decrypted = true;
-		rc = handle_read_data(server, *smb, buf,
-				      server->vals->read_rsp_size,
-				      dw->buffer, dw->len, false);
-		if (rc >= 0) {
-			if (server->ops->is_network_name_deleted) {
-				server->ops->is_network_name_deleted(buf,
-								server);
-			}
-		}
-	}
-
-free_pages:
-	bvecq_put(dw->buffer);
-free_dw:
-	kfree(dw);
-	return rc;
-discard_data:
-	cifs_discard_remaining_data(server);
-	goto free_pages;
-}
-
-static int
-receive_encrypted_standard(struct TCP_Server_Info *server,
-			   struct smb_message **mids, char **bufs,
-			   int *num_mids)
-{
-	int ret, length;
-	char *buf = server->smallbuf;
-	struct smb2_hdr *shdr;
-	unsigned int pdu_length = server->pdu_size;
-	unsigned int buf_size;
-	unsigned int next_cmd;
-	struct smb_message *smb;
-	int next_is_large;
-	char *next_buffer = NULL;
-
-	*num_mids = 0;
-
-	/* switch to large buffer if too big for a small one */
-	if (pdu_length > MAX_CIFS_SMALL_BUFFER_SIZE) {
-		server->large_buf = true;
-		memcpy(server->bigbuf, buf, server->total_read);
-		buf = server->bigbuf;
-	}
-
-	/* now read the rest */
-	length = cifs_read_from_socket(server, buf + HEADER_SIZE(server) - 1,
-				pdu_length - HEADER_SIZE(server) + 1);
-	if (length < 0)
-		return length;
-	server->total_read += length;
-
-	buf_size = pdu_length - sizeof(struct smb2_transform_hdr);
-	length = decrypt_raw_data(server, buf, buf_size, NULL, false);
-	if (length)
-		return length;
-
-	next_is_large = server->large_buf;
-one_more:
-	shdr = (struct smb2_hdr *)buf;
-	next_cmd = le32_to_cpu(shdr->NextCommand);
-
-	if (*num_mids >= MAX_COMPOUND) {
-		cifs_server_dbg(VFS, "too many PDUs in compound\n");
-		return -1;
-	}
-
-	if (next_cmd) {
-		if (WARN_ON_ONCE(next_cmd > pdu_length))
-			return -1;
-		if (next_is_large)
-			next_buffer = (char *)cifs_buf_get();
-		else
-			next_buffer = (char *)cifs_small_buf_get();
-		if (!next_buffer) {
-			cifs_server_dbg(VFS, "No memory for (large) SMB response\n");
-			return -1;
-		}
-		memcpy(next_buffer, buf + next_cmd, pdu_length - next_cmd);
-	}
-
-	smb = smb2_find_mid(server, buf);
-	if (smb == NULL)
-		cifs_dbg(FYI, "mid not found\n");
-	else {
-		cifs_dbg(FYI, "mid found\n");
-		smb->decrypted = true;
-		smb->resp_buf_size = server->pdu_size;
-	}
-
-	bufs[*num_mids] = buf;
-	mids[(*num_mids)++] = smb;
-
-	if (smb && smb->handle)
-		ret = smb->handle(server, smb);
-	else
-		ret = cifs_handle_standard(server, smb);
-
-	if (ret == 0 && next_cmd) {
-		pdu_length -= next_cmd;
-		server->large_buf = next_is_large;
-		if (next_is_large)
-			server->bigbuf = buf = next_buffer;
-		else
-			server->smallbuf = buf = next_buffer;
-		goto one_more;
-	} else if (ret != 0) {
-		/*
-		 * ret != 0 here means that we didn't get to handle_mid() thus
-		 * server->smallbuf and server->bigbuf are still valid. We need
-		 * to free next_buffer because it is not going to be used
-		 * anywhere.
-		 */
-		if (next_is_large)
-			free_rsp_buf(CIFS_LARGE_BUFFER, next_buffer);
-		else
-			free_rsp_buf(CIFS_SMALL_BUFFER, next_buffer);
-	}
-
-	return ret;
-}
-
-static int
-smb3_receive_transform(struct TCP_Server_Info *server,
-		       struct smb_message **mids, char **bufs, int *num_mids)
-{
-	char *buf = server->smallbuf;
-	unsigned int pdu_length = server->pdu_size;
-	struct smb2_transform_hdr *tr_hdr = (struct smb2_transform_hdr *)buf;
-	unsigned int orig_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
-
-	if (pdu_length < sizeof(struct smb2_transform_hdr) +
-						sizeof(struct smb2_hdr)) {
-		cifs_server_dbg(VFS, "Transform message is too small (%u)\n",
-			 pdu_length);
-		cifs_reconnect(server, true);
-		return -ECONNABORTED;
-	}
-
-	if (pdu_length < orig_len + sizeof(struct smb2_transform_hdr)) {
-		cifs_server_dbg(VFS, "Transform message is broken\n");
-		cifs_reconnect(server, true);
-		return -ECONNABORTED;
-	}
-
-	/* TODO: add support for compounds containing READ. */
-	if (pdu_length > CIFSMaxBufSize + MAX_HEADER_SIZE(server)) {
-		return receive_encrypted_read(server, &mids[0], num_mids);
-	}
-
-	return receive_encrypted_standard(server, mids, bufs, num_mids);
-}
-
-int
-smb3_handle_read_data(struct TCP_Server_Info *server, struct smb_message *smb)
-{
-	char *buf = server->large_buf ? server->bigbuf : server->smallbuf;
-
-	return handle_read_data(server, smb, buf, server->pdu_size,
-				NULL, 0, false);
-}
-
-static int smb2_next_header(struct TCP_Server_Info *server, char *buf,
-			    unsigned int *noff)
-{
-	struct smb2_hdr *hdr = (struct smb2_hdr *)buf;
-	struct smb2_transform_hdr *t_hdr = (struct smb2_transform_hdr *)buf;
-
-	if (hdr->ProtocolId == SMB2_TRANSFORM_PROTO_NUM) {
-		*noff = le32_to_cpu(t_hdr->OriginalMessageSize);
-		if (unlikely(check_add_overflow(*noff, sizeof(*t_hdr), noff)))
-			return -EINVAL;
-	} else {
-		*noff = le32_to_cpu(hdr->NextCommand);
-	}
-	if (unlikely(*noff && *noff < MID_HEADER_SIZE(server)))
-		return -EINVAL;
-	return 0;
 }
 
 int __cifs_sfu_make_node(unsigned int xid, struct inode *inode,
@@ -5609,6 +4930,25 @@ static int smb2_make_node(unsigned int xid, struct inode *inode,
 	return rc;
 }
 
+static unsigned int smb2_calc_smb_size(void *buf)
+{
+	const union smb2_response_hdr *h = buf;
+	const struct smb2_hdr *shdr = &h->hdr;
+	struct cifs_receive recv = {
+		.response = buf,
+	};
+
+	/*
+	 * StructureSize2, ie length of fixed parameter area has already
+	 * been checked to make sure it is the correct length.
+	 */
+	recv.hdr_len  = le16_to_cpu(shdr->StructureSize);
+	recv.hdr_len += le16_to_cpu(h->StructureSize2) & ~SMB2_STRUCT_HAS_DYNAMIC_PART;
+
+	smb2_calc_size(&recv);
+	return recv.calc_len;
+}
+
 #ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
 struct smb_version_operations smb20_operations = {
 	.compare_fids = smb2_compare_fids,
@@ -5622,15 +4962,8 @@ struct smb_version_operations smb20_operations = {
 	.wait_mtu_credits = cifs_wait_mtu_credits,
 	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
-	.read_data_offset = smb2_read_data_offset,
-	.read_data_length = smb2_read_data_length,
-	.map_error = map_smb2_to_linux_error,
-	.find_mid = smb2_find_mid,
-	.check_message = smb2_check_message,
-	.dump_detail = smb2_dump_detail,
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
-	.is_oplock_break = smb2_is_valid_oplock_break,
 	.handle_cancelled_mid = smb2_handle_cancelled_mid,
 	.downgrade_oplock = smb2_downgrade_oplock,
 	.need_neg = smb2_need_neg,
@@ -5674,9 +5007,7 @@ struct smb_version_operations smb20_operations = {
 	.query_dir_first = smb2_query_dir_first,
 	.query_dir_next = smb2_query_dir_next,
 	.close_dir = smb2_close_dir,
-	.calc_smb_size = smb2_calc_size,
-	.is_status_pending = smb2_is_status_pending,
-	.is_session_expired = smb2_is_session_expired,
+	.calc_smb_size = smb2_calc_smb_size,
 	.oplock_response = smb2_oplock_response,
 	.queryfs = smb2_queryfs,
 	.mand_lock = smb2_mand_lock,
@@ -5701,13 +5032,10 @@ struct smb_version_operations smb20_operations = {
 	.get_acl = get_smb2_acl,
 	.get_acl_by_fid = get_smb2_acl_by_fid,
 	.set_acl = set_smb2_acl,
-	.next_header = smb2_next_header,
 	.ioctl_query_info = smb2_ioctl_query_info,
 	.make_node = smb2_make_node,
 	.fiemap = smb3_fiemap,
 	.llseek = smb3_llseek,
-	.is_status_io_timeout = smb2_is_status_io_timeout,
-	.is_network_name_deleted = smb2_is_network_name_deleted,
 	.rename_pending_delete = smb2_rename_pending_delete,
 };
 #endif /* CIFS_ALLOW_INSECURE_LEGACY */
@@ -5725,15 +5053,9 @@ struct smb_version_operations smb21_operations = {
 	.adjust_credits = smb2_adjust_credits,
 	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
-	.read_data_offset = smb2_read_data_offset,
-	.read_data_length = smb2_read_data_length,
-	.map_error = map_smb2_to_linux_error,
-	.find_mid = smb2_find_mid,
-	.check_message = smb2_check_message,
-	.dump_detail = smb2_dump_detail,
+	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
-	.is_oplock_break = smb2_is_valid_oplock_break,
 	.handle_cancelled_mid = smb2_handle_cancelled_mid,
 	.downgrade_oplock = smb2_downgrade_oplock,
 	.need_neg = smb2_need_neg,
@@ -5777,9 +5099,7 @@ struct smb_version_operations smb21_operations = {
 	.query_dir_first = smb2_query_dir_first,
 	.query_dir_next = smb2_query_dir_next,
 	.close_dir = smb2_close_dir,
-	.calc_smb_size = smb2_calc_size,
-	.is_status_pending = smb2_is_status_pending,
-	.is_session_expired = smb2_is_session_expired,
+	.calc_smb_size = smb2_calc_smb_size,
 	.oplock_response = smb2_oplock_response,
 	.queryfs = smb2_queryfs,
 	.mand_lock = smb2_mand_lock,
@@ -5806,13 +5126,10 @@ struct smb_version_operations smb21_operations = {
 	.get_acl = get_smb2_acl,
 	.get_acl_by_fid = get_smb2_acl_by_fid,
 	.set_acl = set_smb2_acl,
-	.next_header = smb2_next_header,
 	.ioctl_query_info = smb2_ioctl_query_info,
 	.make_node = smb2_make_node,
 	.fiemap = smb3_fiemap,
 	.llseek = smb3_llseek,
-	.is_status_io_timeout = smb2_is_status_io_timeout,
-	.is_network_name_deleted = smb2_is_network_name_deleted,
 	.rename_pending_delete = smb2_rename_pending_delete,
 };
 
@@ -5829,16 +5146,10 @@ struct smb_version_operations smb30_operations = {
 	.adjust_credits = smb2_adjust_credits,
 	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
-	.read_data_offset = smb2_read_data_offset,
-	.read_data_length = smb2_read_data_length,
-	.map_error = map_smb2_to_linux_error,
-	.find_mid = smb2_find_mid,
-	.check_message = smb2_check_message,
-	.dump_detail = smb2_dump_detail,
+	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
 	.dump_share_caps = smb2_dump_share_caps,
-	.is_oplock_break = smb2_is_valid_oplock_break,
 	.handle_cancelled_mid = smb2_handle_cancelled_mid,
 	.downgrade_oplock = smb3_downgrade_oplock,
 	.need_neg = smb2_need_neg,
@@ -5885,9 +5196,7 @@ struct smb_version_operations smb30_operations = {
 	.query_dir_first = smb2_query_dir_first,
 	.query_dir_next = smb2_query_dir_next,
 	.close_dir = smb2_close_dir,
-	.calc_smb_size = smb2_calc_size,
-	.is_status_pending = smb2_is_status_pending,
-	.is_session_expired = smb2_is_session_expired,
+	.calc_smb_size = smb2_calc_smb_size,
 	.oplock_response = smb2_oplock_response,
 	.queryfs = smb2_queryfs,
 	.mand_lock = smb2_mand_lock,
@@ -5911,8 +5220,6 @@ struct smb_version_operations smb30_operations = {
 	.enum_snapshots = smb3_enum_snapshots,
 	.notify = smb3_notify,
 	.init_transform_rq = smb3_init_transform_rq,
-	.is_transform_hdr = smb3_is_transform_hdr,
-	.receive_transform = smb3_receive_transform,
 	.get_dfs_refer = smb2_get_dfs_refer,
 	.select_sectype = smb2_select_sectype,
 #ifdef CONFIG_CIFS_XATTR
@@ -5922,13 +5229,10 @@ struct smb_version_operations smb30_operations = {
 	.get_acl = get_smb2_acl,
 	.get_acl_by_fid = get_smb2_acl_by_fid,
 	.set_acl = set_smb2_acl,
-	.next_header = smb2_next_header,
 	.ioctl_query_info = smb2_ioctl_query_info,
 	.make_node = smb2_make_node,
 	.fiemap = smb3_fiemap,
 	.llseek = smb3_llseek,
-	.is_status_io_timeout = smb2_is_status_io_timeout,
-	.is_network_name_deleted = smb2_is_network_name_deleted,
 	.rename_pending_delete = smb2_rename_pending_delete,
 };
 
@@ -5945,16 +5249,10 @@ struct smb_version_operations smb311_operations = {
 	.adjust_credits = smb2_adjust_credits,
 	.get_next_mid = smb2_get_next_mid,
 	.revert_current_mid = smb2_revert_current_mid,
-	.read_data_offset = smb2_read_data_offset,
-	.read_data_length = smb2_read_data_length,
-	.map_error = map_smb2_to_linux_error,
-	.find_mid = smb2_find_mid,
-	.check_message = smb2_check_message,
-	.dump_detail = smb2_dump_detail,
+	.receive_pdu = smb2_receive_pdu,
 	.clear_stats = smb2_clear_stats,
 	.print_stats = smb2_print_stats,
 	.dump_share_caps = smb2_dump_share_caps,
-	.is_oplock_break = smb2_is_valid_oplock_break,
 	.handle_cancelled_mid = smb2_handle_cancelled_mid,
 	.downgrade_oplock = smb3_downgrade_oplock,
 	.need_neg = smb2_need_neg,
@@ -6001,9 +5299,7 @@ struct smb_version_operations smb311_operations = {
 	.query_dir_first = smb2_query_dir_first,
 	.query_dir_next = smb2_query_dir_next,
 	.close_dir = smb2_close_dir,
-	.calc_smb_size = smb2_calc_size,
-	.is_status_pending = smb2_is_status_pending,
-	.is_session_expired = smb2_is_session_expired,
+	.calc_smb_size = smb2_calc_smb_size,
 	.oplock_response = smb2_oplock_response,
 	.queryfs = smb311_queryfs,
 	.mand_lock = smb2_mand_lock,
@@ -6027,8 +5323,6 @@ struct smb_version_operations smb311_operations = {
 	.enum_snapshots = smb3_enum_snapshots,
 	.notify = smb3_notify,
 	.init_transform_rq = smb3_init_transform_rq,
-	.is_transform_hdr = smb3_is_transform_hdr,
-	.receive_transform = smb3_receive_transform,
 	.get_dfs_refer = smb2_get_dfs_refer,
 	.select_sectype = smb2_select_sectype,
 #ifdef CONFIG_CIFS_XATTR
@@ -6038,13 +5332,10 @@ struct smb_version_operations smb311_operations = {
 	.get_acl = get_smb2_acl,
 	.get_acl_by_fid = get_smb2_acl_by_fid,
 	.set_acl = set_smb2_acl,
-	.next_header = smb2_next_header,
 	.ioctl_query_info = smb2_ioctl_query_info,
 	.make_node = smb2_make_node,
 	.fiemap = smb3_fiemap,
 	.llseek = smb3_llseek,
-	.is_status_io_timeout = smb2_is_status_io_timeout,
-	.is_network_name_deleted = smb2_is_network_name_deleted,
 	.rename_pending_delete = smb2_rename_pending_delete,
 };
 

@@ -336,6 +336,8 @@ static int validate_t2(struct smb_t2_rsp *pSMB)
 {
 	unsigned int total_size;
 
+	return 0; /* Checking now done in reception routine. */
+
 	/* check for plausible wct */
 	if (pSMB->hdr.WordCount < 10)
 		goto vt2_err;
@@ -428,7 +430,7 @@ CIFSSMBNegotiate(const unsigned int xid,
 	SMB_NEGOTIATE_RSP *pSMBr;
 	unsigned int in_len;
 	int rc = 0;
-	int bytes_returned;
+	int bytes_returned = 0;
 	int i;
 	u16 count;
 
@@ -768,8 +770,8 @@ CIFSSMBEcho(struct TCP_Server_Info *server)
 	iov[0].iov_len = in_len;
 	iov[0].iov_base = smb;
 
-	rc = cifs_call_async(server, &rqst, NULL, cifs_echo_callback, NULL,
-			     server, CIFS_NON_BLOCKING | CIFS_ECHO_OP, NULL);
+	rc = cifs_call_async(server, &rqst, cifs_echo_callback, server,
+			     CIFS_NON_BLOCKING | CIFS_ECHO_OP, NULL, NULL);
 	if (rc)
 		cifs_dbg(FYI, "Echo request failed: %d\n", rc);
 
@@ -1466,8 +1468,11 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 	struct netfs_inode *ictx = netfs_inode(rdata->rreq->inode);
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct inode *inode = &ictx->inode;
-	struct smb_rqst rqst = { .rq_iov = rdata->iov,
-				 .rq_nvec = 1};
+	struct kvec iov = {
+		.iov_base = smb->response,
+		.iov_len  = smb->resp_len,
+	};
+	struct smb_rqst rqst = { .rq_iov = &iov, .rq_nvec = 1 };
 	struct cifs_credits credits = {
 		.value = 1,
 		.instance = 0,
@@ -1489,12 +1494,13 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 	switch (smb->mid_state) {
 	case MID_RESPONSE_RECEIVED:
 		/* result already set, check signature */
+		rdata->got_bytes = smb->resp_data_len;
 		if (server->sign) {
 			int rc = 0;
 
-			iov_iter_truncate(&rqst.rq_iter, rdata->got_bytes);
+			iov_iter_truncate(&rqst.rq_iter, smb->resp_data_len);
 			rc = cifs_verify_signature(&rqst, server,
-						  smb->sequence_number);
+						   smb->sequence_number);
 			if (rc)
 				cifs_dbg(VFS, "SMB signature verification returned error = %d\n",
 					 rc);
@@ -1585,6 +1591,7 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct smb_rqst rqst = { .rq_iov = rdata->iov,
 				 .rq_nvec = 1 };
+	struct iov_iter iter;
 	unsigned int in_len;
 
 	cifs_dbg(FYI, "%s: offset=%llu bytes=%zu\n",
@@ -1636,8 +1643,12 @@ cifs_async_readv(struct cifs_io_subrequest *rdata)
 			      tcon->tid, tcon->ses->Suid,
 			      rdata->subreq.start, rdata->subreq.len);
 
-	rc = cifs_call_async(tcon->ses->server, &rqst, cifs_readv_receive,
-			     cifs_readv_callback, NULL, rdata, 0, NULL);
+	iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
+
+	rc = cifs_call_async(tcon->ses->server, &rqst,
+			     cifs_readv_callback, rdata, 0, NULL, &iter);
 
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_reads);
@@ -1893,7 +1904,7 @@ cifs_writev_callback(struct TCP_Server_Info *server, struct smb_message *smb)
 {
 	struct cifs_io_subrequest *wdata = smb->callback_data;
 	struct cifs_tcon *tcon = tlink_tcon(wdata->req->cfile->tlink);
-	WRITE_RSP *rsp = (WRITE_RSP *)smb->resp_buf;
+	WRITE_RSP *rsp = (WRITE_RSP *)smb->response;
 	struct cifs_credits credits = {
 		.value = 1,
 		.instance = 0,
@@ -2034,8 +2045,8 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 		iov[0].iov_len += 4; /* pad bigger by four bytes */
 	}
 
-	rc = cifs_call_async(tcon->ses->server, &rqst, NULL,
-			     cifs_writev_callback, NULL, wdata, 0, NULL);
+	rc = cifs_call_async(tcon->ses->server, &rqst,
+			     cifs_writev_callback, wdata, 0, NULL, NULL);
 	/* Can't touch wdata if rc == 0 */
 	if (rc == 0)
 		cifs_stats_inc(&tcon->stats.cifs_stats.num_writes);

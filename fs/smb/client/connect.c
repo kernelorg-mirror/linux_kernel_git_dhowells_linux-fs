@@ -30,8 +30,10 @@
 #include <linux/module.h>
 #include <keys/user-type.h>
 #include <net/ipv6.h>
+#include <net/tcp.h>
 #include <linux/parser.h>
 #include <linux/bvec.h>
+#include <trace/events/sock.h>
 #include "cifsglob.h"
 #include "cifsproto.h"
 #include "cifs_unicode.h"
@@ -55,9 +57,6 @@
 #define TLINK_ERROR_EXPIRE	(1 * HZ)
 #define TLINK_IDLE_EXPIRE	(600 * HZ)
 
-/* Drop the connection to not overload the server */
-#define MAX_STATUS_IO_TIMEOUT   5
-
 static int ip_connect(struct TCP_Server_Info *server);
 static int generic_ip_connect(struct TCP_Server_Info *server);
 static void tlink_rb_insert(struct rb_root *root, struct tcon_link *new_tlink);
@@ -66,6 +65,33 @@ static void cifs_prune_tlinks(struct work_struct *work);
 static struct mchan_mount *mchan_mount_alloc(struct cifs_ses *ses);
 static void mchan_mount_free(struct mchan_mount *mchan_mount);
 static void mchan_mount_work_fn(struct work_struct *work);
+
+static void smb_tcp_data_ready(struct sock *sk)
+{
+	struct TCP_Server_Info *server = READ_ONCE(sk->sk_user_data);
+
+	trace_sk_data_ready(sk);
+	trace_smb3_data_ready(0);
+	if (!server)
+		return;
+
+	set_bit(SMB_SERVER_DATA_READY, &server->flags);
+	smp_mb__after_atomic();
+	wake_up(&server->rx_waitq);
+	server->rx_old_data_ready(sk);
+}
+
+static void smb_tcp_error_report(struct sock *sk)
+{
+	struct TCP_Server_Info *server = READ_ONCE(sk->sk_user_data);
+
+	if (!server)
+		return;
+	set_bit(SMB_SERVER_DATA_READY, &server->flags);
+	smp_mb__after_atomic();
+	wake_up(&server->rx_waitq);
+	server->rx_old_error_report(sk);
+}
 
 /*
  * Resolve hostname and set ip addr in tcp ses. Useful for hostnames that may
@@ -311,6 +337,15 @@ cifs_abort_connection(struct TCP_Server_Info *server)
 		kernel_sock_shutdown(server->ssocket, SHUT_WR);
 		cifs_dbg(FYI, "Post shutdown state: 0x%x Flags: 0x%lx\n", server->ssocket->state,
 			 server->ssocket->flags);
+
+		kernel_sock_shutdown(server->ssocket, SHUT_RD);
+		wake_up(&server->rx_waitq);
+
+		server->ssocket->sk->sk_data_ready   = server->rx_old_data_ready;
+		server->ssocket->sk->sk_error_report = server->rx_old_error_report;
+		smp_wmb();
+		server->ssocket->sk->sk_user_data = NULL;
+
 		sock_release(server->ssocket);
 		server->ssocket = NULL;
 	} else if (cifs_rdma_enabled(server)) {
@@ -322,6 +357,8 @@ cifs_abort_connection(struct TCP_Server_Info *server)
 	server->session_key.response = NULL;
 	server->session_key.len = 0;
 	server->lstrp = jiffies;
+
+	netfs_rxqueue_discard(&server->rx_queue, server->rx_queue.qsize);
 
 	/* mark submitted MIDs for retry and issue callback */
 	INIT_LIST_HEAD(&retry_list);
@@ -639,7 +676,7 @@ requeue_echo:
 	queue_delayed_work(cifsiod_wq, &server->echo, server->echo_interval);
 }
 
-static bool
+bool
 allocate_buffers(struct TCP_Server_Info *server)
 {
 	if (!server->bigbuf) {
@@ -650,9 +687,6 @@ allocate_buffers(struct TCP_Server_Info *server)
 			/* retry will check if exiting */
 			return false;
 		}
-	} else if (server->large_buf) {
-		/* we are reusing a dirty large buf, clear its start */
-		memset(server->bigbuf, 0, HEADER_SIZE(server));
 	}
 
 	if (!server->smallbuf) {
@@ -663,10 +697,6 @@ allocate_buffers(struct TCP_Server_Info *server)
 			/* retry will check if exiting */
 			return false;
 		}
-		/* beginning of smb buffer is cleared in our buf_get */
-	} else {
-		/* if existing small buf clear beginning */
-		memset(server->smallbuf, 0, HEADER_SIZE(server));
 	}
 
 	return true;
@@ -729,103 +759,10 @@ zero_credits(struct TCP_Server_Info *server)
 	return false;
 }
 
-static int
-cifs_readv_from_socket(struct TCP_Server_Info *server, struct msghdr *smb_msg)
+static bool smb_decode_rfc1002(struct TCP_Server_Info *server, u32 rfc1002_hdr)
 {
-	int length = 0;
-	int total_read;
+	u8 type = rfc1002_hdr >> 24;
 
-	for (total_read = 0; msg_data_left(smb_msg); total_read += length) {
-		try_to_freeze();
-
-		/* reconnect if no credits and no requests in flight */
-		if (zero_credits(server)) {
-			cifs_reconnect(server, false);
-			return -ECONNABORTED;
-		}
-
-		if (server_unresponsive(server))
-			return -ECONNABORTED;
-		if (cifs_rdma_enabled(server) && server->smbd_conn)
-			length = smbd_recv(server->smbd_conn, smb_msg);
-		else
-			length = sock_recvmsg(server->ssocket, smb_msg, 0);
-
-		spin_lock(&server->srv_lock);
-		if (server->tcpStatus == CifsExiting) {
-			spin_unlock(&server->srv_lock);
-			return -ESHUTDOWN;
-		}
-
-		if (server->tcpStatus == CifsNeedReconnect) {
-			spin_unlock(&server->srv_lock);
-			cifs_reconnect(server, false);
-			return -ECONNABORTED;
-		}
-		spin_unlock(&server->srv_lock);
-
-		if (length == -ERESTARTSYS ||
-		    length == -EAGAIN ||
-		    length == -EINTR) {
-			/*
-			 * Minimum sleep to prevent looping, allowing socket
-			 * to clear and app threads to set tcpStatus
-			 * CifsNeedReconnect if server hung.
-			 */
-			usleep_range(1000, 2000);
-			length = 0;
-			continue;
-		}
-
-		if (length <= 0) {
-			cifs_dbg(FYI, "Received no data or error: %d\n", length);
-			cifs_reconnect(server, false);
-			return -ECONNABORTED;
-		}
-	}
-	return total_read;
-}
-
-int
-cifs_read_from_socket(struct TCP_Server_Info *server, char *buf,
-		      unsigned int to_read)
-{
-	struct msghdr smb_msg = {};
-	struct kvec iov = {.iov_base = buf, .iov_len = to_read};
-
-	iov_iter_kvec(&smb_msg.msg_iter, ITER_DEST, &iov, 1, to_read);
-
-	return cifs_readv_from_socket(server, &smb_msg);
-}
-
-ssize_t
-cifs_discard_from_socket(struct TCP_Server_Info *server, size_t to_read)
-{
-	struct msghdr smb_msg = {};
-
-	/*
-	 *  iov_iter_discard already sets smb_msg.type and count and iov_offset
-	 *  and cifs_readv_from_socket sets msg_control and msg_controllen
-	 *  so little to initialize in struct msghdr
-	 */
-	iov_iter_discard(&smb_msg.msg_iter, ITER_DEST, to_read);
-
-	return cifs_readv_from_socket(server, &smb_msg);
-}
-
-int
-cifs_read_iter_from_socket(struct TCP_Server_Info *server, struct iov_iter *iter,
-			   unsigned int to_read)
-{
-	struct msghdr smb_msg = { .msg_iter = *iter };
-
-	iov_iter_truncate(&smb_msg.msg_iter, to_read);
-	return cifs_readv_from_socket(server, &smb_msg);
-}
-
-static bool
-is_smb_response(struct TCP_Server_Info *server, unsigned char type)
-{
 	/*
 	 * The first byte big endian of the length field,
 	 * is actually not part of the length but the type
@@ -851,7 +788,8 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 		 * exclusively in ip_rfc1001_connect() function.
 		 */
 		cifs_server_dbg(VFS, "RFC 1002 positive session response (unexpected)\n");
-		cifs_reconnect(server, true);
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		set_bit(SMB_SERVER_SESSION_RECONNECT, &server->flags);
 		break;
 	case RFC1002_NEGATIVE_SESSION_RESPONSE:
 		/*
@@ -935,16 +873,20 @@ is_smb_response(struct TCP_Server_Info *server, unsigned char type)
 				msleep(2000);
 		} else {
 			cifs_server_dbg(VFS, "RFC 1002 negative session response (unexpected)\n");
-			cifs_reconnect(server, true);
+			set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+			set_bit(SMB_SERVER_SESSION_RECONNECT, &server->flags);
 		}
 		break;
 	case RFC1002_RETARGET_SESSION_RESPONSE:
 		cifs_server_dbg(VFS, "RFC 1002 retarget session response (unexpected)\n");
-		cifs_reconnect(server, true);
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		set_bit(SMB_SERVER_SESSION_RECONNECT, &server->flags);
 		break;
 	default:
 		cifs_server_dbg(VFS, "RFC 1002 unknown response type 0x%x\n", type);
-		cifs_reconnect(server, true);
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		set_bit(SMB_SERVER_SESSION_RECONNECT, &server->flags);
+		break;
 	}
 
 	return false;
@@ -973,41 +915,6 @@ dequeue_mid(struct TCP_Server_Info *server, struct smb_message *smb, bool malfor
 		smb->deleted_from_q = true;
 		spin_unlock(&server->mid_queue_lock);
 	}
-}
-
-static unsigned int
-smb2_get_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
-{
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buffer;
-
-	/*
-	 * SMB1 does not use credits.
-	 */
-	if (is_smb1(server))
-		return 0;
-
-	return le16_to_cpu(shdr->CreditRequest);
-}
-
-static void
-handle_mid(struct smb_message *smb, struct TCP_Server_Info *server,
-	   char *buf, int malformed)
-{
-	if (server->ops->check_trans2 &&
-	    server->ops->check_trans2(smb, server, buf, malformed))
-		return;
-	smb->credits_received = smb2_get_credits_from_hdr(buf, server);
-	smb->resp_buf = buf;
-	smb->large_buf = server->large_buf;
-	/* Was previous buf put in mpx struct for multi-rsp? */
-	if (!smb->multiRsp) {
-		/* smb buffer will be freed by user thread */
-		if (server->large_buf)
-			server->bigbuf = NULL;
-		else
-			server->smallbuf = NULL;
-	}
-	dequeue_mid(server, smb, malformed);
 }
 
 int
@@ -1091,6 +998,14 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 	if (cifs_rdma_enabled(server))
 		smbd_destroy(server);
 	if (server->ssocket) {
+		kernel_sock_shutdown(server->ssocket, SHUT_RD);
+		wake_up(&server->rx_waitq);
+
+		server->ssocket->sk->sk_data_ready   = server->rx_old_data_ready;
+		server->ssocket->sk->sk_error_report = server->rx_old_error_report;
+		smp_wmb();
+		server->ssocket->sk->sk_user_data = NULL;
+
 		sock_release(server->ssocket);
 		server->ssocket = NULL;
 	}
@@ -1150,120 +1065,210 @@ clean_demultiplex_info(struct TCP_Server_Info *server)
 		mempool_resize(cifs_req_poolp, length + cifs_min_rcv);
 }
 
-static int
-standard_receive3(struct TCP_Server_Info *server, struct smb_message *smb)
+/*
+ * Splice buffers from a socket.
+ */
+static int smb_splice_from_socket(struct TCP_Server_Info *server, struct bvecq *bq)
 {
 	int length;
-	char *buf = server->smallbuf;
-	unsigned int pdu_length = server->pdu_size;
 
-	/* make sure this will fit in a large buffer */
-	if (pdu_length > CIFSMaxBufSize + MAX_HEADER_SIZE(server)) {
-		cifs_server_dbg(VFS, "SMB response too long (%u bytes)\n", pdu_length);
-		cifs_reconnect(server, true);
+	try_to_freeze();
+
+#if 0
+	/* reconnect if no credits and no requests in flight */
+	if (zero_credits(server)) {
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
 		return -ECONNABORTED;
 	}
+#endif
 
-	/* switch to large buffer if too big for a small one */
-	if (pdu_length > MAX_CIFS_SMALL_BUFFER_SIZE) {
-		server->large_buf = true;
-		memcpy(server->bigbuf, buf, server->total_read);
-		buf = server->bigbuf;
+	if (server_unresponsive(server))
+		return -ECONNABORTED;
+
+#if 0
+	if (cifs_rdma_enabled(server) && server->smbd_conn)
+		length = smbd_recv(server->smbd_conn, smb_msg);
+	else
+#endif
+		length = netfs_tcp_splice_to_bvecq(server->ssocket, bq, INT_MAX);
+	trace_smb3_tcp_splice(length);
+
+	spin_lock(&server->srv_lock);
+	if (server->tcpStatus == CifsExiting) {
+		spin_unlock(&server->srv_lock);
+		return -ESHUTDOWN;
 	}
 
-	/* now read the rest */
-	length = cifs_read_from_socket(server, buf + HEADER_SIZE(server) - 1,
-				       pdu_length - MID_HEADER_SIZE(server));
-
-	if (length < 0)
-		return length;
-	server->total_read += length;
-
-	dump_smb(buf, server->total_read);
-
-	return cifs_handle_standard(server, smb);
+	if (server->tcpStatus == CifsNeedReconnect) {
+		spin_unlock(&server->srv_lock);
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		return -ECONNABORTED;
+	}
+	spin_unlock(&server->srv_lock);
+	return length;
 }
 
-int
-cifs_handle_standard(struct TCP_Server_Info *server, struct smb_message *smb)
+/*
+ * Refill the receive queue.  Whilst the peer may send PDUs in separate TCP
+ * packets, it's possible that the local NIC may join them back together if
+ * doing receive offload.
+ *
+ * If min_size is 0, it will splice anything it can quickly and immediately
+ * grab out of the queue, but it will not wait.
+ */
+int smb_rxqueue_refill(struct TCP_Server_Info *server, struct netfs_rxqueue *rxq,
+		       size_t min_size)
 {
-	char *buf = server->large_buf ? server->bigbuf : server->smallbuf;
-	int rc;
+	struct bvecq *add_to = rxq->add_to;
+	unsigned int got = 0;
+	size_t qsize = rxq->qsize;
+	int rc = 0;
 
-	/*
-	 * We know that we received enough to get to the MID as we
-	 * checked the pdu_length earlier. Now check to see
-	 * if the rest of the header is OK.
-	 *
-	 * 48 bytes is enough to display the header and a little bit
-	 * into the payload for debugging purposes.
-	 */
-	rc = server->ops->check_message(buf, server->pdu_size,
-					server->total_read, server);
-	if (rc)
-		cifs_dump_mem("Bad SMB: ", buf,
-			min_t(unsigned int, server->total_read, 48));
-
-	if (server->ops->is_session_expired &&
-	    server->ops->is_session_expired(buf)) {
-		cifs_reconnect(server, true);
-		return -1;
+	if (!rxq->refillable) {
+		WARN_ON(min_size > qsize);
+		return 0;
 	}
+	if (qsize >= min_size && min_size > 0)
+		return 0;
 
-	if (server->ops->is_status_pending &&
-	    server->ops->is_status_pending(buf, server))
-		return -1;
+	do {
+		if (!add_to || add_to->nr_slots == add_to->max_slots) {
+			struct bvecq *b;
+			unsigned int nr_bv = (2048 - sizeof(*add_to)) / sizeof(add_to->bv[0]);
 
-	if (!smb)
-		return rc;
+			b = netfs_alloc_rx_bvecq(nr_bv);
+			b->prev = add_to;
+			if (!add_to)
+				rxq->take_from = b;
+			else
+				add_to->next = b;
+			add_to = b;
+		}
 
-	handle_mid(smb, server, buf, rc);
+		rc = smb_splice_from_socket(server, add_to);
+		if (rc > 0) {
+			qsize += rc;
+			got += rc;
+			rc = 0;
+			continue;
+		}
+
+		switch (rc) {
+		case -EAGAIN:
+		case -EINTR:
+		case -ERESTARTSYS:
+			wait_event_killable(server->rx_waitq,
+					    test_bit(SMB_SERVER_DATA_READY, &server->flags));
+			clear_bit(SMB_SERVER_DATA_READY, &server->flags);
+			rc = 0;
+			continue;
+		default:
+			cifs_dbg(FYI, "Received no data or error: %d\n", rc);
+			set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+			rc = -ECONNABORTED;
+			goto out;
+		}
+	} while (qsize < min_size);
+
+out:
+	rxq->add_to = add_to;
+	rxq->qsize = qsize;
+	if (min_size == 0)
+		rc = got > 0 ? 0 : rc;
+	else
+		rc = qsize >= min_size ? 0 : rc;
+	return rc;
+}
+
+/*
+ * Consume received data by receiving it and then discarding it.
+ */
+int smb_rxqueue_consume(struct TCP_Server_Info *server,
+			struct netfs_rxqueue *rxq, size_t amount)
+{
+	while (amount) {
+		size_t part = umin(amount, rxq->qsize);
+		int rc;
+
+		amount -= part;
+		netfs_rxqueue_discard(rxq, part);
+
+		if (!amount)
+			break;
+
+		rc = smb_rxqueue_refill(server, rxq, 1);
+		if (rc < 0)
+			return rc;
+	}
 	return 0;
 }
 
-static void
-smb2_add_credits_from_hdr(char *buffer, struct TCP_Server_Info *server)
+/*
+ * Receive a PDU from a socket and place it into a bvec queue.  This is then
+ * decrypted and handed off for distribution to the reply decoders.
+ */
+static void smb_receive_pdu(struct TCP_Server_Info *server)
 {
-	struct smb2_hdr *shdr = (struct smb2_hdr *)buffer;
-	int scredits, in_flight;
+	struct netfs_rxqueue *rxq = &server->rx_queue;
+	unsigned int pdu_len;
+	__be32 rfc1002_be32;
+	u32 rfc1002_hdr;
+	int rc;
 
-	/*
-	 * SMB1 does not use credits.
-	 */
-	if (is_smb1(server))
+	/* TODO: If smbdirect, decant the reassembly queue into the bvecq. */
+
+	rxq->refillable = true;
+	rxq->pdu_remain = 4;
+	rxq->msg_id = 0;
+
+	/* Read the RFC1002 header. */
+	rc = smb_rxqueue_refill(server, rxq, 4);
+	if (rc < 0)
 		return;
 
-	if (shdr->CreditRequest) {
-		spin_lock(&server->req_lock);
-		server->credits += le16_to_cpu(shdr->CreditRequest);
-		scredits = server->credits;
-		in_flight = server->in_flight;
-		spin_unlock(&server->req_lock);
-		wake_up(&server->request_q);
-
-		trace_smb3_hdr_credits(server->current_mid,
-				server->conn_id, server->hostname, scredits,
-				le16_to_cpu(shdr->CreditRequest), in_flight);
-		cifs_server_dbg(FYI, "%s: added %u credits total=%d\n",
-				__func__, le16_to_cpu(shdr->CreditRequest),
-				scredits);
+	/* Extract the RFC1002 header. */
+	if (netfs_rxqueue_read(rxq, &rfc1002_be32, 0, sizeof(rfc1002_be32)) !=
+	    sizeof(rfc1002_be32)) {
+		cifs_dbg(FYI, "copy_from_iter() failed\n");
+		set_bit(SMB_SERVER_NEED_RECONNECT, &server->flags);
+		return;
 	}
+
+	rfc1002_hdr = be32_to_cpu(rfc1002_be32);
+	pdu_len = rfc1002_hdr & 0xffffff;
+	netfs_rxqueue_discard(rxq, 4);
+
+	rxq->pdu_remain = pdu_len;
+
+	trace_smb3_rx_pdu(rxq);
+
+	if (smb_decode_rfc1002(server, rfc1002_hdr)) {
+		/* Normal session message. */
+		cifs_dbg(FYI, "RFC1002 header 0x%x\n", pdu_len);
+
+		rc = server->ops->receive_pdu(server, pdu_len);
+		if (rc < 0)
+			cifs_dbg(FYI, "->receive_pdu() = %d\n", rc);
+
+		if (rxq->pdu_remain)
+			cifs_dbg(FYI, "PDU not wholly consumed (%x)\n",
+				 rxq->pdu_remain);
+	}
+
+	if (rxq->pdu_remain)
+		smb_rxqueue_consume(server, rxq, rxq->pdu_remain);
 }
 
-
+/*
+ * TCP message receive loop.
+ */
 static int
 cifs_demultiplex_thread(void *p)
 {
-	int i, num_smbs, length;
 	struct TCP_Server_Info *server = p;
-	unsigned int pdu_length;
-	unsigned int next_offset;
-	char *buf = NULL;
 	struct task_struct *task_to_wake = NULL;
-	struct smb_message *smbs[MAX_COMPOUND];
-	char *bufs[MAX_COMPOUND];
-	unsigned int noreclaim_flag, num_io_timeout = 0;
-	bool pending_reconnect = false;
+	unsigned int noreclaim_flag;
+	int length;
 
 	noreclaim_flag = memalloc_noreclaim_save();
 	cifs_dbg(FYI, "Demultiplex PID: %d\n", task_pid_nr(current));
@@ -1281,152 +1286,15 @@ cifs_demultiplex_thread(void *p)
 		if (!allocate_buffers(server))
 			continue;
 
-		server->large_buf = false;
-		buf = server->smallbuf;
-		pdu_length = 4; /* enough to get RFC1001 header */
-
-		length = cifs_read_from_socket(server, buf, pdu_length);
-		if (length < 0)
-			continue;
-
-		server->total_read = 0;
-
-		/*
-		 * The right amount was read from socket - 4 bytes,
-		 * so we can now interpret the length field.
-		 */
-		pdu_length = be32_to_cpup(((__be32 *)buf)) & 0xffffff;
-
-		cifs_dbg(FYI, "RFC1002 header 0x%x\n", pdu_length);
-		if (!is_smb_response(server, buf[0]))
-			continue;
-
-		pending_reconnect = false;
-next_pdu:
-		server->pdu_size = pdu_length;
-
-		/* make sure we have enough to get to the MID */
-		if (server->pdu_size < MID_HEADER_SIZE(server)) {
-			cifs_server_dbg(VFS, "SMB response too short (%u bytes)\n",
-				 server->pdu_size);
-			cifs_reconnect(server, true);
-			continue;
-		}
-
-		/* read down to the MID */
-		length = cifs_read_from_socket(server, buf,
-					       MID_HEADER_SIZE(server));
-		if (length < 0)
-			continue;
-		server->total_read += length;
-
-		if (server->ops->next_header) {
-			if (server->ops->next_header(server, buf, &next_offset)) {
-				cifs_dbg(VFS, "%s: malformed response (next_offset=%u)\n",
-					 __func__, next_offset);
-				cifs_reconnect(server, true);
-				continue;
-			}
-			if (next_offset)
-				server->pdu_size = next_offset;
-		}
-
-		memset(smbs, 0, sizeof(smbs));
-		memset(bufs, 0, sizeof(bufs));
-		num_smbs = 0;
-
-		if (server->ops->is_transform_hdr &&
-		    server->ops->receive_transform &&
-		    server->ops->is_transform_hdr(buf)) {
-			length = server->ops->receive_transform(server,
-								smbs,
-								bufs,
-								&num_smbs);
-		} else {
-			smbs[0] = server->ops->find_mid(server, buf);
-			bufs[0] = buf;
-			num_smbs = 1;
-
-			if (smbs[0])
-				smbs[0]->response_pdu_len = pdu_length;
-			if (!smbs[0] || !smbs[0]->receive)
-				length = standard_receive3(server, smbs[0]);
-			else
-				length = smbs[0]->receive(server, smbs[0]);
-		}
-
-		if (length < 0) {
-			for (i = 0; i < num_smbs; i++)
-				if (smbs[i])
-					release_mid(server, smbs[i]);
-			continue;
-		}
-
-		if (server->ops->is_status_io_timeout &&
-		    server->ops->is_status_io_timeout(buf)) {
-			num_io_timeout++;
-			if (num_io_timeout > MAX_STATUS_IO_TIMEOUT) {
-				cifs_server_dbg(VFS,
-						"Number of request timeouts exceeded %d. Reconnecting",
-						MAX_STATUS_IO_TIMEOUT);
-
-				pending_reconnect = true;
-				num_io_timeout = 0;
-			}
-		}
-
-		server->lstrp = jiffies;
-
-		for (i = 0; i < num_smbs; i++) {
-			if (smbs[i] != NULL) {
-				smbs[i]->resp_buf_size = server->pdu_size;
-
-				if (bufs[i] != NULL) {
-					if (server->ops->is_network_name_deleted &&
-					    server->ops->is_network_name_deleted(bufs[i],
-										 server)) {
-						cifs_server_dbg(FYI,
-								"Share deleted. Reconnect needed");
-					}
-				}
-
-				if (!smbs[i]->multiRsp || smbs[i]->multiEnd)
-					mid_execute_callback(server, smbs[i]);
-
-				release_mid(server, smbs[i]);
-			} else if (server->ops->is_oplock_break &&
-				   server->ops->is_oplock_break(bufs[i],
-								server)) {
-				smb2_add_credits_from_hdr(bufs[i], server);
-				cifs_dbg(FYI, "Received oplock break\n");
-			} else {
-				cifs_server_dbg(VFS, "No task to wake, unknown frame received! NumMids %d\n",
-						atomic_read(&mid_count));
-				cifs_dump_mem("Received Data is: ", bufs[i],
-					      HEADER_SIZE(server));
-				smb2_add_credits_from_hdr(bufs[i], server);
-#ifdef CONFIG_CIFS_DEBUG2
-				if (server->ops->dump_detail)
-					server->ops->dump_detail(bufs[i], pdu_length,
-								 server);
-				cifs_dump_mids(server);
-#endif /* CIFS_DEBUG2 */
-			}
-		}
-
-		if (pdu_length > server->pdu_size) {
-			if (!allocate_buffers(server))
-				continue;
-			pdu_length -= server->pdu_size;
-			server->total_read = 0;
-			server->large_buf = false;
-			buf = server->smallbuf;
-			goto next_pdu;
-		}
+		smb_receive_pdu(server);
 
 		/* do this reconnect at the very end after processing all MIDs */
-		if (pending_reconnect)
-			cifs_reconnect(server, true);
+		if (test_and_clear_bit(SMB_SERVER_NEED_RECONNECT, &server->flags)) {
+			bool mark_sess = test_and_clear_bit(SMB_SERVER_SESSION_RECONNECT,
+							    &server->flags);
+			cifs_reconnect(server, mark_sess);
+		}
+		cond_resched();
 
 	} /* end while !EXITING */
 
@@ -1801,6 +1669,7 @@ cifs_get_tcp_session(struct smb3_fs_context *ctx,
 		spin_unlock(&cifs_tcp_ses_lock);
 		tcp_ses->primary_server = primary_server;
 	}
+	init_waitqueue_head(&tcp_ses->rx_waitq);
 	init_waitqueue_head(&tcp_ses->response_q);
 	init_waitqueue_head(&tcp_ses->request_q);
 	INIT_LIST_HEAD(&tcp_ses->pending_mid_q);
@@ -3430,6 +3299,13 @@ generic_ip_connect(struct TCP_Server_Info *server)
 		return rc;
 	}
 	trace_smb3_connect_done(server->hostname, server->conn_id, &server->dstaddr);
+
+	server->ssocket->sk->sk_user_data = server;
+	smp_wmb();
+	server->rx_old_data_ready   = server->ssocket->sk->sk_data_ready;
+	server->rx_old_error_report = server->ssocket->sk->sk_error_report;
+	server->ssocket->sk->sk_data_ready   = smb_tcp_data_ready;
+	server->ssocket->sk->sk_error_report = smb_tcp_error_report;
 
 	/*
 	 * Establish RFC1001 NetBIOS session when it was explicitly requested

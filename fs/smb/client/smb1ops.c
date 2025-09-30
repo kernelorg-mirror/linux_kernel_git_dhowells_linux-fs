@@ -175,7 +175,7 @@ send_nt_cancel(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	cifs_server_unlock(server);
 
 	cifs_dbg(FYI, "issued NT_CANCEL for mid %u, rc = %d\n",
-		 get_mid(in_buf), rc);
+		 le16_to_cpu(in_buf->Mid), rc);
 
 	return rc;
 }
@@ -226,34 +226,17 @@ cifs_compare_fids(struct cifsFileInfo *ob1, struct cifsFileInfo *ob2)
 	return ob1->fid.netfid == ob2->fid.netfid;
 }
 
-static unsigned int
-cifs_read_data_offset(char *buf)
+struct smb_message *
+cifs_find_mid(struct TCP_Server_Info *server, const struct smb_hdr *shdr)
 {
-	READ_RSP *rsp = (READ_RSP *)buf;
-	return le16_to_cpu(rsp->DataOffset);
-}
-
-static unsigned int
-cifs_read_data_length(char *buf, bool in_remaining)
-{
-	READ_RSP *rsp = (READ_RSP *)buf;
-	/* It's a bug reading remaining data for SMB1 packets */
-	WARN_ON(in_remaining);
-	return (le16_to_cpu(rsp->DataLengthHigh) << 16) +
-	       le16_to_cpu(rsp->DataLength);
-}
-
-static struct smb_message *
-cifs_find_mid(struct TCP_Server_Info *server, char *buffer)
-{
-	struct smb_hdr *buf = (struct smb_hdr *)buffer;
 	struct smb_message *smb;
+	u16 mid = le16_to_cpu(shdr->Mid);
 
 	spin_lock(&server->mid_queue_lock);
 	list_for_each_entry(smb, &server->pending_mid_q, qhead) {
-		if (compare_mid(smb->mid, buf) &&
+		if (smb->mid == mid &&
 		    smb->mid_state == MID_REQUEST_SUBMITTED &&
-		    le16_to_cpu(smb->command) == buf->Command) {
+		    smb->command == shdr->Command) {
 			smb_get_message(smb);
 			spin_unlock(&server->mid_queue_lock);
 			return smb;
@@ -1349,10 +1332,9 @@ cifs_make_node(unsigned int xid, struct inode *inode,
 	}
 }
 
-static bool
-cifs_is_network_name_deleted(char *buf, struct TCP_Server_Info *server)
+bool
+cifs_is_network_name_deleted(const struct smb_hdr *shdr, struct TCP_Server_Info *server)
 {
-	struct smb_hdr *shdr = (struct smb_hdr *)buf;
 	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
@@ -1395,6 +1377,7 @@ struct smb_version_operations smb1_operations = {
 	.compare_fids = cifs_compare_fids,
 	.setup_request = cifs_setup_request,
 	.setup_async_request = cifs_setup_async_request,
+	.receive_pdu = smb1_receive_pdu,
 	.check_receive = cifs_check_receive,
 	.add_credits = cifs_add_credits,
 	.set_credits = cifs_set_credits,
@@ -1402,17 +1385,9 @@ struct smb_version_operations smb1_operations = {
 	.get_credits = cifs_get_credits,
 	.wait_mtu_credits = cifs_wait_mtu_credits,
 	.get_next_mid = cifs_get_next_mid,
-	.read_data_offset = cifs_read_data_offset,
-	.read_data_length = cifs_read_data_length,
-	.map_error = map_smb_to_linux_error,
-	.find_mid = cifs_find_mid,
-	.check_message = checkSMB,
-	.dump_detail = cifs_dump_detail,
 	.clear_stats = cifs_clear_stats,
 	.print_stats = cifs_print_stats,
-	.is_oplock_break = is_valid_oplock_break,
 	.downgrade_oplock = cifs_downgrade_oplock,
-	.check_trans2 = cifs_check_trans2,
 	.need_neg = cifs_need_neg,
 	.negotiate = cifs_negotiate,
 	.negotiate_wsize = smb1_negotiate_wsize,
@@ -1475,7 +1450,6 @@ struct smb_version_operations smb1_operations = {
 	.get_acl_by_fid = get_cifs_acl_by_fid,
 	.set_acl = set_cifs_acl,
 	.make_node = cifs_make_node,
-	.is_network_name_deleted = cifs_is_network_name_deleted,
 };
 
 struct smb_version_values smb1_values = {
