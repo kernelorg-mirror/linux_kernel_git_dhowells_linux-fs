@@ -543,7 +543,11 @@ fill_small_buf(__le16 smb2_command, struct cifs_tcon *tcon,
 	smb2_hdr_assemble(&spdu->hdr, smb2_command, tcon, server);
 	spdu->StructureSize2 = cpu_to_le16(parmsize);
 
-	*total_len = parmsize + sizeof(struct smb2_hdr);
+	if (smb2_command == SMB2_READ)
+		*total_len = sizeof(struct smb2_hdr) + parmsize;
+	else
+		*total_len = sizeof(struct smb2_hdr) +
+			(parmsize & ~SMB2_STRUCT_HAS_DYNAMIC_PART);
 }
 
 /*
@@ -1615,7 +1619,7 @@ SMB2_sess_alloc_buffer(struct SMB2_sess_data *sess_data)
 
 	sess_data->iov[0].iov_base = (char *)req;
 	/* 1 for pad */
-	sess_data->iov[0].iov_len = total_len - 1;
+	sess_data->iov[0].iov_len = total_len;
 	/*
 	 * This variable will be used to clear the buffer
 	 * allocated above in case of any error in the calling function.
@@ -2178,7 +2182,7 @@ SMB2_tcon(const unsigned int xid, struct cifs_ses *ses, const char *tree,
 
 	iov[0].iov_base = (char *)req;
 	/* 1 for pad */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	/* Testing shows that buffer offset must be at location of Buffer[0] */
 	req->PathOffset = cpu_to_le16(sizeof(struct smb2_tree_connect_req));
@@ -2983,7 +2987,7 @@ replay_again:
 
 	iov[0].iov_base = (char *)req;
 	/* -1 since last byte is buf[0] which is sent below (path) */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	req->NameOffset = cpu_to_le16(sizeof(struct smb2_create_req));
 
@@ -3130,7 +3134,7 @@ SMB2_open_init(struct cifs_tcon *tcon, struct TCP_Server_Info *server,
 
 	iov[0].iov_base = (char *)req;
 	/* -1 since last byte is buf[0] which is sent below (path) */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	if (oparms->create_options & CREATE_OPTION_READONLY)
 		file_attributes |= ATTR_READONLY;
@@ -3456,12 +3460,12 @@ SMB2_ioctl_init(struct cifs_tcon *tcon, struct TCP_Server_Info *server,
 		req->InputOffset =
 		       cpu_to_le32(offsetof(struct smb2_ioctl_req, Buffer));
 		rqst->rq_nvec = 2;
-		iov[0].iov_len = total_len - 1;
+		iov[0].iov_len = total_len;
 		iov[1].iov_base = in_data_buf;
 		iov[1].iov_len = indatalen;
 	} else {
 		rqst->rq_nvec = 1;
-		iov[0].iov_len = total_len;
+		iov[0].iov_len = total_len + 1;
 	}
 
 	req->OutputOffset = 0;
@@ -3907,7 +3911,7 @@ SMB2_query_info_init(struct cifs_tcon *tcon, struct TCP_Server_Info *server,
 	if (input_len) {
 		req->InputBufferLength = cpu_to_le32(input_len);
 		/* total_len for smb query request never close to le16 max */
-		req->InputBufferOffset = cpu_to_le16(total_len - 1);
+		req->InputBufferOffset = cpu_to_le16(total_len);
 		memcpy(req->Buffer, input, input_len);
 	}
 
@@ -4618,7 +4622,7 @@ smb2_new_read_req(void **buf, unsigned int *total_len,
 		v1 = (struct smbdirect_buffer_descriptor_v1 *) &req->Buffer[0];
 		smbd_mr_fill_buffer_descriptor(rdata->mr, v1);
 
-		*total_len += sizeof(*v1) - 1;
+		*total_len += sizeof(*v1);
 	}
 #endif
 	if (request_type & CHAINED_REQUEST) {
@@ -5381,7 +5385,7 @@ replay_again:
 
 	iov[0].iov_base = (char *)req;
 	/* 1 for Buffer */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	memset(&rqst, 0, sizeof(struct smb_rqst));
 	rqst.rq_iov = iov;
@@ -5639,7 +5643,7 @@ int SMB2_query_directory_init(const unsigned int xid,
 
 	iov[0].iov_base = (char *)req;
 	/* 1 for Buffer */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	iov[1].iov_base = (char *)(req->Buffer);
 	iov[1].iov_len = len;
@@ -5862,7 +5866,7 @@ SMB2_set_info_init(struct cifs_tcon *tcon, struct TCP_Server_Info *server,
 
 	iov[0].iov_base = (char *)req;
 	/* 1 for Buffer */
-	iov[0].iov_len = total_len - 1;
+	iov[0].iov_len = total_len;
 
 	for (i = 1; i < rqst->rq_nvec; i++) {
 		le32_add_cpu(&req->BufferLength, size[i]);
