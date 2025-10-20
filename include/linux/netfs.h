@@ -436,6 +436,22 @@ struct netfs_cache_ops {
 			      enum netfs_cache_collect block_type);
 };
 
+/*
+ * (An excerpt from) a receive queue.  Data buffers can be spliced out of, say,
+ * a TCP socket into a sequence of these and then a variety of helpers used
+ * to manipulate them and extract data.
+ */
+struct netfs_rxqueue {
+	struct bvecq		*add_to;	/* Where to add data to the Rx queue */
+	struct bvecq		*take_from;	/* Where to take data from the Rx queue */
+	unsigned int		take_offset;	/* Current offset in rx_take_slot */
+	unsigned short		take_slot;	/* Current slot in rx_take_from */
+	bool			refillable;	/* T if refillable; F if excerpt */
+	unsigned int		qsize;		/* Amount of data in rx_queue */
+	unsigned int		pdu_remain;	/* Amount of current PDU left */
+	unsigned int		msg_id;		/* ID to log in tracepoints as MSG=xx */
+};
+
 /* High-level read API. */
 ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *iter);
 ssize_t netfs_unbuffered_read_iter(struct kiocb *iocb, struct iov_iter *iter);
@@ -500,6 +516,21 @@ void netfs_end_io_direct(struct inode *inode);
 /* Writeback exclusion API. */
 bool netfs_wb_begin(struct netfs_inode *ictx, bool nowait);
 void netfs_wb_end(struct netfs_inode *ictx);
+
+/* Receive queue API. */
+struct bvecq *netfs_alloc_rx_bvecq(unsigned int nr_bv);
+void netfs_put_rx_bvecq(struct bvecq *bq);
+size_t netfs_rxqueue_read_iter(const struct netfs_rxqueue *rxq,
+			       struct iov_iter *dest, size_t skip, size_t amount);
+size_t netfs_rxqueue_read(const struct netfs_rxqueue *rxq,
+			  void *buffer, size_t skip, size_t amount);
+void netfs_rxqueue_discard(struct netfs_rxqueue *rxq, size_t amount);
+unsigned int netfs_rxqueue_count(const struct netfs_rxqueue *rxq, size_t amount);
+struct bvecq *netfs_rxqueue_decant(struct netfs_rxqueue *rxq, size_t amount);
+int netfs_rxqueue_tcp_refill(struct socket *tcp_sock, struct netfs_rxqueue *rxq,
+			     size_t min_size);
+int netfs_rxqueue_tcp_consume(struct socket *tcp_sock, struct netfs_rxqueue *rxq,
+			      size_t amount);
 
 /* TCP transport helper API. */
 #ifdef CONFIG_INET

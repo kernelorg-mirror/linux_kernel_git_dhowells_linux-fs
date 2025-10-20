@@ -903,6 +903,34 @@ TRACE_EVENT(netfs_bv_slot,
 		      __entry->pfn, __entry->offset, __entry->offset + __entry->len)
 	    );
 
+TRACE_EVENT(netfs_rxq_read,
+	    TP_PROTO(const struct netfs_rxqueue *rxq, unsigned int slot,
+		     size_t skip, size_t part, size_t copied),
+
+	    TP_ARGS(rxq, slot, skip, part, copied),
+
+	    TP_STRUCT__entry(
+		    __field(unsigned int,	msg_id)
+		    __field(unsigned int,	slot)
+		    __field(unsigned int,	skip)
+		    __field(unsigned int,	part)
+		    __field(unsigned int,	copied)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->msg_id	= rxq->msg_id;
+		    __entry->slot	= slot;
+		    __entry->skip	= skip;
+		    __entry->part	= part;
+		    __entry->copied	= copied;
+			   ),
+
+	    TP_printk("MSG=%08x [%02x] b=%04x-%04x c=%04x",
+		      __entry->msg_id, __entry->slot,
+		      __entry->skip, __entry->skip + __entry->part,
+		      __entry->copied)
+	    );
+
 #undef EM
 #undef E_
 #endif /* _TRACE_NETFS_H */

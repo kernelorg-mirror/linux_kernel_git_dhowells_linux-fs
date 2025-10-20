@@ -20,7 +20,10 @@ netfs-y := \
 
 netfs-$(CONFIG_NETFS_PGPRIV2) += read_pgpriv2.o
 netfs-$(CONFIG_NETFS_STATS) += stats.o
-netfs-$(CONFIG_INET) += tcp_splice.o
+
+netfs-$(CONFIG_INET) += \
+	rxqueue.o \
+	tcp_splice.o
 
 netfs-$(CONFIG_FSCACHE) += \
 	fscache_cache.o \
