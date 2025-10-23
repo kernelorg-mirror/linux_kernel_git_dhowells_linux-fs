@@ -843,6 +843,7 @@ static void smb1_copy_to_prepped_buffers(struct TCP_Server_Info *server,
 		return;
 	}
 
+	trace_smb3_copy_to_buf(smb, &dest, skip, to_copy);
 	if (!rxq->refillable) {
 		size_t got;
 

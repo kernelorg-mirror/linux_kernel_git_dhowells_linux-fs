@@ -2119,6 +2119,27 @@ TRACE_EVENT(smb3_message,
 		      __entry->ref)
 	    );
 
+TRACE_EVENT(smb3_copy_to_buf,
+	    TP_PROTO(const struct smb_message *smb, const struct iov_iter *dest,
+		     unsigned int msg_offset, unsigned int len),
+	    TP_ARGS(smb, dest, msg_offset, len),
+	    TP_STRUCT__entry(
+		    __field(unsigned int,	smb_message)
+		    __field(unsigned int,	dest_len)
+		    __field(unsigned int,	msg_offset)
+		    __field(unsigned int,	len)
+			     ),
+	    TP_fast_assign(
+		    __entry->smb_message = smb->debug_id;
+		    __entry->dest_len	= iov_iter_count(dest);
+		    __entry->msg_offset	= msg_offset;
+		    __entry->len	= len;
+			   ),
+	    TP_printk("MSG=%08x m=%x sl=%x dl=%x",
+		      __entry->smb_message,
+		      __entry->msg_offset, __entry->len, __entry->dest_len)
+	    );
+
 #undef EM
 #undef E_
 #endif /* _CIFS_TRACE_H */
