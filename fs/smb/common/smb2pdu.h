@@ -185,6 +185,7 @@ struct smb3_hdr_req {
 struct smb2_pdu {
 	struct smb2_hdr hdr;
 	__le16 StructureSize2; /* size of wct area (varies, request specific) */
+#define SMB2_STRUCT_HAS_DYNAMIC_PART   0x01
 } __packed;
 
 #define SMB2_ERROR_STRUCTURE_SIZE2	9
