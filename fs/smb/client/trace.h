@@ -20,6 +20,9 @@
 /*
  * Specify enums for tracing information.
  */
+#define smb_command_traces \
+	E_(smb_unknown_command,				"unknown-command")
+
 #define smb_eio_traces \
 	EM(smb_eio_trace_compress_copy,			"compress_copy") \
 	EM(smb_eio_trace_copychunk_inv_rsp,		"copychunk_inv_rsp") \
@@ -213,6 +216,7 @@
 #define EM(a, b) a,
 #define E_(a, b) a
 
+enum smb_command_trace		{ smb_command_traces } __mode(byte);
 enum smb_eio_trace		{ smb_eio_traces } __mode(byte);
 enum smb3_rw_credits_trace	{ smb3_rw_credits_traces } __mode(byte);
 enum smb3_tcon_ref_trace	{ smb3_tcon_ref_traces } __mode(byte);
@@ -227,6 +231,7 @@ enum smb3_tcon_ref_trace	{ smb3_tcon_ref_traces } __mode(byte);
 #define EM(a, b) TRACE_DEFINE_ENUM(a);
 #define E_(a, b) TRACE_DEFINE_ENUM(a);
 
+smb_command_traces;
 smb_eio_traces;
 smb3_rw_credits_traces;
 smb3_tcon_ref_traces;
