@@ -7350,6 +7350,122 @@ nodefer:	kfree_skb_napi_cache(skb);
 		kick_defer_list_purge(cpu);
 }
 
+static __always_inline
+size_t iterate_one_bvec(struct bio_vec *p, size_t skip, size_t len,
+			void *priv, void *priv2, iov_step_f step)
+{
+#ifdef CONFIG_HIGHMEM
+	size_t progress = 0;
+
+	if (skip >= p->bv_len)
+		return 0;
+
+	len = umin(len, p->bv_len - skip);
+	while (len > 0) {
+		size_t remain, consumed;
+		size_t offset = p->bv_offset + skip, part;
+		void *kaddr = kmap_local_bvec(p, skip);
+
+		part = umin(len, PAGE_SIZE - offset % PAGE_SIZE);
+		remain = step(kaddr, progress, part, priv, priv2);
+		kunmap_local(kaddr);
+
+		consumed = part - remain;
+		len -= consumed;
+		progress += consumed;
+		skip += consumed;
+		if (remain)
+			break;
+	}
+
+	return progress;
+#else
+	return len - step(bvec_virt(p) + skip, 0, len, priv, priv2);
+#endif
+}
+
+static __always_inline
+size_t csum_one(void *iter_from, size_t progress,
+		size_t len, void *priv, void *priv2)
+{
+	__wsum *csum = priv;
+
+	*csum = csum_partial(iter_from, len, *csum);
+	return 0;
+}
+
+static void skb_splice_csum_bv(struct sk_buff *skb, struct bio_vec *bv,
+			       size_t skip, size_t len)
+{
+	__wsum csum = 0;
+
+	size_t did = iterate_one_bvec(bv, skip, len, &csum, NULL, csum_one);
+
+	WARN_ON_ONCE(did != len);
+	skb->csum = csum_block_add(skb->csum, csum, len);
+}
+
+/*
+ * Splice from a bvecq iterator to an skbuff.
+ */
+static size_t skb_splice_from_bvecq(struct sk_buff *skb, struct iov_iter *iter,
+				    size_t len)
+{
+	const struct bvecq *bq = iter->bvecq;
+	unsigned int slot = iter->bvecq_slot;
+	size_t frag_limit = READ_ONCE(net_hotdata.sysctl_max_skb_frags);
+	size_t spliced = 0, skip = iter->iov_offset;
+
+	len = umin(len, iter->count);
+	if (!len)
+		return 0;
+	if (slot == bq->nr_slots) {
+		/* The iterator may have been extended. */
+		bq = bq->next;
+		slot = 0;
+	}
+
+	do {
+		struct bio_vec *bvec = &bq->bv[slot];
+
+		if (skip < bvec->bv_len) {
+			size_t part = umin(bvec->bv_len - skip, len);
+			size_t off = bvec->bv_offset + skip;
+			int ret = -EIO;
+
+			if (WARN_ON_ONCE(!sendpage_ok(bvec->bv_page)))
+				break;
+
+			ret = skb_append_pagefrags(skb, bvec->bv_page, off, part,
+						   frag_limit);
+			if (ret < 0)
+				return ret;
+
+			if (skb->ip_summed == CHECKSUM_NONE)
+				skb_splice_csum_bv(skb, bvec, off, part);
+
+			len -= part;
+			spliced += part;
+			skip += part;
+		}
+		if (skip >= bvec->bv_len) {
+			skip = 0;
+			slot++;
+			if (slot >= bq->nr_slots && bq->next) {
+				bq = bq->next;
+				slot = 0;
+			}
+		}
+	} while (len);
+
+	iter->bvecq_slot = slot;
+	iter->bvecq = bq;
+	iter->iov_offset = skip;
+	iter->count -= spliced;
+	skb_len_add(skb, spliced);
+	return spliced;
+}
+
 static void skb_splice_csum_page(struct sk_buff *skb, struct page *page,
 				 size_t offset, size_t len)
 {
@@ -7383,6 +7499,9 @@ ssize_t skb_splice_from_iter(struct sk_buff *skb, struct iov_iter *iter,
 	struct page *pages[8], **ppages = pages;
 	ssize_t spliced = 0, ret = 0;
 	unsigned int i;
+
+	if (iov_iter_is_bvecq(iter))
+		return skb_splice_from_bvecq(skb, iter, maxsize);
 
 	while (iter->count > 0) {
 		ssize_t space, nr, len;
