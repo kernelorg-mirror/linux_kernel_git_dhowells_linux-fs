@@ -773,29 +773,6 @@ TRACE_EVENT(netfs_collect_stream,
 		      __entry->collected_to, __entry->issued_to)
 	    );
 
-TRACE_EVENT(netfs_folioq,
-	    TP_PROTO(const struct folio_queue *fq,
-		     enum netfs_folioq_trace trace),
-
-	    TP_ARGS(fq, trace),
-
-	    TP_STRUCT__entry(
-		    __field(unsigned int,		rreq)
-		    __field(unsigned int,		id)
-		    __field(enum netfs_folioq_trace,	trace)
-			     ),
-
-	    TP_fast_assign(
-		    __entry->rreq	= fq ? fq->rreq_id : 0;
-		    __entry->id		= fq ? fq->debug_id : 0;
-		    __entry->trace	= trace;
-			   ),
-
-	    TP_printk("R=%08x fq=%x %s",
-		      __entry->rreq, __entry->id,
-		      __print_symbolic(__entry->trace, netfs_folioq_traces))
-	    );
-
 TRACE_EVENT(netfs_read_progress_at,
 	    TP_PROTO(const struct netfs_io_request *rreq),
 
