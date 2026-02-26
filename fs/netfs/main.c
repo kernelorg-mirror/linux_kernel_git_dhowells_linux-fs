@@ -29,7 +29,6 @@ static struct kmem_cache *netfs_subrequest_slab;
 mempool_t netfs_request_pool;
 mempool_t netfs_subrequest_pool;
 mempool_t netfs_bvecq_pool;
-mempool_t netfs_folioq_pool;
 
 #ifdef CONFIG_PROC_FS
 LIST_HEAD(netfs_io_requests);
