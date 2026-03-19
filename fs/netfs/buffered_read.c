@@ -295,8 +295,11 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 	do {
 		int (*prepare_read)(struct netfs_io_subrequest *subreq) = NULL;
 		struct netfs_io_subrequest *subreq;
+		enum netfs_io_source source;
 		ssize_t slice;
 		uoff_t hole_to, cache_to;
+		size_t len = size;
+		bool copy = false;
 
 		/* If we don't have any, find out the next couple of data
 		 * extents from the cache, containing of following the
@@ -327,48 +330,34 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 			continue;
 		}
 
-		subreq = netfs_alloc_subrequest(rreq);
-		if (!subreq) {
-			ret = -ENOMEM;
-			break;
-		}
-
-		subreq->start	= start;
-		subreq->len	= size;
-
-		netfs_queue_read(rreq, subreq);
-
 		uoff_t zero_point = netfs_read_zero_point(rreq->inode);
 		uoff_t zlimit = umin(zero_point, rreq->i_size);
 
-		_debug("rsub %llx %llx-%llx", subreq->start, hole_to, cache_to);
+		_debug("rsub %llx %llx-%llx", start, hole_to, cache_to);
 
 		if (start >= hole_to && start < cache_to) {
 			/* Overlap with a cached region, where the cache may
 			 * record a block of zeroes.
 			 */
 			_debug("cached s=%llx c=%llx l=%zx", start, cache_to, size);
-			subreq->len = umin(cache_to - start, size);
-			subreq->len = round_up(subreq->len, occ->granularity);
+			len = umin(cache_to - start, size);
+			len = round_up(len, occ->granularity);
 			if (occ->cached_type[0] == FSCACHE_EXTENT_ZERO) {
-				subreq->source = NETFS_FILL_WITH_ZEROES;
+				source = NETFS_FILL_WITH_ZEROES;
 				netfs_stat(&netfs_n_rh_zero);
 			} else {
-				subreq->source = NETFS_READ_FROM_CACHE;
+				source = NETFS_READ_FROM_CACHE;
 				prepare_read = rreq->cache_resources.ops->prepare_read;
 			}
-
-			trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
-
-		} else if (subreq->start >= zlimit && size > 0) {
+		} else if (start >= zlimit && size > 0) {
 			/* If this range lies beyond the zero-point, that part
 			 * can just be cleared locally.
 			 */
 			_debug("zero %llx-%llx", start, start + size);
-			subreq->len = size;
-			subreq->source = NETFS_FILL_WITH_ZEROES;
+			len = size;
+			source = NETFS_FILL_WITH_ZEROES;
 			if (rreq->cache_resources.ops)
-				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+				copy = true;
 			netfs_stat(&netfs_n_rh_zero);
 		} else {
 			/* Read a cache hole from the server.  If any part of
@@ -379,21 +368,32 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 
 			_debug("limit %llx %llx", rreq->i_size, zero_point);
 			_debug("download %llx-%llx", start, start + size);
-			subreq->len = umin(limit - subreq->start, ULONG_MAX);
-			subreq->source = NETFS_DOWNLOAD_FROM_SERVER;
+			len = umin(limit - start, ULONG_MAX);
+			source = NETFS_DOWNLOAD_FROM_SERVER;
 			if (rreq->cache_resources.ops)
-				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+				copy = true;
 			netfs_stat(&netfs_n_rh_download);
 		}
 
-		if (size == 0) {
-			pr_err("ZERO-LEN READ: R=%08x[%x] l=%zx/%zx s=%llx z=%llx i=%llx",
-			       rreq->debug_id, subreq->debug_index,
-			       subreq->len, size,
-			       subreq->start, zero_point, rreq->i_size);
-			netfs_cancel_read(subreq, ret);
+		if (len == 0) {
+			pr_err("ZERO-LEN READ: R=%08x l=%zx/%zx s=%llx z=%llx i=%llx",
+			       rreq->debug_id, len, size,
+			       start, zero_point, rreq->i_size);
 			break;
 		}
+
+		subreq = netfs_alloc_subrequest(rreq, source);
+		if (!subreq) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		subreq->start	= start;
+		subreq->len	= size;
+		if (copy)
+			__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+
+		netfs_queue_read(rreq, subreq);
 
 		rreq->io_streams[0].sreq_max_len = MAX_RW_COUNT;
 		rreq->io_streams[0].sreq_max_segs = INT_MAX;
@@ -418,10 +418,9 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 		if (size <= 0)
 			netfs_all_subreqs_queued(rreq);
 
+		/* See if the cache indicated this should be cached. */
 		if (mark_cursor.bvecq) {
-			/* See if the cache indicated this should be cached. */
-			bool copy = test_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
-
+			copy = test_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
 			netfs_mark_copy_to_cache(rreq, &mark_cursor, slice, copy);
 		}
 

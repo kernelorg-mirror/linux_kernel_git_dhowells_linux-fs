@@ -193,11 +193,10 @@ struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wr
 {
 	struct netfs_io_subrequest *subreq;
 
-	subreq = netfs_alloc_subrequest(wreq);
+	subreq = netfs_alloc_subrequest(wreq, stream->source);
 	if (!subreq)
 		return subreq;
 
-	subreq->source		= stream->source;
 	subreq->start		= stream->issue_from;
 	subreq->len		= stream->buffered;
 	subreq->stream_nr	= stream->stream_nr;
@@ -245,10 +244,9 @@ void netfs_prepare_write(struct netfs_io_request *wreq,
 {
 	struct netfs_io_subrequest *subreq;
 
-	subreq = netfs_alloc_subrequest(wreq);
+	subreq = netfs_alloc_subrequest(wreq, stream->source);
 	if (!subreq)
 		return;
-	subreq->source		= stream->source;
 	subreq->start		= start;
 	subreq->stream_nr	= stream->stream_nr;
 
