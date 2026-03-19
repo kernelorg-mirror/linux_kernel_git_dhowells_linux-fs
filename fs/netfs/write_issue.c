@@ -177,8 +177,7 @@ struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wr
 {
 	struct netfs_io_subrequest *subreq;
 
-	subreq = netfs_alloc_subrequest(wreq);
-	subreq->source		= stream->source;
+	subreq = netfs_alloc_subrequest(wreq, stream->source);
 	subreq->start		= stream->issue_from;
 	subreq->len		= stream->buffered;
 	subreq->stream_nr	= stream->stream_nr;

@@ -187,12 +187,11 @@ static void netfs_retry_read_subrequests(struct netfs_io_request *rreq)
 		 * for retry to switch to the retry cursor.
 		 */
 		do {
-			subreq = netfs_alloc_subrequest(rreq);
+			subreq = netfs_alloc_subrequest(rreq, NETFS_DOWNLOAD_FROM_SERVER);
 			if (!subreq) {
 				subreq = to;
 				goto abandon_after;
 			}
-			subreq->source		= NETFS_DOWNLOAD_FROM_SERVER;
 			subreq->start		= rreq->retry_start;
 			subreq->len		= rreq->retry_buffered;
 			subreq->stream_nr	= stream->stream_nr;

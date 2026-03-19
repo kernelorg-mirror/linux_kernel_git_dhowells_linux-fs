@@ -183,12 +183,13 @@ void netfs_read_query_cache(struct netfs_io_request *rreq, struct fscache_occupa
 /*
  * Allocate and prepare a read subrequest.
  */
-struct netfs_io_subrequest *netfs_alloc_read_subrequest(struct netfs_io_request *rreq)
+struct netfs_io_subrequest *netfs_alloc_read_subrequest(struct netfs_io_request *rreq,
+							enum netfs_io_source source)
 {
 	struct netfs_io_subrequest *subreq;
 	struct netfs_io_stream *stream = &rreq->io_streams[0];
 
-	subreq = netfs_alloc_subrequest(rreq);
+	subreq = netfs_alloc_subrequest(rreq, source);
 	if (!subreq)
 		return subreq;
 
@@ -270,7 +271,10 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 
 	do {
 		struct netfs_io_subrequest *subreq;
-		unsigned long long hole_to, cache_to, stop;
+		enum netfs_io_source source;
+		unsigned long long hole_to, cache_to, start, stop;
+		size_t len;
+		bool copy = false;
 
 		/* If we don't have any, find out the next couple of data
 		 * extents from the cache, containing of following the
@@ -299,19 +303,13 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 			continue;
 		}
 
-		subreq = netfs_alloc_read_subrequest(rreq);
-		if (!subreq) {
-			ret = -ENOMEM;
-			break;
-		}
-
-		subreq->start = stream->issue_from;
+		start = stream->issue_from;
 		stop = stream->issue_from + stream->buffered;
 
 		unsigned long long zero_point = netfs_read_zero_point(rreq->inode);
 		unsigned long long zlimit = umin(zero_point, rreq->i_size);
 
-		_debug("rsub %llx %llx-%llx", subreq->start, hole_to, cache_to);
+		_debug("rsub %llx %llx-%llx", start, hole_to, cache_to);
 
 		if (stream->issue_from >= hole_to && stream->issue_from < cache_to) {
 			/* Overlap with a cached region, where the cache may
@@ -319,24 +317,24 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 			 */
 			_debug("cached s=%llx c=%llx l=%zx",
 			       stream->issue_from, cache_to, stream->buffered);
-			subreq->len = umin(cache_to - stream->issue_from, stream->buffered);
-			subreq->len = round_up(subreq->len, occ->granularity);
+			len = umin(cache_to - stream->issue_from, stream->buffered);
+			len = round_up(len, occ->granularity);
 			if (occ->cached_type[0] == FSCACHE_EXTENT_ZERO) {
-				subreq->source = NETFS_FILL_WITH_ZEROES;
+				source = NETFS_FILL_WITH_ZEROES;
 				netfs_stat(&netfs_n_rh_zero);
 			} else {
-				subreq->source = NETFS_READ_FROM_CACHE;
+				source = NETFS_READ_FROM_CACHE;
 			}
-		} else if (subreq->start >= zlimit &&
-			   subreq->start < stop) {
+		} else if (start >= zlimit &&
+			   start < stop) {
 			/* If this range lies beyond the zero-point, that part
 			 * can just be cleared locally.
 			 */
-			_debug("zero %llx-%llx", subreq->start, stop);
-			subreq->len = stream->buffered;
-			subreq->source = NETFS_FILL_WITH_ZEROES;
+			_debug("zero %llx-%llx", start, stop);
+			len = stream->buffered;
+			source = NETFS_FILL_WITH_ZEROES;
 			if (rreq->cache_resources.ops)
-				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+				copy = true;
 			netfs_stat(&netfs_n_rh_zero);
 		} else {
 			/* Read a cache hole from the server.  If any part of
@@ -346,22 +344,31 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq)
 			unsigned long long limit = min3(zlimit, stop, hole_to);
 
 			_debug("limit %llx %llx", rreq->i_size, zero_point);
-			_debug("download %llx-%llx", subreq->start, stop);
-			subreq->len = umin(limit - subreq->start, ULONG_MAX);
-			subreq->source = NETFS_DOWNLOAD_FROM_SERVER;
+			_debug("download %llx-%llx", start, stop);
+			len = umin(limit - start, ULONG_MAX);
+			source = NETFS_DOWNLOAD_FROM_SERVER;
 			if (rreq->cache_resources.ops)
 				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
 			netfs_stat(&netfs_n_rh_download);
 		}
 
-		if (subreq->len == 0) {
-			pr_err("ZERO-LEN READ: R=%08x[%x] l=%zx/%zx s=%llx z=%llx i=%llx",
-			       rreq->debug_id, subreq->debug_index,
-			       subreq->len, stream->buffered,
-			       subreq->start, zero_point, rreq->i_size);
-			netfs_cancel_read(subreq, ret);
+		if (len == 0) {
+			pr_err("ZERO-LEN READ: R=%08x l=%zx/%zx s=%llx z=%llx i=%llx",
+			       rreq->debug_id, len, stream->buffered,
+			       start, zero_point, rreq->i_size);
 			break;
 		}
+
+		subreq = netfs_alloc_read_subrequest(rreq, source);
+		if (!subreq) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		subreq->start = start;
+		subreq->len   = len;
+		if (copy)
+			__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
 
 		netfs_issue_read(rreq, subreq);
 		netfs_maybe_bulk_drop_ra_refs(rreq);

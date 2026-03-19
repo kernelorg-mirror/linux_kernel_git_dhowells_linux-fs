@@ -93,7 +93,7 @@ static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 
 	netfs_read_query_cache(rreq, &occ);
 
-	subreq = netfs_alloc_read_subrequest(rreq);
+	subreq = netfs_alloc_read_subrequest(rreq, NETFS_DOWNLOAD_FROM_SERVER);
 	if (!subreq)
 		return -ENOMEM;
 

@@ -25,7 +25,8 @@
  */
 void netfs_read_query_cache(struct netfs_io_request *rreq,
 			    struct fscache_occupancy *occ);
-struct netfs_io_subrequest *netfs_alloc_read_subrequest(struct netfs_io_request *rreq);
+struct netfs_io_subrequest *netfs_alloc_read_subrequest(struct netfs_io_request *rreq,
+							enum netfs_io_source source);
 void netfs_cache_read_terminated(void *priv, ssize_t transferred_or_error);
 int netfs_prefetch_for_write(struct file *file, struct folio *folio,
 			     size_t offset, size_t len);
@@ -106,7 +107,8 @@ void netfs_get_request(struct netfs_io_request *rreq, enum netfs_rreq_ref_trace 
 void netfs_clear_subrequests(struct netfs_io_request *rreq);
 void netfs_put_request(struct netfs_io_request *rreq, enum netfs_rreq_ref_trace what);
 void netfs_put_failed_request(struct netfs_io_request *rreq);
-struct netfs_io_subrequest *netfs_alloc_subrequest(struct netfs_io_request *rreq);
+struct netfs_io_subrequest *netfs_alloc_subrequest(struct netfs_io_request *rreq,
+						   enum netfs_io_source source);
 
 static inline void netfs_see_request(struct netfs_io_request *rreq,
 				     enum netfs_rreq_ref_trace what)
