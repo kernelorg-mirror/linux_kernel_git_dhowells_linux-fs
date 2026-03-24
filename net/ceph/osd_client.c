@@ -122,13 +122,6 @@ static void ceph_osd_data_init(struct ceph_osd_data *osd_data)
 	osd_data->type = CEPH_OSD_DATA_TYPE_NONE;
 }
 
-static void ceph_osd_iter_init(struct ceph_osd_data *osd_data,
-			       struct iov_iter *iter)
-{
-	osd_data->type = CEPH_OSD_DATA_TYPE_ITER;
-	osd_data->iter = *iter;
-}
-
 /*
  * Consumes a ref on @dbuf.
  */
@@ -179,22 +172,6 @@ void osd_req_op_extent_osd_bvecq(struct ceph_osd_request *osd_req,
 }
 EXPORT_SYMBOL(osd_req_op_extent_osd_bvecq);
 
-/**
- * osd_req_op_extent_osd_iter - Set up an operation with an iterator buffer
- * @osd_req: The request to set up
- * @which: Index of the operation in which to set the iter
- * @iter: The buffer iterator
- */
-void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
-				unsigned int which, struct iov_iter *iter)
-{
-	struct ceph_osd_data *osd_data;
-
-	osd_data = osd_req_op_data(osd_req, which, extent, osd_data);
-	ceph_osd_iter_init(osd_data, iter);
-}
-EXPORT_SYMBOL(osd_req_op_extent_osd_iter);
-
 static void osd_req_op_cls_request_info_bvecq(struct ceph_osd_request *osd_req,
 					      unsigned int which,
 					      struct bvecq *bvecq,
@@ -241,8 +218,6 @@ static u64 ceph_osd_data_length(struct ceph_osd_data *osd_data)
 		return 0;
 	case CEPH_OSD_DATA_TYPE_BVECQ:
 		return osd_data->bvecq_len;
-	case CEPH_OSD_DATA_TYPE_ITER:
-		return iov_iter_count(&osd_data->iter);
 	default:
 		WARN(true, "unrecognized data type %d\n", (int)osd_data->type);
 		return 0;
@@ -816,8 +791,6 @@ static void ceph_osdc_msg_data_add(struct ceph_msg *msg,
 
 	if (osd_data->type == CEPH_OSD_DATA_TYPE_BVECQ) {
 		ceph_msg_data_add_bvecq(msg, osd_data->bvecq, length);
-	} else if (osd_data->type == CEPH_OSD_DATA_TYPE_ITER) {
-		ceph_msg_data_add_iter(msg, &osd_data->iter);
 	} else {
 		BUG_ON(osd_data->type != CEPH_OSD_DATA_TYPE_NONE);
 	}

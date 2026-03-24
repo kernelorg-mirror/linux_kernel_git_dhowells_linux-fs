@@ -782,7 +782,6 @@ static void __ceph_msg_data_cursor_init(struct ceph_msg_data_cursor *cursor)
 
 	switch (cursor->data->type) {
 	case CEPH_MSG_DATA_BVECQ:
-	case CEPH_MSG_DATA_ITER:
 		ceph_msg_data_iter_cursor_init(cursor, length);
 		break;
 	case CEPH_MSG_DATA_NONE:
@@ -819,7 +818,6 @@ struct page *ceph_msg_data_next(struct ceph_msg_data_cursor *cursor,
 
 	switch (cursor->data->type) {
 	case CEPH_MSG_DATA_BVECQ:
-	case CEPH_MSG_DATA_ITER:
 		page = ceph_msg_data_iter_next(cursor, page_offset, length);
 		break;
 	case CEPH_MSG_DATA_NONE:
@@ -847,7 +845,6 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 	BUG_ON(bytes > cursor->resid);
 	switch (cursor->data->type) {
 	case CEPH_MSG_DATA_BVECQ:
-	case CEPH_MSG_DATA_ITER:
 		new_piece = ceph_msg_data_iter_advance(cursor, bytes);
 		break;
 	case CEPH_MSG_DATA_NONE:
@@ -1594,18 +1591,6 @@ void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bvecq, size_t l
 	iov_iter_bvec_queue(&data->iter, ITER_SOURCE, bvecq, 0, 0, len);
 }
 EXPORT_SYMBOL(ceph_msg_data_add_bvecq);
-
-void ceph_msg_data_add_iter(struct ceph_msg *msg,
-			    struct iov_iter *iter)
-{
-	struct ceph_msg_data *data;
-
-	data = ceph_msg_data_add(msg);
-	data->type = CEPH_MSG_DATA_ITER;
-	data->iter = *iter;
-
-	msg->data_length += iov_iter_count(&data->iter);
-}
 
 /*
  * construct a new message with given type, size

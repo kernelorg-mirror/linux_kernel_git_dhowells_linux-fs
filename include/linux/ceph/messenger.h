@@ -119,7 +119,6 @@ struct ceph_messenger {
 enum ceph_msg_data_type {
 	CEPH_MSG_DATA_NONE,	/* message contains no data payload */
 	CEPH_MSG_DATA_BVECQ,	/* data source/destination is a bvecq */
-	CEPH_MSG_DATA_ITER,	/* data source/destination is an iov_iter */
 };
 
 struct ceph_msg_data {
@@ -488,8 +487,6 @@ extern bool ceph_con_keepalive_expired(struct ceph_connection *con,
 				       unsigned long interval);
 
 void ceph_msg_data_add_bvecq(struct ceph_msg *msg, struct bvecq *bq, size_t len);
-void ceph_msg_data_add_iter(struct ceph_msg *msg,
-			    struct iov_iter *iter);
 
 struct ceph_msg *ceph_msg_new2(int type, int front_len, int max_data_items,
 			       gfp_t flags, bool can_fail);

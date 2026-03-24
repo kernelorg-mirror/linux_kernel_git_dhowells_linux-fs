@@ -104,7 +104,6 @@ struct ceph_osd {
 enum ceph_osd_data_type {
 	CEPH_OSD_DATA_TYPE_NONE = 0,
 	CEPH_OSD_DATA_TYPE_BVECQ,
-	CEPH_OSD_DATA_TYPE_ITER,
 };
 
 struct ceph_osd_data {
@@ -470,8 +469,6 @@ extern void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *,
 void osd_req_op_raw_data_in_bvecq(struct ceph_osd_request *osd_req,
 				  unsigned int which,
 				  struct bvecq *dbuf, size_t len);
-void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
-				unsigned int which, struct iov_iter *iter);
 
 void osd_req_op_cls_request_bvecq(struct ceph_osd_request *req,
 				  unsigned int which,

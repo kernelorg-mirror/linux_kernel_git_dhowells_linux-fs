@@ -521,8 +521,7 @@ static int write_partial_message_data(struct ceph_connection *con,
 			continue;
 		}
 
-		if (cursor->data->type == CEPH_MSG_DATA_BVECQ ||
-		    cursor->data->type == CEPH_MSG_DATA_ITER) {
+		if (cursor->data->type == CEPH_MSG_DATA_BVECQ) {
 			ret = ceph_tcp_sock_sendmsg(con->sock, &cursor->iov_iter,
 						    MSG_MORE);
 			if (ret <= 0) {
