@@ -54,6 +54,16 @@ struct bvecq {
 /* Number of slots in a 4K bvecq. */
 #define BVECQ_4KB_SLOTS  ((4096 - sizeof(struct bvecq)) / sizeof(struct bio_vec))
 
+/*
+ * Position in a bio_vec queue.  The bvecq holds a ref on the queue segment it
+ * points to.
+ */
+struct bvecq_pos {
+	struct bvecq		*bvecq;		/* The first bvecq */
+	unsigned int		offset;		/* The offset within the starting slot */
+	u16			slot;		/* The starting slot */
+};
+
 void bvecq_dump(const struct bvecq *bq);
 struct bvecq *bvecq_alloc_one(size_t nr_slots, gfp_t gfp, bool for_writeback);
 struct bvecq *bvecq_alloc_chain(size_t nr_slots, gfp_t gfp, bool for_writeback);
@@ -61,6 +71,12 @@ struct bvecq *bvecq_alloc_buffer2(size_t size, unsigned int pre_slots, gfp_t gfp
 				  bool for_writeback);
 void bvecq_put(struct bvecq *bq);
 int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, gfp_t gfp);
+int bvecq_buffer_init(struct bvecq_pos *pos, gfp_t gfp, bool for_writeback);
+void bvecq_buffer_append(struct bvecq_pos *pos, struct bvecq *bq);
+void bvecq_pos_advance(struct bvecq_pos *pos, size_t amount);
+ssize_t bvecq_zero(struct bvecq_pos *pos, size_t amount);
+size_t bvecq_slice(struct bvecq_pos *pos, size_t max_size,
+		   unsigned int max_slots, unsigned int *_nr_slots);
 
 /**
  * bvecq_alloc_buffer - Allocate a bvecq chain and populate with buffers
@@ -161,6 +177,173 @@ static inline struct bvecq *bvecq_next(const struct bvecq *bq)
 {
 	/* Read the contents of the next node after the pointer to it. */
 	return smp_load_acquire(&bq->next);
+}
+
+/**
+ * bvecq_pos_set - Set one position to be the same as another
+ * @pos: The position object to set
+ * @at: The source position.
+ *
+ * Set @pos to have the same position as @at.  This may take a ref on the
+ * bvecq pointed to.
+ */
+static inline void bvecq_pos_set(struct bvecq_pos *pos, const struct bvecq_pos *at)
+{
+	*pos = *at;
+	bvecq_get(pos->bvecq);
+}
+
+/**
+ * bvecq_pos_unset - Unset a position
+ * @pos: The position object to unset
+ *
+ * Unset @pos.  This does any needed ref cleanup.
+ */
+static inline void bvecq_pos_unset(struct bvecq_pos *pos)
+{
+	bvecq_put(pos->bvecq);
+	pos->bvecq = NULL;
+	pos->slot = 0;
+	pos->offset = 0;
+}
+
+/**
+ * bvecq_pos_transfer - Transfer one position to another, clearing the first
+ * @pos: The position object to set
+ * @from: The source position to clear.
+ *
+ * Set @pos to have the same position as @from and then clear @from.  This may
+ * transfer a ref on the bvecq pointed to.
+ */
+static inline void bvecq_pos_transfer(struct bvecq_pos *pos, struct bvecq_pos *from)
+{
+	*pos = *from;
+	from->bvecq = NULL;
+	from->slot = 0;
+	from->offset = 0;
+}
+
+/**
+ * bvecq_pos_move - Update a position to a new bvecq
+ * @pos: The position object to update.
+ * @to: The new bvecq to point at.
+ *
+ * Update @pos to point to @to if it doesn't already do so.  This may
+ * manipulate refs on the bvecqs pointed to.
+ */
+static inline void bvecq_pos_move(struct bvecq_pos *pos, struct bvecq *to)
+{
+	struct bvecq *old = pos->bvecq;
+
+	if (old != to) {
+		pos->bvecq = bvecq_get(to);
+		bvecq_put(old);
+	}
+}
+
+/**
+ * bvecq_pos_nudge - Nudge a position onto the next segment if current used up
+ * @pos: The position object to nudge.
+ *
+ * Update @pos to point to the next segment in the chain if we've used up the
+ * current segment.  This may manipulate refs on the bvecqs pointed to.
+ *
+ * Return: true if found a new segment, false if hit the end.
+ */
+static inline bool bvecq_pos_nudge(struct bvecq_pos *pos)
+{
+	struct bvecq *bq = pos->bvecq;
+
+	for (;;) {
+		if (!bvecq_acquire_slot(bq, pos->slot)) {
+			bq = bvecq_next(bq);
+			if (!bq)
+				return false;
+			if (bvecq_acquire_slot(bq, pos->slot))
+				continue; /* More slots got added. */
+			bvecq_pos_move(pos, bq);
+			pos->slot = 0;
+			pos->offset = 0;
+			continue;
+		}
+		if (pos->offset >= bq->bv[pos->slot].bv_len) {
+			pos->slot++;
+			pos->offset = 0;
+			continue;
+		}
+		return true;
+	}
+}
+
+/**
+ * bvecq_pos_step - Step a position to the next slot if possible
+ * @pos: The position object to step.
+ *
+ * Update @pos to point to the next slot in the queue if not at the end.  This
+ * may manipulate refs on the bvecqs pointed to.
+ *
+ * Return: true if successful, false if was at the end.
+ */
+static inline bool bvecq_pos_step(struct bvecq_pos *pos)
+{
+	struct bvecq *bq = pos->bvecq, *next;
+
+	pos->slot++;
+	pos->offset = 0;
+	if (bvecq_acquire_slot(bq, pos->slot))
+		return true;
+	next = bvecq_next(bq);
+	if (!next)
+		return false;
+	if (bvecq_acquire_slot(bq, pos->slot))
+		return true;
+	bvecq_pos_move(pos, next);
+	pos->slot = 0;
+	return true;
+}
+
+/**
+ * bvecq_delete_spent - Delete the bvecq at the front if possible
+ * @pos: The position object to update.
+ *
+ * Delete the used up bvecq at the front of the queue that @pos points to if it
+ * is not the last node in the queue; if it is the last node in the queue, it
+ * is kept so that the queue doesn't become detached from the other end.  This
+ * may manipulate refs on the bvecqs pointed to.  It is also possible that the
+ * producer will fill more slots in the current bvecq.
+ *
+ * Also, we have to be very careful: the consumer can catch the producer, which
+ * could lead to us having nothing left in the queue, causing the front and
+ * back pointers to end up on different tracks.  To avoid this, we must always
+ * keep at least one segment in the queue.
+ *
+ * The caller must reload from @pos after calling this.
+ *
+ * Return: true if there's more available; false if not.
+ */
+static inline bool bvecq_delete_spent(struct bvecq_pos *pos)
+{
+	struct bvecq *spent = pos->bvecq;
+	struct bvecq *next;
+	unsigned int slot = pos->slot;
+
+again:
+	/* Read the contents of the queue node after the pointer to it. */
+	next = bvecq_next(spent);
+	if (!next)
+		return false; /* Nothing more to consume at the moment. */
+	if (slot < bvecq_nr_slots_acquire(spent))
+		return true; /* The producer added more. */
+	next->prev = NULL;
+	bvecq_pos_move(pos, next);
+	pos->slot = 0;
+	pos->offset = 0;
+	if (!bvecq_acquire_slot(next, 0)) {
+		spent = next;
+		slot = 0;
+		goto again;
+	}
+	return true;
 }
 
 #endif /* _LINUX_BVECQ_H */
