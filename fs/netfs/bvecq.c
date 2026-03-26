@@ -340,3 +340,313 @@ int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, 
 	return 0;
 }
 EXPORT_SYMBOL(bvecq_expand_buffer);
+
+/**
+ * bvecq_buffer_init - Initialise a buffer and set position
+ * @pos: The position to point at the new buffer.
+ * @gfp: The allocation constraints.
+ * @for_writeback: True if allocating for writeback
+ *
+ * Initialise a rolling buffer.  We allocate an unpopulated bvecq node to so
+ * that the pointers can be independently driven by the producer and the
+ * consumer.
+ *
+ * Return 0 if successful; -ENOMEM on allocation failure.
+ */
+int bvecq_buffer_init(struct bvecq_pos *pos, gfp_t gfp, bool for_writeback)
+{
+	struct bvecq *bq;
+
+	bq = bvecq_alloc_one(BVECQ_POOL_SLOTS, gfp, for_writeback);
+	if (!bq)
+		return -ENOMEM;
+
+	pos->bvecq  = bq; /* Comes with a ref. */
+	pos->slot   = 0;
+	pos->offset = 0;
+	return 0;
+}
+
+/**
+ * bvecq_buffer_append - Append a new bvecq node to a buffer
+ * @pos: The position of the last node.
+ * @bq: The buffer to add.
+ *
+ * Add a new node on to the buffer chain at the specified position, either
+ * because the previous one is full or because we have a discontiguity to
+ * contend with, and update @pos to point to it.
+ */
+void bvecq_buffer_append(struct bvecq_pos *pos, struct bvecq *bq)
+{
+	struct bvecq *head = pos->bvecq;
+
+	pos->bvecq = bvecq_get(bq);
+	pos->slot = 0;
+	pos->offset = 0;
+
+	/* [!] NOTE: After we set head->next, the consumer is at liberty to
+	 * immediately delete the old head.
+	 */
+	bvecq_append(head, bq);
+	bvecq_put(head);
+}
+
+/**
+ * bvecq_pos_advance - Advance a bvecq position
+ * @pos: The position to advance.
+ * @amount: The amount of bytes to advance by.
+ *
+ * Advance the specified bvecq position by @amount bytes.  @pos is updated and
+ * bvecq ref counts may have been manipulated.  If the position hits the end of
+ * the queue, then it is left pointing beyond the last slot of the last bvecq
+ * so that it doesn't break the chain.
+ */
+void bvecq_pos_advance(struct bvecq_pos *pos, size_t amount)
+{
+	struct bvecq *bq = pos->bvecq, *next;
+	unsigned int slot = pos->slot;
+	size_t offset = pos->offset;
+
+	while (amount) {
+		size_t part;
+
+		if (!bvecq_acquire_slot(bq, slot)) {
+			next = bvecq_next(bq);
+			if (!next) {
+				WARN_ON_ONCE(amount > 0);
+				break;
+			}
+			if (bvecq_acquire_slot(bq, slot))
+				continue; /* More slots got added. */
+			bq = next;
+			slot = 0;
+			offset = 0;
+			continue;
+		}
+
+		part = bq->bv[slot].bv_len - offset;
+
+		if (part > amount) {
+			offset += amount;
+			break;
+		}
+		amount -= part;
+		offset = 0;
+		slot++;
+	}
+
+	pos->slot   = slot;
+	pos->offset = offset;
+	bvecq_pos_move(pos, bq);
+}
+
+/*
+ * Clear part of the memory pointed to by a bio_vec.
+ */
+static void bvec_zero(const struct bio_vec *bv, size_t offset, size_t len)
+{
+	struct page *page = bv->bv_page;
+
+	offset += bv->bv_offset;
+
+	page  += offset / PAGE_SIZE;
+	offset = offset % PAGE_SIZE;
+
+	while (len) {
+		size_t part = min(len, PAGE_SIZE - offset);
+		char *p = kmap_local_page(page);
+
+		memset(p + offset, 0, part);
+		kunmap_local(p);
+
+		len -= part;
+		offset = 0;
+		page++;
+	}
+}
+
+/**
+ * bvecq_zero - Clear memory starting at the bvecq position.
+ * @pos: The position in the bvecq chain to start clearing.
+ * @amount: The number of bytes to clear.
+ *
+ * Clear memory fragments pointed to by a bvec queue.  @pos is updated and
+ * bvecq ref counts may have been manipulated.  If the position hits the end of
+ * the queue, then it is left pointing beyond the last slot of the last bvecq
+ * so that it doesn't break the chain.
+ *
+ * Return: The number of bytes cleared.
+ */
+ssize_t bvecq_zero(struct bvecq_pos *pos, size_t amount)
+{
+	struct bvecq *bq = pos->bvecq, *next;
+	unsigned int slot = pos->slot;
+	ssize_t cleared = 0;
+	size_t offset = pos->offset;
+
+	while (amount) {
+		const struct bio_vec *bv;
+		size_t part;
+
+		if (!bvecq_acquire_slot(bq, slot)) {
+			next = bvecq_next(bq);
+			if (!next) {
+				WARN_ON_ONCE(amount > 0);
+				break;
+			}
+			if (bvecq_acquire_slot(bq, slot))
+				continue; /* More slots got added. */
+			bq = next;
+			slot = 0;
+			offset = 0;
+			continue;
+		}
+
+		bv = &bq->bv[slot];
+		if (offset >= bv->bv_len) {
+			slot++;
+			offset = 0;
+			continue;
+		}
+
+		part = min(bv->bv_len - offset, amount);
+		bvec_zero(bv, offset, part);
+		cleared += part;
+		offset += part;
+		amount -= part;
+	}
+
+	pos->slot   = slot;
+	pos->offset = offset;
+	bvecq_pos_move(pos, bq);
+	return cleared;
+}
+
+/**
+ * bvecq_slice - Find a slice of a bvecq queue
+ * @pos: The position to start at.
+ * @max_size: The maximum size of the slice (or ULONG_MAX).
+ * @max_slots: The maximum number of slots in the slice (or INT_MAX).
+ * @_nr_slots: Where to put the number of slots (updated).
+ *
+ * Determine the size and number of slots that can be obtained the next slice
+ * of bvec queue up to the maximum size and slot count specified.
+ *
+ * @pos is updated to the end of the slice.  If the position hits the end of
+ * the queue, then it is left pointing beyond the last slot of the last bvecq
+ * so that it doesn't break the chain.
+ *
+ * Return: The number of bytes in the slice.
+ */
+size_t bvecq_slice(struct bvecq_pos *pos, size_t max_size,
+		   unsigned int max_slots, unsigned int *_nr_slots)
+{
+	struct bvecq *bq, *next;
+	unsigned int slot = pos->slot, nslots = 0;
+	size_t size = 0, offset = pos->offset;
+
+	bq = pos->bvecq;
+	for (;;) {
+		for (; slot < bvecq_nr_slots_acquire(bq); slot++) {
+			const struct bio_vec *bvec = &bq->bv[slot];
+
+			if (offset < bvec->bv_len && bvec->bv_page) {
+				size_t part = min(bvec->bv_len - offset, max_size);
+
+				size += part;
+				offset += part;
+				max_size -= part;
+				nslots++;
+				if (!max_size || nslots >= max_slots)
+					goto out;
+			}
+			offset = 0;
+		}
+
+		/* pos->bvecq isn't allowed to go NULL as the queue may get
+		 * extended and we would lose our place.
+		 */
+		next = bvecq_next(bq);
+		if (!next)
+			break;
+		if (bvecq_acquire_slot(bq, slot))
+			continue; /* More slots got added. */
+		slot = 0;
+		bq = next;
+	}
+
+out:
+	*_nr_slots = nslots;
+	if (slot == bvecq_nr_slots_acquire(bq)) {
+		next = bvecq_next(bq);
+		if (next) {
+			bq = next;
+			slot = 0;
+			offset = 0;
+		}
+	}
+	bvecq_pos_move(pos, bq);
+	pos->slot = slot;
+	pos->offset = offset;
+	return size;
+}
+
+/**
+ * bvecq_load_from_ra - Allocate a bvecq chain and load from readahead
+ * @pos: Blank position object to attach the new chain to.
+ * @ractl: The readahead control context.
+ *
+ * Decant the set of folios to be read from the readahead context into a bvecq
+ * chain.  Each folio occupies one bio_vec element.
+ *
+ * Return: Amount of data loaded or -ENOMEM on allocation failure.
+ */
+ssize_t bvecq_load_from_ra(struct bvecq_pos *pos, struct readahead_control *ractl)
+{
+	XA_STATE(xas, &ractl->mapping->i_pages, ractl->_index);
+	struct folio *folio;
+	struct bvecq *bq;
+	unsigned int slot = 0;
+	size_t loaded = 0;
+
+	bq = bvecq_alloc_chain(ractl->_nr_folios, GFP_KERNEL, false);
+	if (!bq)
+		return -ENOMEM;
+
+	pos->bvecq  = bq;
+	pos->slot   = 0;
+	pos->offset = 0;
+
+	rcu_read_lock();
+
+	xas_for_each(&xas, folio, ractl->_index + ractl->_nr_pages - 1) {
+		size_t len;
+
+		if (xas_retry(&xas, folio))
+			continue;
+		VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+
+		len = folio_size(folio);
+		bvec_set_folio(&bq->bv[slot], folio, len, 0);
+		loaded += len;
+		slot++;
+		trace_netfs_folio(folio, netfs_folio_trace_read);
+
+		if (slot >= bq->max_slots) {
+			bvecq_filled_to(bq, slot);
+			bq = bq->next;
+			if (!bq)
+				break;
+			slot = 0;
+		}
+	}
+
+	rcu_read_unlock();
+
+	if (bq)
+		bvecq_filled_to(bq, slot);
+
+	ractl->_index += ractl->_nr_pages;
+	ractl->_nr_pages = 0;
+	return loaded;
+}
