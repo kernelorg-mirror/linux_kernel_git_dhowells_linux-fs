@@ -594,6 +594,118 @@ out:
 }
 
 /**
+ * bvecq_extract - Extract a slice of a bvecq queue into a new bvecq queue
+ * @pos: The position to start at.
+ * @max_size: The maximum size of the slice (or ULONG_MAX).
+ * @max_slots: The maximum number of slots in the slice (or INT_MAX).
+ * @to: Where to put the extraction bvecq chain head (updated).
+ * @for_writeback: True if allocating for writeback
+ *
+ * Allocate a new bvecq and extract into it memory fragments from a slice of
+ * bvec queue, starting at @pos.  No refs are taken on the page.
+ *
+ * @pos is updated to the end of the slice.  If the position hits the end of
+ * the queue, then it is left pointing beyond the last slot of the last bvecq
+ * so that it doesn't break the chain.
+ *
+ * If successful, *@to is set to point to the head of the newly allocated chain
+ * and the caller inherits a ref to it.
+ *
+ * Return: The number of bytes extracted; -ENOMEM on allocation failure or -EIO
+ * if no slots were available to extract.
+ */
+ssize_t bvecq_extract(struct bvecq_pos *pos, size_t max_size, unsigned int max_slots,
+		      struct bvecq **to, bool for_writeback)
+{
+	struct bvecq_pos tmp_pos;
+	struct bvecq *src, *dst = NULL, *next;
+	unsigned int slot = pos->slot, dslot = 0, nslots;
+	ssize_t extracted = 0;
+	size_t offset = pos->offset, amount;
+
+	*to = NULL;
+	if (WARN_ON_ONCE(!max_slots))
+		max_slots = INT_MAX;
+
+	bvecq_pos_set(&tmp_pos, pos);
+	amount = bvecq_slice(&tmp_pos, max_size, max_slots, &nslots);
+	bvecq_pos_unset(&tmp_pos);
+	if (nslots == 0)
+		return -EIO;
+
+	dst = bvecq_alloc_chain(nslots, GFP_NOFS, for_writeback);
+	if (!dst)
+		return -ENOMEM;
+	*to = dst;
+	max_slots = nslots;
+	nslots = 0;
+
+	/* Transcribe the slots */
+	src = pos->bvecq;
+	for (;;) {
+		for (; slot < bvecq_nr_slots_acquire(src); slot++) {
+			const struct bio_vec *sv = &src->bv[slot];
+			struct bio_vec *dv = &dst->bv[dslot];
+
+			_debug("EXTR BQ=%x[%x] off=%zx am=%zx p=%lx",
+			       src->priv, slot, offset, amount, page_to_pfn(sv->bv_page));
+
+			if (offset < sv->bv_len && sv->bv_page) {
+				size_t part = min(sv->bv_len - offset, amount);
+
+				bvec_set_page(dv, sv->bv_page, part,
+					      sv->bv_offset + offset);
+				extracted += part;
+				amount -= part;
+				offset += part;
+				trace_netfs_bv_slot(dst, dslot);
+				dslot++;
+				nslots++;
+				if (dslot >= dst->max_slots) {
+					bvecq_filled_to(dst, dslot);
+					dst = dst->next;
+					dslot = 0;
+				}
+				if (nslots >= max_slots)
+					goto out;
+				if (amount == 0)
+					goto out;
+			}
+			offset = 0;
+		}
+
+		/* pos->bvecq isn't allowed to go NULL as the queue may get
+		 * extended and we would lose our place.
+		 */
+		next = bvecq_next(src);
+		if (!next)
+			break;
+		if (bvecq_acquire_slot(src, slot))
+			continue; /* More slots got added. */
+		slot = 0;
+		src = next;
+		if (extracted > 0)
+			break;
+	}
+
+out:
+	if (dst)
+		bvecq_filled_to(dst, dslot);
+	if (slot == bvecq_nr_slots_acquire(src)) {
+		next = bvecq_next(src);
+		if (next) {
+			src = next;
+			slot = 0;
+			offset = 0;
+		}
+	}
+	bvecq_pos_move(pos, src);
+	pos->slot = slot;
+	pos->offset = offset;
+	return extracted;
+}
+
+/**
  * bvecq_load_from_ra - Allocate a bvecq chain and load from readahead
  * @pos: Blank position object to attach the new chain to.
  * @ractl: The readahead control context.
@@ -652,3 +764,54 @@ ssize_t bvecq_load_from_ra(struct bvecq_pos *pos, struct readahead_control *ract
 	ractl->_nr_pages = 0;
 	return loaded;
 }
+
+/*
+ * Add space to a buffer.
+ */
+static int bvecq_buffer_make_space(struct bvecq_pos *pos, gfp_t gfp, bool for_writeback)
+{
+	struct bvecq *bq;
+
+	bq = bvecq_alloc_one(BVECQ_POOL_SLOTS, gfp, for_writeback);
+	if (!bq)
+		return -ENOMEM;
+
+	bvecq_buffer_append(pos, bq);
+	return 0;
+}
+
+/**
+ * bvecq_append_page - Add part of a page to a buffer and advance to it
+ * @pos: The current position in the buffer
+ * @page: The page to add
+ * @offset: The offset of the page part to include
+ * @len: The length of the page part to include
+ * @gfp: The allocation flags
+ * @for_writeback: True if allocating for writeback
+ *
+ * Add part of a page to a buffer, extending the buffer if necessary.  The
+ * position in the buffer is updated on return.
+ *
+ * Return: 0 or -ENOMEM on allocation failure.
+ */
+int bvecq_append_page(struct bvecq_pos *pos, struct page *page,
+		      size_t offset, size_t len, gfp_t gfp, bool for_writeback)
+{
+	struct bvecq *bq = pos->bvecq;
+	int slot = pos->slot;
+
+	WARN_ON_ONCE(slot != bq->nr_slots);
+
+	if (slot >= bq->max_slots) {
+		if (bvecq_buffer_make_space(pos, gfp, for_writeback) < 0)
+			return -ENOMEM;
+		bq = pos->bvecq;
+		slot = pos->slot;
+	}
+
+	bvec_set_page(&bq->bv[slot++], page, len, offset);
+	bvecq_filled_to(bq, slot);
+	pos->slot = slot;
+	return 0;
+}
+EXPORT_SYMBOL(bvecq_append_page);
