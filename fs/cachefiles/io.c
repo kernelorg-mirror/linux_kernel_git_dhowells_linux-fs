@@ -918,6 +918,7 @@ bool cachefiles_begin_operation(struct netfs_cache_resources *cres,
 			if (!cres->cache_priv2 && file)
 				cres->cache_priv2 = get_file(file);
 			spin_unlock(&object->lock);
+			cres->object_id = object->debug_id;
 			cres->cache_i_size = i_size_read(file_inode(file));
 			cres->dio_size = object->volume->cache->bsize;
 		}
