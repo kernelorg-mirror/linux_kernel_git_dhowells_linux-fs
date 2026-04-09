@@ -19,10 +19,12 @@
 #include <linux/pagemap.h>
 #include <linux/bvecq.h>
 #include <linux/uio.h>
-#include <linux/rolling_buffer.h>
 
 enum netfs_sreq_ref_trace;
 typedef struct mempool mempool_t;
+struct readahead_control;
+struct netfs_io_request;
+struct netfs_io_subrequest;
 struct fscache_occupancy;
 
 /**
@@ -144,7 +146,6 @@ struct netfs_io_stream {
 	unsigned int		sreq_max_segs;	/* 0 or max number of segments in an iterator */
 	unsigned int		submit_off;	/* Folio offset we're submitting from */
 	unsigned int		submit_len;	/* Amount of data left to submit */
-	unsigned int		submit_extendable_to; /* Amount I/O can be rounded up to */
 	void (*prepare_write)(struct netfs_io_subrequest *subreq);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	/* Collection tracking */
@@ -187,6 +188,7 @@ struct netfs_io_subrequest {
 	struct netfs_io_request *rreq;		/* Supervising I/O request */
 	struct work_struct	work;
 	struct list_head	rreq_link;	/* Link in rreq->subrequests */
+	struct bvecq_pos	io_buffer;	/* Bookmark in the combined queue of the start */
 	struct iov_iter		io_iter;	/* Iterator for this subrequest */
 	uoff_t			start;		/* Where to start the I/O */
 	size_t			len;		/* Size of the I/O */
@@ -247,11 +249,14 @@ struct netfs_io_request {
 	struct netfs_io_stream	io_streams[2];	/* Streams of parallel I/O operations */
 #define NR_IO_STREAMS 2 //wreq->nr_io_streams
 	struct netfs_group	*group;		/* Writeback group being written back */
-	struct rolling_buffer	buffer;		/* Unencrypted buffer */
+	struct bvecq		*spare;		/* Advance allocation of bvecq */
+	struct bvecq_pos	load_cursor;	/* Point at which new folios are loaded in */
+	struct bvecq_pos	dispatch_cursor; /* Point from which buffers are dispatched */
+	struct bvecq_pos	collect_cursor;	/* Clear-up point of I/O buffer */
 	wait_queue_head_t	waitq;		/* Processor waiter */
 	void			*netfs_priv;	/* Private data for the netfs */
 	void			*netfs_priv2;	/* Private data for the netfs */
-	struct bvecq		*direct_bq;	/* DIO buffer list (when handling iovec-iter) */
+	uoff_t			last_end;	/* End pos of last folio submitted */
 	uoff_t			submitted;	/* Amount submitted for I/O so far */
 	uoff_t			len;		/* Length of the request */
 	size_t			transferred;	/* Amount to be indicated as transferred */
@@ -423,7 +428,7 @@ void netfs_single_mark_inode_dirty(struct inode *inode);
 ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_iter *iter);
 int netfs_writeback_single(struct address_space *mapping,
 			   struct writeback_control *wbc,
-			   struct iov_iter *iter);
+			   struct iov_iter *iter, size_t len);
 
 /* Address operations API */
 struct readahead_control;

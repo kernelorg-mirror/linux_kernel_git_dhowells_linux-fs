@@ -73,7 +73,11 @@ static void netfs_unbuffered_write_collect(struct netfs_io_request *wreq,
 	spin_unlock(&wreq->lock);
 
 	wreq->transferred += subreq->transferred;
-	iov_iter_advance(&wreq->buffer.iter, subreq->transferred);
+	if (subreq->transferred < subreq->len) {
+		bvecq_pos_unset(&wreq->dispatch_cursor);
+		bvecq_pos_transfer(&wreq->dispatch_cursor, &subreq->io_buffer);
+		bvecq_pos_advance(&wreq->dispatch_cursor, subreq->transferred);
+	}
 
 	stream->collected_to = subreq->start + subreq->transferred;
 	wreq->collected_to = stream->collected_to;
@@ -99,6 +103,8 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 
 	_enter("%llx", wreq->len);
 
+	bvecq_pos_set(&wreq->collect_cursor, &wreq->dispatch_cursor);
+
 	if (wreq->origin == NETFS_DIO_WRITE)
 		inode_dio_begin(wreq->inode);
 
@@ -116,6 +122,8 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 				break;
 			}
 			stream->construct = NULL;
+		} else {
+			bvecq_pos_set(&subreq->io_buffer, &wreq->dispatch_cursor);
 		}
 
 		/* Check if (re-)preparation failed. */
@@ -125,21 +133,22 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 			break;
 		}
 
-		iov_iter_truncate(&subreq->io_iter, wreq->len - wreq->transferred);
+		subreq->len = bvecq_slice(&wreq->dispatch_cursor, stream->sreq_max_len,
+					  stream->sreq_max_segs, &subreq->nr_segs);
+
+		iov_iter_bvec_queue(&subreq->io_iter, ITER_SOURCE,
+				    subreq->io_buffer.bvecq, subreq->io_buffer.slot,
+				    subreq->io_buffer.offset,
+				    subreq->len);
+
 		if (!iov_iter_count(&subreq->io_iter)) {
-			pr_warn("netfs: Unexpected zero-length iterator R=%08x\n",
+			pr_warn("netfs: Unexpected zero-length slice R=%08x\n",
 				wreq->debug_id);
 			__set_bit(NETFS_SREQ_FAILED, &subreq->flags);
 			netfs_write_subrequest_terminated(subreq, -EIO);
 			wreq->error = -EIO;
 			break;
 		}
-
-		subreq->len = netfs_limit_iter(&subreq->io_iter, 0,
-					       stream->sreq_max_len,
-					       stream->sreq_max_segs);
-		iov_iter_truncate(&subreq->io_iter, subreq->len);
-		stream->submit_extendable_to = subreq->len;
 
 		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 		stream->issue_write(subreq);
@@ -175,9 +184,13 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 		 */
 		subreq->error = -EAGAIN;
 		trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
+
+		bvecq_pos_unset(&wreq->dispatch_cursor);
+		bvecq_pos_transfer(&wreq->dispatch_cursor, &subreq->io_buffer);
+
 		if (subreq->transferred > 0) {
-			iov_iter_advance(&wreq->buffer.iter, subreq->transferred);
 			wreq->transferred += subreq->transferred;
+			bvecq_pos_advance(&wreq->dispatch_cursor, subreq->transferred);
 		}
 
 		if (stream->source == NETFS_UPLOAD_TO_SERVER &&
@@ -188,7 +201,6 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 		__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
 		__clear_bit(NETFS_SREQ_BOUNDARY, &subreq->flags);
 		__clear_bit(NETFS_SREQ_FAILED, &subreq->flags);
-		subreq->io_iter		= wreq->buffer.iter;
 		subreq->start		= wreq->start + wreq->transferred;
 		subreq->len		= wreq->len   - wreq->transferred;
 		subreq->transferred	= 0;
@@ -204,6 +216,7 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 		netfs_stat(&netfs_n_wh_retry_write_subreq);
 	}
 
+	bvecq_pos_unset(&wreq->dispatch_cursor);
 	netfs_unbuffered_write_done(wreq);
 	_leave(" = %d", ret);
 	return ret;
@@ -262,7 +275,7 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 		 * request.
 		 */
 		ssize_t n = netfs_extract_iter(iter, len, INT_MAX,
-					       &wreq->direct_bq, 0, wreq->gfp);
+					       &wreq->dispatch_cursor.bvecq, 0, wreq->gfp);
 
 		if (n < 0) {
 			ret = n;
@@ -270,11 +283,8 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 		}
 		wreq->len = n;
 		_debug("dio-write %zx/%zx %u/%u",
-		       n, len, wreq->direct_bq->nr_slots,
-		       wreq->direct_bq->max_slots);
-
-		iov_iter_bvec_queue(&wreq->buffer.iter, ITER_SOURCE,
-				    wreq->direct_bq, 0, 0, wreq->len);
+		       n, len, wreq->dispatch_cursor.bvecq->nr_slots,
+		       wreq->dispatch_cursor.bvecq->max_slots);
 	}
 
 	__set_bit(NETFS_RREQ_USE_IO_ITER, &wreq->flags);

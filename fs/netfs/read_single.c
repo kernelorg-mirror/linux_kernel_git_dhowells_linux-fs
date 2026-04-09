@@ -101,7 +101,11 @@ static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 
 	subreq->start	= 0;
 	subreq->len	= rreq->len;
-	subreq->io_iter	= rreq->buffer.iter;
+
+	bvecq_pos_set(&subreq->io_buffer, &rreq->dispatch_cursor);
+
+	iov_iter_bvec_queue(&subreq->io_iter, ITER_DEST, subreq->io_buffer.bvecq,
+			    subreq->io_buffer.slot, subreq->io_buffer.offset, subreq->len);
 
 	netfs_queue_read(rreq, subreq);
 
@@ -174,6 +178,15 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
 
+	ret = netfs_extract_iter(iter, rreq->len, INT_MAX, &rreq->dispatch_cursor.bvecq,
+				 0, rreq->gfp);
+	if (ret < 0)
+		goto cleanup_free;
+	if (ret < rreq->len) {
+		ret = -EIO;
+		goto cleanup_free;
+	}
+
 	rreq->progress_at = rreq->len;
 
 	ret = netfs_single_begin_cache_read(rreq, ictx);
@@ -183,7 +196,6 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 	netfs_stat(&netfs_n_rh_read_single);
 	trace_netfs_read(rreq, 0, rreq->len, netfs_read_trace_read_single);
 
-	rreq->buffer.iter = *iter;
 	netfs_single_dispatch_read(rreq);
 
 	ret = netfs_wait_for_read(rreq);
