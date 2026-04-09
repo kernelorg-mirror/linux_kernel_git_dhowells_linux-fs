@@ -16,44 +16,21 @@
 #include <linux/netfs.h>
 #include "internal.h"
 
-static void netfs_prepare_dio_read_iterator(struct netfs_io_subrequest *subreq)
-{
-	struct netfs_io_request *rreq = subreq->rreq;
-	size_t rsize;
-
-	rsize = umin(subreq->len, rreq->io_streams[0].sreq_max_len);
-	subreq->len = rsize;
-
-	if (unlikely(rreq->io_streams[0].sreq_max_segs)) {
-		size_t limit = netfs_limit_iter(&rreq->buffer.iter, 0, rsize,
-						rreq->io_streams[0].sreq_max_segs);
-
-		if (limit < rsize) {
-			subreq->len = limit;
-			trace_netfs_sreq(subreq, netfs_sreq_trace_limited);
-		}
-	}
-
-	trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
-
-	subreq->io_iter	= rreq->buffer.iter;
-	iov_iter_truncate(&subreq->io_iter, subreq->len);
-	iov_iter_advance(&rreq->buffer.iter, subreq->len);
-}
-
 /*
  * Perform a read to a buffer from the server, slicing up the region to be read
  * according to the network rsize.
  */
 static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 {
+	struct netfs_io_stream *stream = &rreq->io_streams[0];
 	ssize_t size = rreq->len;
 	uoff_t start = rreq->start;
 	int ret;
 
+	bvecq_pos_set(&rreq->collect_cursor, &rreq->dispatch_cursor);
+
 	do {
 		struct netfs_io_subrequest *subreq;
-		ssize_t slice;
 
 		subreq = netfs_alloc_subrequest(rreq, NETFS_DOWNLOAD_FROM_SERVER);
 		if (!subreq) {
@@ -78,13 +55,21 @@ static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 			}
 		}
 
-		netfs_prepare_dio_read_iterator(subreq);
-		slice = subreq->len;
-		size -= slice;
-		start += slice;
-		rreq->submitted += slice;
+		bvecq_pos_set(&subreq->io_buffer, &rreq->dispatch_cursor);
+		subreq->len = bvecq_slice(&rreq->dispatch_cursor,
+					  umin(size, stream->sreq_max_len),
+					  stream->sreq_max_segs,
+					  &subreq->nr_segs);
+
+		size -= subreq->len;
+		start += subreq->len;
+		rreq->submitted += subreq->len;
 		if (size <= 0)
 			netfs_all_subreqs_queued(rreq);
+
+		iov_iter_bvec_queue(&subreq->io_iter, ITER_DEST, subreq->io_buffer.bvecq,
+				    subreq->io_buffer.slot, subreq->io_buffer.offset,
+				    subreq->len);
 
 		rreq->netfs_ops->issue_read(subreq);
 
@@ -99,6 +84,8 @@ static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 		netfs_all_subreqs_queued(rreq);
 		netfs_wake_collector(rreq);
 	}
+
+	bvecq_pos_unset(&rreq->dispatch_cursor);
 }
 
 /*
@@ -183,14 +170,11 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	 * may end up truncated if ENOMEM is encountered.
 	 */
 	ret = netfs_extract_iter(iter, rreq->len, INT_MAX,
-				 &rreq->direct_bq, 0, rreq->gfp);
+				 &rreq->dispatch_cursor.bvecq, 0, rreq->gfp);
 	if (ret < 0)
 		goto error_put;
 
 	rreq->len = ret;
-
-	iov_iter_bvec_queue(&rreq->buffer.iter, ITER_DEST, rreq->direct_bq,
-			    0, 0, rreq->len);
 
 	// TODO: Set up bounce buffer if needed
 
