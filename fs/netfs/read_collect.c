@@ -36,6 +36,7 @@ static void netfs_clear_unread(struct netfs_io_subrequest *subreq)
 
 	if (subreq->start + subreq->transferred >= subreq->rreq->i_size)
 		__set_bit(NETFS_SREQ_HIT_EOF, &subreq->flags);
+	trace_netfs_rreq(subreq->rreq, netfs_rreq_trace_zero_unread);
 }
 
 /*
@@ -58,7 +59,7 @@ static void netfs_unlock_read_folio(struct netfs_io_request *rreq,
 	flush_dcache_folio(folio);
 	folio_mark_uptodate(folio);
 
-	if (!test_bit(NETFS_RREQ_USE_PGPRIV2, &rreq->flags)) {
+	if (!netfs_using_pgpriv2(rreq)) {
 		finfo = netfs_folio_info(folio);
 		if (finfo) {
 			trace_netfs_folio(folio, netfs_folio_trace_filled_gaps);
@@ -258,8 +259,7 @@ reassess:
 				transferred = front->len;
 				trace_netfs_rreq(rreq, netfs_rreq_trace_set_abandon);
 			}
-			if (front->start + transferred >= rreq->cleaned_to + fsize ||
-			    test_bit(NETFS_SREQ_HIT_EOF, &front->flags))
+			if (front->start + transferred >= rreq->cleaned_to + fsize)
 				netfs_read_unlock_folios(rreq, &notes);
 		} else {
 			stream->collected_to = front->start + transferred;
@@ -379,31 +379,6 @@ static void netfs_rreq_assess_dio(struct netfs_io_request *rreq)
 }
 
 /*
- * Do processing after reading a monolithic single object.
- */
-static void netfs_rreq_assess_single(struct netfs_io_request *rreq)
-{
-	struct netfs_io_stream *stream = &rreq->io_streams[0];
-
-	if (!rreq->error && stream->source == NETFS_DOWNLOAD_FROM_SERVER &&
-	    fscache_resources_valid(&rreq->cache_resources)) {
-		trace_netfs_rreq(rreq, netfs_rreq_trace_dirty);
-		netfs_single_mark_inode_dirty(rreq->inode);
-	}
-
-	if (rreq->iocb) {
-		rreq->iocb->ki_pos += rreq->transferred;
-		if (rreq->iocb->ki_complete) {
-			trace_netfs_rreq(rreq, netfs_rreq_trace_ki_complete);
-			rreq->iocb->ki_complete(
-				rreq->iocb, rreq->error ? rreq->error : rreq->transferred);
-		}
-	}
-	if (rreq->netfs_ops->done)
-		rreq->netfs_ops->done(rreq);
-}
-
-/*
  * Perform the collection of subrequests and folios.
  *
  * Note that we're in normal kernel thread context at this point, possibly
@@ -418,9 +393,8 @@ bool netfs_read_collection(struct netfs_io_request *rreq)
 	/* We're done when the app thread has finished posting subreqs and the
 	 * queue is empty.
 	 */
-	if (!test_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags))
+	if (!netfs_are_all_subreqs_queued(rreq))
 		return false;
-	smp_rmb(); /* Read ALL_QUEUED before subreq lists. */
 
 	if (!list_empty(&stream->subrequests))
 		return false;
@@ -438,7 +412,7 @@ bool netfs_read_collection(struct netfs_io_request *rreq)
 		netfs_rreq_assess_dio(rreq);
 		break;
 	case NETFS_READ_SINGLE:
-		netfs_rreq_assess_single(rreq);
+		WARN_ON_ONCE(1);
 		break;
 	default:
 		break;
@@ -563,6 +537,11 @@ void netfs_read_subreq_terminated(struct netfs_io_subrequest *subreq)
 		} else if (test_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags)) {
 			__set_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
 			trace_netfs_sreq(subreq, netfs_sreq_trace_partial_read);
+		} else if (subreq->source == NETFS_READ_FROM_CACHE) {
+			netfs_stat(&netfs_n_rh_read_failed);
+			__set_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
+			subreq->error = -ENODATA;
+			trace_netfs_sreq(subreq, netfs_sreq_trace_short);
 		} else {
 			__set_bit(NETFS_SREQ_FAILED, &subreq->flags);
 			subreq->error = -ENODATA;
@@ -581,6 +560,8 @@ void netfs_read_subreq_terminated(struct netfs_io_subrequest *subreq)
 
 	if (unlikely(subreq->error < 0)) {
 		trace_netfs_failure(rreq, subreq, subreq->error, netfs_fail_read);
+		if (subreq->error == -ENOMEM)
+			set_bit(NETFS_RREQ_SAW_ENOMEM, &rreq->flags);
 		if (subreq->source == NETFS_READ_FROM_CACHE) {
 			netfs_stat(&netfs_n_rh_read_failed);
 			__set_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);

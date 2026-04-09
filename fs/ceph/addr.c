@@ -274,7 +274,7 @@ static void finish_netfs_read(struct ceph_osd_request *req)
 	ceph_dec_osd_stopping_blocker(fsc->mdsc);
 }
 
-static bool ceph_netfs_issue_op_inline(struct netfs_io_subrequest *subreq)
+static int ceph_netfs_issue_op_inline(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
 	struct inode *inode = rreq->inode;
@@ -283,7 +283,8 @@ static bool ceph_netfs_issue_op_inline(struct netfs_io_subrequest *subreq)
 	struct ceph_mds_request *req;
 	struct ceph_mds_client *mdsc = ceph_sb_to_mdsc(inode->i_sb);
 	struct ceph_inode_info *ci = ceph_inode(inode);
-	ssize_t err = 0;
+	struct iov_iter iter;
+	ssize_t err;
 	size_t len;
 	int mode;
 
@@ -292,21 +293,32 @@ static bool ceph_netfs_issue_op_inline(struct netfs_io_subrequest *subreq)
 		__set_bit(NETFS_SREQ_CLEAR_TAIL, &subreq->flags);
 	__clear_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
 
-	if (subreq->start >= inode->i_size)
+	if (subreq->start >= inode->i_size) {
+		__set_bit(NETFS_SREQ_HIT_EOF, &subreq->flags);
+		err = 0;
 		goto out;
+	}
+
+	err = netfs_prepare_read_buffer(subreq, INT_MAX);
+	if (err < 0)
+		return err;
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset,
+			    subreq->len);
 
 	/* We need to fetch the inline data. */
 	mode = ceph_try_to_choose_auth_mds(inode, CEPH_STAT_CAP_INLINE_DATA);
 	req = ceph_mdsc_create_request(mdsc, CEPH_MDS_OP_GETATTR, mode);
-	if (IS_ERR(req)) {
-		err = PTR_ERR(req);
-		goto out;
-	}
+	if (IS_ERR(req))
+		return PTR_ERR(req);
+
 	req->r_ino1 = ci->i_vino;
 	req->r_args.getattr.mask = cpu_to_le32(CEPH_STAT_CAP_INLINE_DATA);
 	req->r_num_caps = 2;
 
 	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
+
 	err = ceph_mdsc_do_request(mdsc, NULL, req);
 	if (err < 0)
 		goto out;
@@ -316,11 +328,11 @@ static bool ceph_netfs_issue_op_inline(struct netfs_io_subrequest *subreq)
 	if (iinfo->inline_version == CEPH_INLINE_NONE) {
 		/* The data got uninlined */
 		ceph_mdsc_put_request(req);
-		return false;
+		return 1;
 	}
 
 	len = min_t(size_t, iinfo->inline_len - subreq->start, subreq->len);
-	err = copy_to_iter(iinfo->inline_data + subreq->start, len, &subreq->io_iter);
+	err = copy_to_iter(iinfo->inline_data + subreq->start, len, &iter);
 	if (err == 0) {
 		err = -EFAULT;
 	} else {
@@ -333,23 +345,7 @@ out:
 	subreq->error = err;
 	trace_netfs_sreq(subreq, netfs_sreq_trace_io_progress);
 	netfs_read_subreq_terminated(subreq);
-	return true;
-}
-
-static int ceph_netfs_prepare_read(struct netfs_io_subrequest *subreq)
-{
-	struct netfs_io_request *rreq = subreq->rreq;
-	struct inode *inode = rreq->inode;
-	struct ceph_inode_info *ci = ceph_inode(inode);
-	struct ceph_fs_client *fsc = ceph_inode_to_fs_client(inode);
-	u64 objno, objoff;
-	u32 xlen;
-
-	/* Truncate the extent at the end of the current block */
-	ceph_calc_file_object_mapping(&ci->i_layout, subreq->start, subreq->len,
-				      &objno, &objoff, &xlen);
-	rreq->io_streams[0].sreq_max_len = umin(xlen, fsc->mount_options->rsize);
-	return 0;
+	return -EIOCBQUEUED;
 }
 
 static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
@@ -361,26 +357,34 @@ static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 	struct ceph_client *cl = fsc->client;
 	struct ceph_osd_request *req = NULL;
 	struct ceph_vino vino = ceph_vino(inode);
-	int err;
-	u64 len;
+	struct iov_iter iter;
+	u64 objno, objoff, len, off = subreq->start;
+	u32 maxlen;
+	int err = -EIO;
 	bool sparse = IS_ENCRYPTED(inode) || ceph_test_mount_opt(fsc, SPARSEREAD);
-	u64 off = subreq->start;
 	int extent_cnt;
 
-	if (ceph_inode_is_shutdown(inode)) {
-		err = -EIO;
-		goto out;
+	if (ceph_inode_is_shutdown(inode))
+		goto failed_noput;
+
+	if (ceph_has_inline_data(ci)) {
+		err = ceph_netfs_issue_op_inline(subreq);
+		if (err != 1)
+			goto failed_noput;
 	}
 
-	if (ceph_has_inline_data(ci) && ceph_netfs_issue_op_inline(subreq))
-		return;
+	/* Truncate the extent at the end of the current block */
+	ceph_calc_file_object_mapping(&ci->i_layout, subreq->start, subreq->len,
+				      &objno, &objoff, &maxlen);
+	maxlen = umin(maxlen, fsc->mount_options->rsize);
+	len = umin(subreq->len, maxlen);
+	subreq->len = len;
 
 	// TODO: This rounding here is slightly dodgy.  It *should* work, for
 	// now, as the cache only deals in blocks that are a multiple of
 	// PAGE_SIZE and fscrypt blocks are at most PAGE_SIZE.  What needs to
 	// happen is for the fscrypt driving to be moved into netfslib and the
 	// data in the cache also to be stored encrypted.
-	len = subreq->len;
 	ceph_fscrypt_adjust_off_and_len(inode, &off, &len);
 
 	req = ceph_osdc_new_request(&fsc->client->osdc, &ci->i_layout, vino,
@@ -389,19 +393,26 @@ static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 			ci->i_truncate_size, false);
 	if (IS_ERR(req)) {
 		err = PTR_ERR(req);
-		req = NULL;
-		goto out;
+		goto failed_noput;
 	}
 
 	if (sparse) {
 		extent_cnt = __ceph_sparse_read_ext_count(inode, len);
 		err = ceph_alloc_sparse_ext_map(&req->r_ops[0], extent_cnt);
 		if (err)
-			goto out;
+			goto failed;
 	}
 
 	doutc(cl, "%llx.%llx pos=%llu orig_len=%zu len=%llu\n",
 	      ceph_vinop(inode), subreq->start, subreq->len, len);
+
+	err = netfs_prepare_read_buffer(subreq, INT_MAX);
+	if (err < 0)
+		goto failed;
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset,
+			    subreq->len);
 
 	/*
 	 * FIXME: For now, use CEPH_OSD_DATA_TYPE_PAGES instead of _ITER for
@@ -421,13 +432,11 @@ static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 		 * ceph_msg_data_cursor_init() triggers BUG_ON() in the case
 		 * if msg->sparse_read_total > msg->data_length.
 		 */
-		subreq->io_iter.count = len;
-
-		err = iov_iter_get_pages_alloc2(&subreq->io_iter, &pages, len, &page_off);
+		err = iov_iter_get_pages_alloc2(&iter, &pages, len, &page_off);
 		if (err < 0) {
 			doutc(cl, "%llx.%llx failed to allocate pages, %d\n",
 			      ceph_vinop(inode), err);
-			goto out;
+			goto eio;
 		}
 
 		/* should always give us a page-aligned read */
@@ -438,12 +447,10 @@ static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 		osd_req_op_extent_osd_data_pages(req, 0, pages, len, 0, false,
 						 false);
 	} else {
-		osd_req_op_extent_osd_iter(req, 0, &subreq->io_iter);
+		osd_req_op_extent_osd_iter(req, 0, &iter);
 	}
-	if (!ceph_inc_osd_stopping_blocker(fsc->mdsc)) {
-		err = -EIO;
-		goto out;
-	}
+	if (!ceph_inc_osd_stopping_blocker(fsc->mdsc))
+		goto eio;
 	req->r_callback = finish_netfs_read;
 	req->r_priv = subreq;
 	req->r_inode = inode;
@@ -451,19 +458,21 @@ static void ceph_netfs_issue_read(struct netfs_io_subrequest *subreq)
 
 	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 	ceph_osdc_start_request(req->r_osdc, req);
-out:
 	ceph_osdc_put_request(req);
-	if (err) {
-		subreq->error = err;
-		netfs_read_subreq_terminated(subreq);
-	}
-	doutc(cl, "%llx.%llx result %d\n", ceph_vinop(inode), err);
+	doutc(cl, "%llx.%llx result -EIOCBQUEUED\n", ceph_vinop(inode));
+	return;
+eio:
+	err = -EIO;
+failed:
+	ceph_osdc_put_request(req);
+failed_noput:
+	subreq->error = err;
+	return netfs_read_subreq_terminated(subreq);
 }
 
 static int ceph_init_request(struct netfs_io_request *rreq, struct file *file)
 {
 	struct inode *inode = rreq->inode;
-	struct ceph_fs_client *fsc = ceph_inode_to_fs_client(inode);
 	struct ceph_client *cl = ceph_inode_to_client(inode);
 	int got = 0, want = CEPH_CAP_FILE_CACHE;
 	struct ceph_netfs_request_data *priv;
@@ -515,7 +524,6 @@ static int ceph_init_request(struct netfs_io_request *rreq, struct file *file)
 
 	priv->caps = got;
 	rreq->netfs_priv = priv;
-	rreq->io_streams[0].sreq_max_len = fsc->mount_options->rsize;
 
 out:
 	if (ret < 0) {
@@ -543,7 +551,6 @@ static void ceph_netfs_free_request(struct netfs_io_request *rreq)
 const struct netfs_request_ops ceph_netfs_ops = {
 	.init_request		= ceph_init_request,
 	.free_request		= ceph_netfs_free_request,
-	.prepare_read		= ceph_netfs_prepare_read,
 	.issue_read		= ceph_netfs_issue_read,
 	.expand_readahead	= ceph_netfs_expand_readahead,
 	.check_write_begin	= ceph_netfs_check_write_begin,

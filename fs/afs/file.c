@@ -337,6 +337,7 @@ static void afs_issue_read(struct netfs_io_subrequest *subreq)
 	struct afs_operation *op;
 	struct afs_vnode *vnode = AFS_FS_I(subreq->rreq->inode);
 	struct key *key = subreq->rreq->netfs_priv;
+	int ret;
 
 	_enter("%s{%llx:%llu.%u},%x,,,",
 	       vnode->volume->name,
@@ -345,11 +346,14 @@ static void afs_issue_read(struct netfs_io_subrequest *subreq)
 	       vnode->fid.unique,
 	       key_serial(key));
 
+	ret = netfs_prepare_read_buffer(subreq, INT_MAX);
+	if (ret < 0)
+		goto failed;
+
 	op = afs_alloc_operation(key, vnode->volume);
 	if (IS_ERR(op)) {
-		subreq->error = PTR_ERR(op);
-		netfs_read_subreq_terminated(subreq);
-		return;
+		ret = PTR_ERR(op);
+		goto failed;
 	}
 
 	afs_op_set_vnode(op, 0, vnode);
@@ -364,20 +368,21 @@ static void afs_issue_read(struct netfs_io_subrequest *subreq)
 		op->flags |= AFS_OPERATION_ASYNC;
 
 		if (!afs_begin_vnode_operation(op)) {
-			subreq->error = afs_put_operation(op);
-			netfs_read_subreq_terminated(subreq);
-			return;
+			ret = afs_put_operation(op);
+			goto failed;
 		}
 
-		if (!afs_select_fileserver(op)) {
-			afs_end_read(op);
-			return;
-		}
+		if (!afs_select_fileserver(op))
+			afs_end_read(op); /* Error recorded here. */
 
 		afs_issue_read_call(op);
 	} else {
 		afs_do_sync_operation(op);
 	}
+	return;
+failed:
+	subreq->error = ret;
+	return netfs_read_subreq_terminated(subreq);
 }
 
 static int afs_init_request(struct netfs_io_request *rreq, struct file *file)
@@ -470,7 +475,7 @@ const struct netfs_request_ops afs_req_ops = {
 	.update_i_size		= afs_update_i_size,
 	.invalidate_cache	= afs_netfs_invalidate_cache,
 	.begin_writeback	= afs_begin_writeback,
-	.prepare_write		= afs_prepare_write,
+	.estimate_write		= afs_estimate_write,
 	.issue_write		= afs_issue_write,
 	.retry_request		= afs_retry_request,
 };

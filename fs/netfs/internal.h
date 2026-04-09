@@ -22,10 +22,9 @@
 /*
  * buffered_read.c
  */
-int netfs_read_query_cache(struct netfs_io_request *rreq,
-			   struct fscache_occupancy *occ);
-void netfs_queue_read(struct netfs_io_request *rreq,
-		      struct netfs_io_subrequest *subreq);
+void netfs_read_query_cache(struct netfs_io_request *rreq,
+			    struct fscache_occupancy *occ);
+struct netfs_io_subrequest *netfs_alloc_read_subrequest(struct netfs_io_request *rreq);
 void netfs_cache_read_terminated(void *priv, ssize_t transferred_or_error);
 int netfs_prefetch_for_write(struct file *file, struct folio *folio,
 			     size_t offset, size_t len);
@@ -35,6 +34,18 @@ int netfs_prefetch_for_write(struct file *file, struct folio *folio,
  */
 void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
 			 loff_t pos, size_t copied);
+
+/*
+ * direct_read.c
+ */
+int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
+					 unsigned int max_segs);
+
+/*
+ * direct_write.c
+ */
+int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
+					  unsigned int max_segs);
 
 /*
  * main.c
@@ -72,6 +83,8 @@ struct bvecq *netfs_buffer_make_space(struct netfs_io_request *rreq,
 				      enum netfs_bvecq_trace trace);
 void netfs_wake_collector(struct netfs_io_request *rreq);
 void netfs_subreq_clear_in_progress(struct netfs_io_subrequest *subreq);
+int netfs_wait_for_in_progress_subreq(struct netfs_io_request *rreq,
+				      struct netfs_io_subrequest *subreq);
 void netfs_wait_for_in_progress_stream(struct netfs_io_request *rreq,
 				       struct netfs_io_stream *stream);
 ssize_t netfs_wait_for_read(struct netfs_io_request *rreq);
@@ -117,15 +130,52 @@ void netfs_cache_read_terminated(void *priv, ssize_t transferred_or_error);
 /*
  * read_pgpriv2.c
  */
+#ifdef CONFIG_NETFS_PGPRIV2
+int netfs_prepare_pgpriv2_write_buffer(struct netfs_io_subrequest *subreq,
+				       unsigned int max_segs);
 void netfs_pgpriv2_copy_to_cache(struct netfs_io_request *rreq, struct folio *folio);
 void netfs_pgpriv2_end_copy_to_cache(struct netfs_io_request *rreq);
 bool netfs_pgpriv2_unlock_copied_folios(struct netfs_io_request *wreq);
+static inline bool netfs_using_pgpriv2(const struct netfs_io_request *rreq)
+{
+	return test_bit(NETFS_RREQ_USE_PGPRIV2, &rreq->flags);
+}
+#else
+static inline int netfs_prepare_pgpriv2_write_buffer(struct netfs_io_subrequest *subreq,
+						     unsigned int max_segs)
+{
+	return -EIO;
+}
+static inline void netfs_pgpriv2_copy_to_cache(struct netfs_io_request *rreq, struct folio *folio)
+{
+}
+static inline void netfs_pgpriv2_end_copy_to_cache(struct netfs_io_request *rreq)
+{
+}
+static inline bool netfs_pgpriv2_unlock_copied_folios(struct netfs_io_request *wreq)
+{
+	return true;
+}
+static inline bool netfs_using_pgpriv2(const struct netfs_io_request *rreq)
+{
+	return false;
+}
+#endif
 
 /*
  * read_retry.c
  */
+int netfs_prepare_buffered_read_retry_buffer(struct netfs_io_subrequest *subreq,
+					     unsigned int max_segs);
+int netfs_reset_for_read_retry(struct netfs_io_subrequest *subreq);
 void netfs_retry_reads(struct netfs_io_request *rreq);
 void netfs_unlock_abandoned_read_pages(struct netfs_io_request *rreq);
+
+/*
+ * read_single.c
+ */
+int netfs_prepare_read_single_buffer(struct netfs_io_subrequest *subreq,
+				     unsigned int max_segs);
 
 /*
  * stats.c
@@ -198,30 +248,25 @@ void netfs_write_collection_worker(struct work_struct *work);
 /*
  * write_issue.c
  */
+struct netfs_writethrough;
 struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 						struct file *file,
 						loff_t start,
 						enum netfs_io_origin origin);
-void netfs_prepare_write(struct netfs_io_request *wreq,
-			 struct netfs_io_stream *stream,
-			 loff_t start);
-void netfs_reissue_write(struct netfs_io_stream *stream,
-			 struct netfs_io_subrequest *subreq);
-void netfs_issue_write(struct netfs_io_request *wreq,
-		       struct netfs_io_stream *stream);
-size_t netfs_advance_write(struct netfs_io_request *wreq,
-			   struct netfs_io_stream *stream,
-			   loff_t start, size_t len, bool to_eof);
-struct netfs_io_request *netfs_begin_writethrough(struct kiocb *iocb, size_t len);
-int netfs_advance_writethrough(struct netfs_io_request *wreq, struct writeback_control *wbc,
-			       struct folio *folio, size_t copied, bool to_page_end,
-			       struct folio **writethrough_cache);
-ssize_t netfs_end_writethrough(struct netfs_io_request *wreq, struct writeback_control *wbc,
-			       struct folio *writethrough_cache);
+struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wreq,
+						     struct netfs_io_stream *stream);
+struct netfs_writethrough *netfs_begin_writethrough(struct kiocb *iocb, size_t len);
+int netfs_advance_writethrough(struct netfs_writethrough *wthru,
+			       struct writeback_control *wbc,
+			       struct folio *folio, size_t copied, bool to_page_end);
+ssize_t netfs_end_writethrough(struct netfs_writethrough *wthru,
+			       struct writeback_control *wbc);
 
 /*
  * write_retry.c
  */
+int netfs_prepare_write_retry_buffer(struct netfs_io_subrequest *subreq,
+				     unsigned int max_segs);
 void netfs_retry_writes(struct netfs_io_request *wreq);
 
 /*
@@ -302,6 +347,25 @@ static inline bool netfs_check_subreq_in_progress(const struct netfs_io_subreque
 {
 	/* Order read of flags before read of anything else, such as error. */
 	return test_bit_acquire(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
+}
+
+/*
+ * Indicate that we've generated and queued all the subrequests we're going to.
+ */
+static inline void netfs_all_subreqs_queued(struct netfs_io_request *rreq)
+{
+	smp_wmb(); /* Write lists before ALL_QUEUED. */
+	set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
+	trace_netfs_rreq(rreq, netfs_rreq_trace_all_queued);
+}
+
+/*
+ * Query if all subrequests are queued.
+ */
+static inline bool netfs_are_all_subreqs_queued(const struct netfs_io_request *rreq)
+{
+	/* Read lists after ALL_QUEUED. */
+	return test_bit_acquire(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
 }
 
 /*

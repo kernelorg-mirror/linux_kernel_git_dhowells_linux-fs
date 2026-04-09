@@ -16,6 +16,32 @@
 #include <linux/netfs.h>
 #include "internal.h"
 
+int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
+					 unsigned int max_segs)
+{
+	struct netfs_io_request *rreq = subreq->rreq;
+	struct netfs_io_stream *stream = &rreq->io_streams[0];
+	size_t len;
+
+	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
+	bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
+	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
+			  &subreq->nr_segs);
+
+	if (len < subreq->len) {
+		subreq->len = len;
+		trace_netfs_sreq(subreq, netfs_sreq_trace_limited);
+	}
+
+	stream->buffered   -= subreq->len;
+	stream->issue_from += subreq->len;
+	rreq->submitted = stream->issue_from;
+
+	if (stream->buffered == 0)
+		netfs_all_subreqs_queued(rreq);
+	return 0;
+}
+
 /*
  * Perform a read to a buffer from the server, slicing up the region to be read
  * according to the network rsize.
@@ -23,16 +49,13 @@
 static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 {
 	struct netfs_io_stream *stream = &rreq->io_streams[0];
-	unsigned long long start = rreq->start;
-	ssize_t size = rreq->len;
-	int ret;
 
-	bvecq_pos_set(&rreq->dispatch_cursor, &rreq->load_cursor);
+	bvecq_pos_transfer(&stream->dispatch_cursor, &rreq->load_cursor);
 
 	do {
 		struct netfs_io_subrequest *subreq;
 
-		subreq = netfs_alloc_subrequest(rreq);
+		subreq = netfs_alloc_read_subrequest(rreq);
 		if (!subreq) {
 			/* Stash the error in the request if there's not
 			 * already an error set.
@@ -42,37 +65,10 @@ static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 		}
 
 		subreq->source	= NETFS_DOWNLOAD_FROM_SERVER;
-		subreq->start	= start;
-		subreq->len	= size;
-
-		netfs_queue_read(rreq, subreq);
+		subreq->start	= stream->issue_from;
+		subreq->len	= stream->buffered;
 
 		netfs_stat(&netfs_n_rh_download);
-		if (rreq->netfs_ops->prepare_read) {
-			ret = rreq->netfs_ops->prepare_read(subreq);
-			if (ret < 0) {
-				netfs_cancel_read(subreq, ret);
-				break;
-			}
-		}
-
-		bvecq_pos_set(&subreq->dispatch_pos, &rreq->dispatch_cursor);
-		bvecq_pos_set(&subreq->content, &rreq->dispatch_cursor);
-		subreq->len = bvecq_slice(&rreq->dispatch_cursor,
-					  umin(size, stream->sreq_max_len),
-					  stream->sreq_max_segs,
-					  &subreq->nr_segs);
-
-		size -= subreq->len;
-		start += subreq->len;
-		rreq->submitted += subreq->len;
-		if (size <= 0) {
-			smp_wmb(); /* Write lists before ALL_QUEUED. */
-			set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
-		}
-
-		iov_iter_bvec_queue(&subreq->io_iter, ITER_DEST, subreq->content.bvecq,
-				    subreq->content.slot, subreq->content.offset, subreq->len);
 
 		rreq->netfs_ops->issue_read(subreq);
 
@@ -81,15 +77,14 @@ static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 		if (test_bit(NETFS_RREQ_FAILED, &rreq->flags))
 			break;
 		cond_resched();
-	} while (size > 0);
+	} while (stream->buffered > 0);
 
-	if (unlikely(size > 0)) {
-		smp_wmb(); /* Write lists before ALL_QUEUED. */
-		set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
+	if (unlikely(stream->buffered > 0)) {
+		netfs_all_subreqs_queued(rreq);
 		netfs_wake_collector(rreq);
 	}
 
-	bvecq_pos_unset(&rreq->dispatch_cursor);
+	bvecq_pos_unset(&stream->dispatch_cursor);
 }
 
 /*
@@ -140,6 +135,7 @@ static ssize_t netfs_unbuffered_read(struct netfs_io_request *rreq, bool sync)
 ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct netfs_io_request *rreq;
+	struct netfs_io_stream *stream;
 	ssize_t ret;
 	size_t orig_count = iov_iter_count(iter);
 	bool sync = is_sync_kiocb(iocb);
@@ -164,6 +160,8 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	netfs_stat(&netfs_n_rh_dio_read);
 	trace_netfs_read(rreq, rreq->start, rreq->len, netfs_read_trace_dio_read);
 
+	stream = &rreq->io_streams[0];
+
 	/* If this is an async op, we have to keep track of the destination
 	 * buffer for ourselves as the caller's iterator will be trashed when
 	 * we return.
@@ -179,6 +177,8 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 		goto error_put;
 
 	rreq->len = ret;
+	stream->buffered = ret;
+	stream->issue_from = rreq->start;
 
 	// TODO: Set up bounce buffer if needed
 

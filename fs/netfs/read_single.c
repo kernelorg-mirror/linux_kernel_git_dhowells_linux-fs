@@ -16,6 +16,22 @@
 #include <linux/netfs.h>
 #include "internal.h"
 
+int netfs_prepare_read_single_buffer(struct netfs_io_subrequest *subreq,
+				     unsigned int max_segs)
+{
+	struct netfs_io_request *rreq = subreq->rreq;
+	struct netfs_io_stream *stream = &rreq->io_streams[0];
+
+	bvecq_pos_set(&subreq->dispatch_pos, &rreq->load_cursor);
+	bvecq_pos_set(&subreq->content, &subreq->dispatch_pos);
+
+	stream->buffered = 0;
+	stream->issue_from += subreq->len;
+	rreq->submitted = stream->issue_from;
+	netfs_all_subreqs_queued(rreq);
+	return 0;
+}
+
 /**
  * netfs_single_mark_inode_dirty - Mark a single, monolithic object inode dirty
  * @inode: The inode to mark
@@ -58,17 +74,6 @@ static int netfs_single_begin_cache_read(struct netfs_io_request *rreq, struct n
 	return fscache_begin_read_operation(&rreq->cache_resources, netfs_i_cookie(ctx));
 }
 
-static void netfs_single_read_cache(struct netfs_io_request *rreq,
-				    struct netfs_io_subrequest *subreq)
-{
-	struct netfs_cache_resources *cres = &rreq->cache_resources;
-
-	_enter("R=%08x[%x]", rreq->debug_id, subreq->debug_index);
-	netfs_stat(&netfs_n_rh_read);
-	cres->ops->read(cres, subreq->start, &subreq->io_iter, NETFS_READ_HOLE_FAIL,
-			netfs_cache_read_terminated, subreq);
-}
-
 /*
  * Perform a read to a buffer from the cache or the server.  Only a single
  * subreq is permitted as the object must be fetched in a single transaction.
@@ -84,73 +89,74 @@ static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 		.cached_to[1]	= ULLONG_MAX,
 	};
 	struct netfs_io_subrequest *subreq;
-	int ret = 0;
+	int ret;
 
-	subreq = netfs_alloc_subrequest(rreq);
+	netfs_read_query_cache(rreq, &occ);
+
+	subreq = netfs_alloc_read_subrequest(rreq);
 	if (!subreq)
 		return -ENOMEM;
 
-	subreq->source	= NETFS_DOWNLOAD_FROM_SERVER;
 	subreq->start	= 0;
 	subreq->len	= rreq->len;
 
-	bvecq_pos_set(&subreq->dispatch_pos, &rreq->dispatch_cursor);
-	bvecq_pos_set(&subreq->content, &rreq->dispatch_cursor);
-
-	iov_iter_bvec_queue(&subreq->io_iter, ITER_DEST, subreq->content.bvecq,
-			    subreq->content.slot, subreq->content.offset, subreq->len);
-
-	netfs_queue_read(rreq, subreq);
+	trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
 
 	/* Try to use the cache if the cache content matches the size of the
 	 * remote file.
 	 */
-	netfs_read_query_cache(rreq, &occ);
 	if (occ.cached_from[0] == 0 &&
-	    occ.cached_to[0] == rreq->len)
+	    occ.cached_to[0] == rreq->len) {
+		struct netfs_cache_resources *cres = &rreq->cache_resources;
+
 		subreq->source = NETFS_READ_FROM_CACHE;
+		netfs_stat(&netfs_n_rh_read);
+		cres->ops->issue_read(subreq);
+		ret = netfs_wait_for_in_progress_subreq(rreq, subreq);
+		if (ret == -ENOMEM)
+			goto cancel;
+		if (ret == 0)
+			goto success;
 
-	switch (subreq->source) {
-	case NETFS_DOWNLOAD_FROM_SERVER:
-		netfs_stat(&netfs_n_rh_download);
-		if (rreq->netfs_ops->prepare_read) {
-			ret = rreq->netfs_ops->prepare_read(subreq);
-			if (ret < 0)
-				goto cancel;
-		}
-
-		smp_wmb(); /* Write lists before ALL_QUEUED. */
-		set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
-		rreq->netfs_ops->issue_read(subreq);
-		rreq->submitted += subreq->len;
-		break;
-	case NETFS_READ_FROM_CACHE:
-		if (rreq->cache_resources.ops->prepare_read) {
-			ret = rreq->cache_resources.ops->prepare_read(subreq);
-			if (ret < 0)
-				goto cancel;
-		}
-
-		smp_wmb(); /* Write lists before ALL_QUEUED. */
-		set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
-		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
-		netfs_single_read_cache(rreq, subreq);
-		rreq->submitted += subreq->len;
-		ret = 0;
-		break;
-	default:
-		pr_warn("Unexpected single-read source %u\n", subreq->source);
-		WARN_ON_ONCE(true);
-		ret = -EIO;
-		goto cancel;
+		/* Didn't manage to retrieve from the cache, so toss it to the
+		 * server instead.
+		 */
+		if (netfs_reset_for_read_retry(subreq) < 0)
+			goto cancel;
 	}
 
-	return ret;
+	__set_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags);
+
+	/* Try to send it to the cache. */
+	for (;;) {
+		subreq->source = NETFS_DOWNLOAD_FROM_SERVER;
+		netfs_stat(&netfs_n_rh_download);
+		rreq->netfs_ops->issue_read(subreq);
+		ret = netfs_wait_for_in_progress_subreq(rreq, subreq);
+		if (ret == 0)
+			goto success;
+		if (ret == -ENOMEM)
+			goto cancel;
+		if (ret != -EAGAIN)
+			goto failed;
+		if (netfs_reset_for_read_retry(subreq) < 0)
+			goto cancel;
+	}
+
+success:
+	rreq->transferred = subreq->transferred;
+	list_del_init(&subreq->rreq_link);
+	netfs_put_subrequest(subreq, netfs_sreq_trace_put_consumed);
+	return 0;
 cancel:
-	netfs_cancel_read(subreq, ret);
-	smp_wmb(); /* Write lists before ALL_QUEUED. */
-	set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
-	netfs_wake_collector(rreq);
+	rreq->error = ret;
+	list_del_init(&subreq->rreq_link);
+	netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
+	return ret;
+failed:
+	rreq->error = ret;
+	list_del_init(&subreq->rreq_link);
+	netfs_put_subrequest(subreq, netfs_sreq_trace_put_failed);
 	return ret;
 }
 
@@ -182,7 +188,7 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
 
-	ret = netfs_extract_iter(iter, rreq->len, INT_MAX, 0, &rreq->dispatch_cursor.bvecq, 0);
+	ret = netfs_extract_iter(iter, rreq->len, INT_MAX, 0, &rreq->load_cursor.bvecq, 0);
 	if (ret < 0)
 		goto cleanup_free;
 
@@ -193,9 +199,29 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 	netfs_stat(&netfs_n_rh_read_single);
 	trace_netfs_read(rreq, 0, rreq->len, netfs_read_trace_read_single);
 
-	netfs_single_dispatch_read(rreq);
+	ret = netfs_single_dispatch_read(rreq);
 
-	ret = netfs_wait_for_read(rreq);
+	trace_netfs_rreq(rreq, netfs_rreq_trace_complete);
+	if (ret == 0) {
+		task_io_account_read(rreq->transferred);
+
+		if (test_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags) &&
+		    fscache_resources_valid(&rreq->cache_resources)) {
+			trace_netfs_rreq(rreq, netfs_rreq_trace_dirty);
+			netfs_single_mark_inode_dirty(rreq->inode);
+		}
+		ret = rreq->transferred;
+	}
+
+	if (rreq->netfs_ops->done)
+		rreq->netfs_ops->done(rreq);
+
+	netfs_wake_rreq_flag(rreq, NETFS_RREQ_IN_PROGRESS, netfs_rreq_trace_wake_ip);
+	/* As we cleared NETFS_RREQ_IN_PROGRESS, we acquired its ref. */
+	netfs_put_request(rreq, netfs_rreq_trace_put_work_ip);
+
+	trace_netfs_rreq(rreq, netfs_rreq_trace_done);
+
 	netfs_put_request(rreq, netfs_rreq_trace_put_return);
 	return ret;
 

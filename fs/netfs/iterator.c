@@ -102,14 +102,14 @@ ssize_t netfs_extract_iter(struct iov_iter *orig, size_t max_len, size_t max_pag
 			}
 
 			if (got == 0) {
-				pr_err("extract_pages gave nothing from %zu, %zu\n",
+				pr_err("extract_pages gave nothing from %zx, %zx\n",
 				       extracted, max_len);
 				ret = -EIO;
 				goto out;
 			}
 
 			if (WARN(got > max_len,
-				 "%s: extract_pages overrun %zd > %zu bytes\n",
+				 "%s: extract_pages overrun %zx > %zx bytes\n",
 				 __func__, got, max_len)) {
 				ret = -EIO;
 				break;

@@ -248,8 +248,8 @@ static ssize_t afs_do_read_single(struct afs_vnode *dvnode, struct file *file)
 	if (dvnode->directory_size < i_size) {
 		size_t cur_size = dvnode->directory_size;
 
-		ret = bvecq_expand_buffer(&dvnode->directory, &cur_size, i_size,
-					  GFP_KERNEL);
+		ret = bvecq_expand_buffer(&dvnode->directory, &cur_size,
+					  round_up(i_size, PAGE_SIZE), GFP_KERNEL);
 		dvnode->directory_size = cur_size;
 		if (ret < 0)
 			return ret;
@@ -2217,11 +2217,10 @@ static int afs_dir_writepages(struct address_space *mapping,
 	}
 
 	if (test_bit(AFS_VNODE_DIR_VALID, &dvnode->flags)) {
+		size_t len = i_size_read(&dvnode->netfs.inode);
 		iov_iter_bvec_queue(&iter, ITER_SOURCE, dvnode->directory, 0, 0,
-				    i_size_read(&dvnode->netfs.inode));
-		ret = netfs_writeback_single(mapping, wbc, &iter);
-		if (ret == 1)
-			ret = 0; /* Skipped write due to lock conflict. */
+				    round_up(len, PAGE_SIZE));
+		ret = netfs_writeback_single(mapping, wbc, &iter, len);
 	}
 
 	up_read(&dvnode->validate_lock);

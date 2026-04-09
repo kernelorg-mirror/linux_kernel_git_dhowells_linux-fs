@@ -66,7 +66,7 @@ struct netfs_inode {
 #endif
 	struct mutex		wb_lock;	/* Writeback serialisation */
 	loff_t			_remote_i_size;	/* Size of the remote file */
-	loff_t			_zero_point;	/* Size after which we assume there's no data
+	unsigned long long	_zero_point;	/* Size after which we assume there's no data
 						 * on the server */
 	atomic_t		io_count;	/* Number of outstanding reqs */
 	unsigned long		flags;
@@ -127,24 +127,38 @@ static inline struct netfs_group *netfs_folio_group(struct folio *folio)
 }
 
 /*
+ * Estimate of maximum write subrequest for writeback.  The filesystem is
+ * responsible for filling this in when called from ->estimate_write(), though
+ * netfslib will preset infinite defaults.
+ */
+struct netfs_write_estimate {
+	unsigned long long	issue_at;	/* Point at which we must submit */
+	int			max_segs;	/* Max number of segments in a single RPC */
+};
+
+/*
  * Stream of I/O subrequests going to a particular destination, such as the
  * server or the local cache.  This is mainly intended for writing where we may
  * have to write to multiple destinations concurrently.
  */
 struct netfs_io_stream {
-	/* Submission tracking */
-	struct netfs_io_subrequest *construct;	/* Op being constructed */
-	size_t			sreq_max_len;	/* Maximum size of a subrequest */
-	unsigned int		sreq_max_segs;	/* 0 or max number of segments in an iterator */
-	unsigned int		submit_off;	/* Folio offset we're submitting from */
-	unsigned int		submit_len;	/* Amount of data left to submit */
-	void (*prepare_write)(struct netfs_io_subrequest *subreq);
+	/* Submission tracking (main dispatch only; not retry) */
+	struct bvecq_pos	dispatch_cursor; /* Point from which buffers are dispatched */
+	unsigned long long	issue_from;	/* Current issue point */
+	size_t			buffered;	/* Amount in buffer */
+	u8			applicable;	/* What sources are applicable (NOTE_* mask) */
+	bool			buffering;	/* T if buffering on this stream */
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
+	atomic64_t		issued_to;	/* Point to which can be considered issued */
+
 	/* Collection tracking */
 	struct list_head	subrequests;	/* Contributory I/O operations */
 	unsigned long long	collected_to;	/* Position we've collected results to */
 	size_t			transferred;	/* The amount transferred from this stream */
-	unsigned short		error;		/* Aggregate error for the stream */
+	short			error;		/* Aggregate error for the stream */
 	enum netfs_io_source	source;		/* Where to read from/write to */
 	unsigned char		stream_nr;	/* Index of stream in parent table */
 	bool			avail;		/* T if stream is available */
@@ -182,14 +196,13 @@ struct netfs_io_subrequest {
 	struct list_head	rreq_link;	/* Link in rreq->subrequests */
 	struct bvecq_pos	dispatch_pos;	/* Bookmark in the combined queue of the start */
 	struct bvecq_pos	content;	/* The (copied) content of the subrequest */
-	struct iov_iter		io_iter;	/* Iterator for this subrequest */
 	unsigned long long	start;		/* Where to start the I/O */
 	size_t			len;		/* Size of the I/O */
 	size_t			transferred;	/* Amount of data transferred */
+	unsigned int		nr_segs;	/* Number of segments in content */
 	refcount_t		ref;
 	short			error;		/* 0 or error that occurred */
 	unsigned short		debug_index;	/* Index in list (for debugging output) */
-	unsigned int		nr_segs;	/* Number of segs in io_iter */
 	u8			retry_count;	/* The number of retries (0 on initial pass) */
 	enum netfs_io_source	source;		/* Where to read from/write to */
 	unsigned char		stream_nr;	/* I/O stream this belongs to */
@@ -198,7 +211,6 @@ struct netfs_io_subrequest {
 #define NETFS_SREQ_CLEAR_TAIL		1	/* Set if the rest of the read should be cleared */
 #define NETFS_SREQ_MADE_PROGRESS	4	/* Set if we transferred at least some data */
 #define NETFS_SREQ_ONDEMAND		5	/* Set if it's from on-demand read mode */
-#define NETFS_SREQ_BOUNDARY		6	/* Set if ends on hard boundary (eg. ceph object) */
 #define NETFS_SREQ_HIT_EOF		7	/* Set if short due to EOF */
 #define NETFS_SREQ_IN_PROGRESS		8	/* Unlocked when the subrequest completes */
 #define NETFS_SREQ_NEED_RETRY		9	/* Set if the filesystem requests a retry */
@@ -246,23 +258,26 @@ struct netfs_io_request {
 	struct netfs_group	*group;		/* Writeback group being written back */
 	struct bvecq		*spare;		/* Advance allocation of bvecq */
 	struct bvecq_pos	load_cursor;	/* Point at which new folios are loaded in */
-	struct bvecq_pos	dispatch_cursor; /* Point from which buffers are dispatched */
 	struct bvecq_pos	collect_cursor;	/* Clear-up point of I/O buffer */
+	struct bvecq_pos	retry_cursor;	/* Point from which retries are dispatched */
 	wait_queue_head_t	waitq;		/* Processor waiter */
 	void			*netfs_priv;	/* Private data for the netfs */
 	void			*netfs_priv2;	/* Private data for the netfs */
-	unsigned long long	last_end;	/* End pos of last folio submitted */
 	unsigned long long	submitted;	/* Amount submitted for I/O so far */
 	unsigned long long	len;		/* Length of the request */
 	size_t			transferred;	/* Amount to be indicated as transferred */
 	long			error;		/* 0 or error that occurred */
 	unsigned long long	i_size;		/* Size of the file */
 	unsigned long long	start;		/* Start position */
-	atomic64_t		issued_to;	/* Write issuer folio cursor */
 	unsigned long long	collected_to;	/* Point we've collected to */
 	unsigned long long	cache_coll_to;	/* Point the cache has collected to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
 	unsigned long long	abandon_to;	/* Position to abandon folios to */
+#ifdef CONFIG_NETFS_PGPRIV2
+	unsigned long long	last_end;	/* End of last folio added */
+#endif
+	unsigned long long	retry_start;	/* Position to retry from */
+	size_t			retry_buffered;	/* Amount of data to retry */
 	const struct folio	*no_unlock_folio; /* Don't unlock this folio after read */
 	unsigned int		debug_id;
 	unsigned int		rsize;		/* Maximum read size (0 for none) */
@@ -280,6 +295,7 @@ struct netfs_io_request {
 #define NETFS_RREQ_FAILED		3	/* The request failed */
 #define NETFS_RREQ_RETRYING		4	/* Set if we're in the retry path */
 #define NETFS_RREQ_SHORT_TRANSFER	5	/* Set if we have a short transfer */
+#define NETFS_RREQ_SAW_ENOMEM		6	/* Set if we encounted ENOMEM */
 #define NETFS_RREQ_CACHE_STOP		8	/* Set to stop caching (ENOBUFS or error) */
 #define NETFS_RREQ_CACHE_ERROR		9	/* Set if we got an error from the cache */
 #define NETFS_RREQ_OFFLOAD_COLLECTION	12	/* Offload collection to workqueue */
@@ -288,8 +304,10 @@ struct netfs_io_request {
 #define NETFS_RREQ_UPLOAD_TO_SERVER	15	/* Need to write to the server */
 #define NETFS_RREQ_USE_IO_ITER		16	/* Use ->io_iter rather than ->i_pages */
 #define NETFS_RREQ_NEED_PUT_RA_REFS	17	/* Need to put the folio refs RA gave us */
+#ifdef CONFIG_NETFS_PGPRIV2
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */
+#endif
 	const struct netfs_request_ops *netfs_ops;
 };
 
@@ -305,7 +323,6 @@ struct netfs_request_ops {
 
 	/* Read request handling */
 	void (*expand_readahead)(struct netfs_io_request *rreq);
-	int (*prepare_read)(struct netfs_io_subrequest *subreq);
 	void (*issue_read)(struct netfs_io_subrequest *subreq);
 	bool (*is_still_valid)(struct netfs_io_request *rreq);
 	int (*check_write_begin)(struct file *file, loff_t pos, unsigned len,
@@ -318,7 +335,9 @@ struct netfs_request_ops {
 
 	/* Write request handling */
 	void (*begin_writeback)(struct netfs_io_request *wreq);
-	void (*prepare_write)(struct netfs_io_subrequest *subreq);
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	void (*retry_request)(struct netfs_io_request *wreq, struct netfs_io_stream *stream);
 	void (*invalidate_cache)(struct netfs_io_request *wreq);
@@ -360,6 +379,14 @@ struct netfs_cache_ops {
 		     netfs_io_terminated_t term_func,
 		     void *term_func_priv);
 
+	/* Estimate the amount of data that can be written in an op. */
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
+
+	/* Read data from the cache for a netfs subrequest. */
+	void (*issue_read)(struct netfs_io_subrequest *subreq);
+
 	/* Write data to the cache from a netfs subrequest. */
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 
@@ -368,25 +395,6 @@ struct netfs_cache_ops {
 				 unsigned long long *_start,
 				 unsigned long long *_len,
 				 unsigned long long i_size);
-
-	/* Prepare a read operation, shortening it to a cached/uncached
-	 * boundary as appropriate.
-	 */
-	int (*prepare_read)(struct netfs_io_subrequest *subreq);
-
-	/* Prepare a write subrequest, working out if we're allowed to do it
-	 * and finding out the maximum amount of data to gather before
-	 * attempting to submit.  If we're not permitted to do it, the
-	 * subrequest should be marked failed.
-	 */
-	void (*prepare_write_subreq)(struct netfs_io_subrequest *subreq);
-
-	/* Prepare a write operation, working out what part of the write we can
-	 * actually do.
-	 */
-	int (*prepare_write)(struct netfs_cache_resources *cres,
-			     loff_t *_start, size_t *_len, size_t upper_len,
-			     loff_t i_size, bool no_space_allocated_yet);
 
 	/* Prepare an on-demand read operation, shortening it to a cached/uncached
 	 * boundary as appropriate.
@@ -399,8 +407,8 @@ struct netfs_cache_ops {
 	/* Query the occupancy of the cache in a region, returning where the
 	 * next chunk of data starts and how long it is.
 	 */
-	int (*query_occupancy)(struct netfs_cache_resources *cres,
-			       struct fscache_occupancy *occ);
+	void (*query_occupancy)(struct netfs_cache_resources *cres,
+				struct fscache_occupancy *occ);
 
 	/* Collect the result of buffered writeback to the cache.  This
 	 * includes copying a read to the cache.  block_type is one of:
@@ -434,10 +442,9 @@ void netfs_single_mark_inode_dirty(struct inode *inode);
 ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_iter *iter);
 int netfs_writeback_single(struct address_space *mapping,
 			   struct writeback_control *wbc,
-			   struct iov_iter *iter);
+			   struct iov_iter *iter, size_t len);
 
 /* Address operations API */
-struct readahead_control;
 void netfs_readahead(struct readahead_control *);
 int netfs_read_folio(struct file *, struct folio *);
 int netfs_write_begin(struct netfs_inode *, struct file *,
@@ -464,7 +471,8 @@ void netfs_put_subrequest(struct netfs_io_subrequest *subreq,
 ssize_t netfs_extract_iter(struct iov_iter *orig, size_t max_len, size_t max_pages,
 			   unsigned long long fpos, struct bvecq **_bvecq_head,
 			   iov_iter_extraction_t extraction_flags);
-void netfs_prepare_write_failed(struct netfs_io_subrequest *subreq);
+int netfs_prepare_read_buffer(struct netfs_io_subrequest *subreq, unsigned int max_segs);
+int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq, unsigned int max_segs);
 void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error);
 
 int netfs_start_io_read(struct inode *inode);

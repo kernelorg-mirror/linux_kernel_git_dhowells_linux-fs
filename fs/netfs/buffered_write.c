@@ -95,8 +95,8 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		.range_start	= iocb->ki_pos,
 		.range_end	= iocb->ki_pos + iter->count,
 	};
-	struct netfs_io_request *wreq = NULL;
-	struct folio *folio = NULL, *writethrough = NULL;
+	struct netfs_writethrough *writethrough = NULL;
+	struct folio *folio = NULL;
 	unsigned int bdp_flags = (iocb->ki_flags & IOCB_NOWAIT) ? BDP_ASYNC : 0;
 	ssize_t written = 0, ret, ret2;
 	loff_t pos = iocb->ki_pos;
@@ -113,15 +113,13 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 			goto out;
 		}
 
-		wreq = netfs_begin_writethrough(iocb, iter->count);
-		if (IS_ERR(wreq)) {
+		writethrough = netfs_begin_writethrough(iocb, iter->count);
+		if (IS_ERR(writethrough)) {
 			wbc_detach_inode(&wbc);
-			ret = PTR_ERR(wreq);
-			wreq = NULL;
+			ret = PTR_ERR(writethrough);
+			writethrough = NULL;
 			goto out;
 		}
-		if (!is_sync_kiocb(iocb))
-			wreq->iocb = iocb;
 		netfs_stat(&netfs_n_wh_writethrough);
 	} else {
 		netfs_stat(&netfs_n_wh_buffered_write);
@@ -387,14 +385,15 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 		pos += copied;
 		written += copied;
 
-		if (likely(!wreq)) {
+		if (likely(!writethrough)) {
 			folio_mark_dirty(folio);
 			folio_unlock(folio);
 		} else {
-			netfs_advance_writethrough(wreq, &wbc, folio, copied,
-						   offset + copied == flen,
-						   &writethrough);
+			ret = netfs_advance_writethrough(writethrough, &wbc, folio, copied,
+							 offset + copied == flen);
 			/* Folio unlocked */
+			if (ret < 0)
+				break;
 		}
 	retry:
 		folio_put(folio);
@@ -417,8 +416,8 @@ out:
 			ctx->ops->post_modify(inode);
 	}
 
-	if (unlikely(wreq)) {
-		ret2 = netfs_end_writethrough(wreq, &wbc, writethrough);
+	if (unlikely(writethrough)) {
+		ret2 = netfs_end_writethrough(writethrough, &wbc);
 		wbc_detach_inode(&wbc);
 		if (ret2 == -EIOCBQUEUED)
 			return ret2;
