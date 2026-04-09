@@ -27,9 +27,13 @@
  */
 static void netfs_clear_unread(struct netfs_io_subrequest *subreq)
 {
-	netfs_reset_iter(subreq);
-	WARN_ON_ONCE(subreq->len - subreq->transferred != iov_iter_count(&subreq->io_iter));
-	iov_iter_zero(iov_iter_count(&subreq->io_iter), &subreq->io_iter);
+	struct iov_iter iter;
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
+	iov_iter_advance(&iter, subreq->transferred);
+	iov_iter_zero(subreq->len, &iter);
+
 	if (subreq->start + subreq->transferred >= subreq->rreq->i_size)
 		__set_bit(NETFS_SREQ_HIT_EOF, &subreq->flags);
 }
@@ -40,11 +44,11 @@ static void netfs_clear_unread(struct netfs_io_subrequest *subreq)
  * dirty and let writeback handle it.
  */
 static void netfs_unlock_read_folio(struct netfs_io_request *rreq,
-				    struct folio_queue *folioq,
+				    struct bvecq *bvecq,
 				    int slot)
 {
 	struct netfs_folio *finfo;
-	struct folio *folio = folioq_folio(folioq, slot);
+	struct folio *folio = page_folio(bvecq->bv[slot].bv_page);
 
 	if (unlikely(folio_pos(folio) < rreq->abandon_to)) {
 		trace_netfs_folio(folio, netfs_folio_trace_abandon);
@@ -75,7 +79,7 @@ static void netfs_unlock_read_folio(struct netfs_io_request *rreq,
 			trace_netfs_folio(folio, netfs_folio_trace_read_done);
 		}
 
-		folioq_clear(folioq, slot);
+		bvecq->bv[slot].bv_page = NULL;
 	} else {
 		// TODO: Use of PG_private_2 is deprecated.
 		if (test_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags))
@@ -91,7 +95,7 @@ just_unlock:
 		folio_unlock(folio);
 	}
 
-	folioq_clear(folioq, slot);
+	bvecq->bv[slot].bv_page = NULL;
 }
 
 /*
@@ -100,23 +104,14 @@ just_unlock:
 static void netfs_read_unlock_folios(struct netfs_io_request *rreq,
 				     unsigned int *notes)
 {
-	struct folio_queue *folioq = rreq->buffer.tail;
+	struct bvecq *bvecq = rreq->collect_cursor.bvecq;
 	unsigned long long collected_to = rreq->collected_to;
-	unsigned int slot = rreq->buffer.first_tail_slot;
+	unsigned int slot = rreq->collect_cursor.slot;
 
 	if (rreq->cleaned_to >= rreq->collected_to)
 		return;
 
 	// TODO: Begin decryption
-
-	if (slot >= folioq_nr_slots(folioq)) {
-		folioq = rolling_buffer_delete_spent(&rreq->buffer);
-		if (!folioq) {
-			rreq->front_folio_order = 0;
-			return;
-		}
-		slot = 0;
-	}
 
 	/* We have to wait for readahead refs to have been released before we
 	 * can unlock any folios as the ref-dropper walks i_pages and the only
@@ -131,16 +126,29 @@ static void netfs_read_unlock_folios(struct netfs_io_request *rreq,
 		unsigned int order;
 		size_t fsize;
 
+		/* Clean up the head bvecq segment.  If we clear an entire
+		 * segment, then we can get rid of it provided it's not also
+		 * the tail segment being filled by the issuer.
+		 */
+		if (!bvecq_acquire_slot(bvecq, slot)) {
+			if (!bvecq_delete_spent(&rreq->collect_cursor, slot)) {
+				rreq->front_folio_order = 0;
+				return;
+			}
+			bvecq = rreq->collect_cursor.bvecq;
+			slot  = rreq->collect_cursor.slot;
+		}
+
 		if (*notes & COPY_TO_CACHE)
 			set_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags);
 
-		folio = folioq_folio(folioq, slot);
+		folio = page_folio(bvecq->bv[slot].bv_page);
 		if (WARN_ONCE(!folio_test_locked(folio),
 			      "R=%08x: folio %lx is not locked\n",
 			      rreq->debug_id, folio->index))
 			trace_netfs_folio(folio, netfs_folio_trace_not_locked);
 
-		order = folioq_folio_order(folioq, slot);
+		order = folio_order(folio);
 		rreq->front_folio_order = order;
 		fsize = PAGE_SIZE << order;
 		fpos = folio_pos(folio);
@@ -152,33 +160,19 @@ static void netfs_read_unlock_folios(struct netfs_io_request *rreq,
 		if (collected_to < fend)
 			break;
 
-		netfs_unlock_read_folio(rreq, folioq, slot);
+		netfs_unlock_read_folio(rreq, bvecq, slot);
+		slot++;
 		WRITE_ONCE(rreq->cleaned_to, fpos + fsize);
 		*notes |= MADE_PROGRESS;
 
 		clear_bit(NETFS_RREQ_FOLIO_COPY_TO_CACHE, &rreq->flags);
 
-		/* Clean up the head folioq.  If we clear an entire folioq, then
-		 * we can get rid of it provided it's not also the tail folioq
-		 * being filled by the issuer.
-		 */
-		folioq_clear(folioq, slot);
-		slot++;
-		if (slot >= folioq_nr_slots(folioq)) {
-			folioq = rolling_buffer_delete_spent(&rreq->buffer);
-			if (!folioq)
-				goto done;
-			slot = 0;
-			trace_netfs_folioq(folioq, netfs_trace_folioq_read_progress);
-		}
-
 		if (fpos + fsize >= collected_to)
 			break;
 	}
 
-	rreq->buffer.tail = folioq;
-done:
-	rreq->buffer.first_tail_slot = slot;
+	bvecq_pos_move(&rreq->collect_cursor, bvecq);
+	rreq->collect_cursor.slot = slot;
 }
 
 /*
@@ -355,12 +349,17 @@ static void netfs_rreq_assess_dio(struct netfs_io_request *rreq)
 
 	if (rreq->origin == NETFS_UNBUFFERED_READ ||
 	    rreq->origin == NETFS_DIO_READ) {
-		for (i = 0; i < rreq->direct_bv_count; i++) {
-			flush_dcache_page(rreq->direct_bv[i].bv_page);
-			// TODO: cifs marks pages in the destination buffer
-			// dirty under some circumstances after a read.  Do we
-			// need to do that too?
-			set_page_dirty(rreq->direct_bv[i].bv_page);
+		for (struct bvecq *bq = rreq->collect_cursor.bvecq; bq; bq = bq->next) {
+			unsigned int nr_slots = bvecq_nr_slots_acquire(bq);
+			/* Read the slot count before the slots. */
+
+			for (i = 0; i < nr_slots; i++) {
+				flush_dcache_page(bq->bv[i].bv_page);
+				// TODO: cifs marks pages in the destination buffer
+				// dirty under some circumstances after a read.  Do we
+				// need to do that too?
+				set_page_dirty(bq->bv[i].bv_page);
+			}
 		}
 	}
 
@@ -451,7 +450,15 @@ bool netfs_read_collection(struct netfs_io_request *rreq)
 
 	trace_netfs_rreq(rreq, netfs_rreq_trace_done);
 	netfs_clear_subrequests(rreq);
-	netfs_unlock_abandoned_read_pages(rreq);
+	switch (rreq->origin) {
+	case NETFS_READAHEAD:
+	case NETFS_READPAGE:
+	case NETFS_READ_FOR_WRITE:
+		netfs_unlock_abandoned_read_pages(rreq);
+		break;
+	default:
+		break;
+	}
 	if (unlikely(rreq->copy_to_cache))
 		netfs_pgpriv2_end_copy_to_cache(rreq);
 	return true;

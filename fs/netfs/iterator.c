@@ -80,6 +80,7 @@ ssize_t netfs_extract_iter(struct iov_iter *orig, size_t max_len, size_t max_pag
 		struct bio_vec *bv = bq->bv;
 		do {
 			struct page **pages;
+			unsigned int slot = 0;
 			ssize_t got;
 			size_t offset;
 			size_t space = bq->max_slots - bq->nr_slots;
@@ -120,14 +121,15 @@ ssize_t netfs_extract_iter(struct iov_iter *orig, size_t max_len, size_t max_pag
 			do {
 				size_t len = umin(got, PAGE_SIZE - offset);
 
-				BUG_ON(bq->nr_slots >= bq->max_slots);
+				BUG_ON(slot >= bq->max_slots);
 
-				bvec_set_page(&bq->bv[bq->nr_slots],
-					      *pages++, len, offset);
-				bq->nr_slots++;
+				bvec_set_page(&bq->bv[slot], *pages++, len, offset);
+				slot++;
 				got -= len;
 				offset = 0;
 			} while (got > 0);
+
+			bvecq_filled_to(bq, slot);
 		} while (max_len > 0 && !bvecq_is_full(bq));
 
 		max_pages -= bq->nr_slots;
@@ -138,6 +140,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(netfs_extract_iter);
 
+#if 0
 /**
  * netfs_extract_user_iter - Extract the pages from a user iterator into a bvec
  * @orig: The original iterator
@@ -431,3 +434,4 @@ size_t netfs_limit_iter(const struct iov_iter *iter, size_t start_offset,
 	BUG();
 }
 EXPORT_SYMBOL(netfs_limit_iter);
+#endif
