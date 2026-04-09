@@ -19,6 +19,9 @@
 static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio *folio)
 {
 	struct netfs_io_stream *cache = &creq->io_streams[1];
+	struct bvecq *queue;
+	unsigned int slot;
+	size_t dio_size = PAGE_SIZE;
 	size_t fsize = folio_size(folio), flen = fsize;
 	uoff_t fpos = folio_pos(folio), i_size;
 	bool to_eof = false;
@@ -48,18 +51,37 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 		to_eof = true;
 	}
 
+	flen = round_up(flen, dio_size);
+
 	_debug("folio %zx %zx", flen, fsize);
 
 	trace_netfs_folio(folio, netfs_folio_trace_store_copy);
 
-	/* Attach the folio to the rolling buffer. */
-	if (rolling_buffer_append(&creq->buffer, folio, 0, creq->gfp) < 0) {
-		set_bit(NETFS_RREQ_CANCEL_CACHING, &creq->flags);
-		folio_end_private_2(folio);
-		return;
+	/* Institute a new bvec queue segment if the current one is full or if
+	 * we encounter a discontiguity.  The discontiguity break is important
+	 * when it comes to bulk unlocking folios by file range.
+	 */
+	queue = creq->load_cursor.bvecq;
+	if (bvecq_is_full(queue) ||
+	    (fpos != creq->last_end && creq->last_end > 0 && queue->nr_slots > 0)) {
+		bvecq_buffer_append(&creq->load_cursor, creq->spare);
+		creq->spare = NULL;
+
+		queue = creq->load_cursor.bvecq;
 	}
 
-	cache->submit_extendable_to = fsize;
+	/* Attach the folio to the rolling buffer. */
+	slot = queue->nr_slots;
+	bvec_set_folio(&queue->bv[slot], folio, fsize, 0);
+	trace_netfs_bv_slot(queue, slot);
+	slot++;
+	bvecq_filled_to(queue, slot);
+	creq->load_cursor.slot = slot;
+	creq->load_cursor.offset = 0;
+	creq->last_end = fpos + flen;
+
+	bvecq_pos_nudge(&creq->dispatch_cursor);
+	
 	cache->submit_off = 0;
 	cache->submit_len = flen;
 
@@ -71,10 +93,9 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	do {
 		ssize_t part;
 
-		creq->buffer.iter.iov_offset = cache->submit_off;
+		creq->dispatch_cursor.offset = cache->submit_off;
 
 		atomic64_set(&creq->issued_to, fpos + cache->submit_off);
-		cache->submit_extendable_to = fsize - cache->submit_off;
 		part = netfs_advance_write(creq, cache, fpos + cache->submit_off,
 					   cache->submit_len, to_eof);
 		cache->submit_off += part;
@@ -84,8 +105,7 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 			cache->submit_len -= part;
 	} while (cache->submit_len > 0);
 
-	creq->buffer.iter.iov_offset = 0;
-	rolling_buffer_advance(&creq->buffer, fsize);
+	bvecq_pos_step(&creq->dispatch_cursor);
 	atomic64_set(&creq->issued_to, fpos + fsize);
 
 	if (flen < fsize)
@@ -110,6 +130,11 @@ static struct netfs_io_request *netfs_pgpriv2_begin_copy_to_cache(
 
 	if (!creq->io_streams[1].avail)
 		goto cancel_put;
+
+	if (bvecq_buffer_init(&creq->load_cursor, creq->gfp, false) < 0)
+		goto cancel_put;
+	bvecq_pos_set(&creq->dispatch_cursor, &creq->load_cursor);
+	bvecq_pos_set(&creq->collect_cursor, &creq->dispatch_cursor);
 
 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &creq->flags);
 	trace_netfs_copy2cache(rreq, creq);
@@ -143,6 +168,14 @@ void netfs_pgpriv2_copy_to_cache(struct netfs_io_request *rreq, struct folio *fo
 		return;
 	}
 
+	if (!creq->spare) {
+		creq->spare = bvecq_alloc_one(BVECQ_STD_SLOTS, creq->gfp, false);
+		if (!creq->spare) {
+			set_bit(NETFS_RREQ_CANCEL_CACHING, &creq->flags);
+			return;
+		}
+	}
+
 	trace_netfs_folio(folio, netfs_folio_trace_pgpriv2_copy);
 	netfs_pgpriv2_copy_folio(creq, folio);
 }
@@ -173,22 +206,27 @@ void netfs_pgpriv2_end_copy_to_cache(struct netfs_io_request *rreq)
  */
 bool netfs_pgpriv2_unlock_copied_folios(struct netfs_io_request *creq)
 {
-	struct folio_queue *folioq = creq->buffer.tail;
-	unsigned int slot = creq->buffer.first_tail_slot;
+	struct bvecq *bq = creq->collect_cursor.bvecq;
+	unsigned int slot;
 	uoff_t collected_to = creq->collected_to;
 	bool made_progress = false;
 
-	if (slot >= folioq_nr_slots(folioq)) {
-		folioq = rolling_buffer_delete_spent(&creq->buffer);
-		slot = 0;
-	}
+	slot = creq->collect_cursor.slot;
 
 	for (;;) {
 		struct folio *folio;
 		uoff_t fpos, fend;
 		size_t fsize, flen;
 
-		folio = folioq_folio(folioq, slot);
+		if (!bvecq_acquire_slot(bq, slot)) {
+			creq->collect_cursor.slot = slot;
+			if (!bvecq_delete_spent(&creq->collect_cursor))
+				goto out;
+			bq   = creq->collect_cursor.bvecq;
+			slot = creq->collect_cursor.slot;
+		}
+
+		folio = page_folio(bq->bv[slot].bv_page);
 		if (WARN_ONCE(!folio_test_private_2(folio),
 			      "R=%08x: folio %lx is not marked private_2\n",
 			      creq->debug_id, folio->index))
@@ -211,25 +249,18 @@ bool netfs_pgpriv2_unlock_copied_folios(struct netfs_io_request *creq)
 		creq->cleaned_to = fpos + fsize;
 		made_progress = true;
 
-		/* Clean up the head folioq.  If we clear an entire folioq, then
-		 * we can get rid of it provided it's not also the tail folioq
-		 * being filled by the issuer.
+		/* Clean up the head segment.  If we clear an entire segment,
+		 * then we can get rid of it provided it's not also the tail
+		 * segment being filled by the issuer.
 		 */
-		folioq_clear(folioq, slot);
+		bq->bv[slot].bv_page = NULL;
 		slot++;
-		if (slot >= folioq_nr_slots(folioq)) {
-			folioq = rolling_buffer_delete_spent(&creq->buffer);
-			if (!folioq)
-				goto done;
-			slot = 0;
-		}
 
 		if (fpos + fsize >= collected_to)
 			break;
 	}
 
-	creq->buffer.tail = folioq;
-done:
-	creq->buffer.first_tail_slot = slot;
+	creq->collect_cursor.slot = slot;
+out:
 	return made_progress;
 }

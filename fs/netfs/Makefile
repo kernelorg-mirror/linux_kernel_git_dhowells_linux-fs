@@ -14,7 +14,6 @@ netfs-y := \
 	read_collect.o \
 	read_retry.o \
 	read_single.o \
-	rolling_buffer.o \
 	write_collect.o \
 	write_issue.o \
 	write_retry.o

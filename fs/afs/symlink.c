@@ -245,9 +245,9 @@ int afs_symlink_writepages(struct address_space *mapping,
 
 	if (vnode->directory &&
 	    atomic64_read(&vnode->cb_expires_at) != AFS_NO_CB_PROMISE) {
-		iov_iter_bvec_queue(&iter, ITER_SOURCE, vnode->directory, 0, 0,
-				    i_size_read(&vnode->netfs.inode));
-		ret = netfs_writeback_single(mapping, wbc, &iter);
+		iov_iter_bvec_queue(&iter, ITER_SOURCE, vnode->directory, 0, 0, PAGE_SIZE);
+		ret = netfs_writeback_single(mapping, wbc, &iter,
+					     i_size_read(&vnode->netfs.inode));
 	}
 
 	if (ret == 0) {

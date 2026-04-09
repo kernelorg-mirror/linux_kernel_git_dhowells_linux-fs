@@ -109,9 +109,6 @@ static int __init netfs_init(void)
 {
 	int ret = -ENOMEM;
 
-	if (mempool_init_kmalloc_pool(&netfs_folioq_pool, 100, sizeof(struct folio_queue)) < 0)
-		goto error_folioq_pool;
-
 	if (mempool_init_kmalloc_pool(&netfs_bvecq_pool, 100, BVECQ_STD_SIZE) < 0)
 		goto error_bvecq_pool;
 
@@ -169,8 +166,6 @@ error_reqpool:
 error_req:
 	mempool_exit(&netfs_bvecq_pool);
 error_bvecq_pool:
-	mempool_exit(&netfs_folioq_pool);
-error_folioq_pool:
 	return ret;
 }
 fs_initcall(netfs_init);
@@ -184,6 +179,5 @@ static void __exit netfs_exit(void)
 	mempool_exit(&netfs_request_pool);
 	kmem_cache_destroy(netfs_request_slab);
 	mempool_exit(&netfs_bvecq_pool);
-	mempool_exit(&netfs_folioq_pool);
 }
 module_exit(netfs_exit);

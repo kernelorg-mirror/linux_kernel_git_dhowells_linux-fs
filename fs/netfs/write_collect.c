@@ -165,12 +165,12 @@ end_wb:
 static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 					  unsigned int *notes)
 {
-	struct folio_queue *folioq = wreq->buffer.tail;
-	unsigned int slot = wreq->buffer.first_tail_slot;
+	struct bvecq *bvecq = wreq->collect_cursor.bvecq;
+	unsigned int slot = wreq->collect_cursor.slot;
 	uoff_t collected_to = wreq->collected_to;
 
-	if (WARN_ON_ONCE(!folioq)) {
-		pr_err("[!] Writeback unlock found empty rolling buffer!\n");
+	if (WARN_ON_ONCE(!bvecq)) {
+		pr_err("[!] Writeback unlock found empty buffer!\n");
 		netfs_dump_request(wreq);
 		return;
 	}
@@ -181,20 +181,28 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		return;
 	}
 
-	if (slot >= folioq_nr_slots(folioq)) {
-		folioq = rolling_buffer_delete_spent(&wreq->buffer);
-		if (!folioq)
-			return;
-		slot = 0;
-	}
-
 	for (;;) {
 		struct folio *folio;
 		struct netfs_folio *finfo;
 		uoff_t fpos, fend;
 		size_t fsize, flen;
 
-		folio = folioq_folio(folioq, slot);
+		/* Try to clean up the head of the queue if it appears to be
+		 * used up, but we need to be very careful - the cleanup can
+		 * catch the dispatcher, which could lead to us having nothing
+		 * left in the queue, causing the front and back pointers to
+		 * end up on different tracks.  To avoid this, we must always
+		 * keep at least one segment in the queue.
+		 */
+		if (!bvecq_acquire_slot(bvecq, slot)) {
+			wreq->collect_cursor.slot = slot;
+			if (!bvecq_delete_spent(&wreq->collect_cursor))
+				return;
+			bvecq = wreq->collect_cursor.bvecq;
+			slot  = wreq->collect_cursor.slot;
+		}
+
+		folio = page_folio(bvecq->bv[slot].bv_page);
 		if (WARN_ONCE(!folio_test_writeback(folio),
 			      "R=%08x: folio %lx is not under writeback\n",
 			      wreq->debug_id, folio->index))
@@ -217,26 +225,13 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		wreq->cleaned_to = fpos + fsize;
 		*notes |= MADE_PROGRESS;
 
-		/* Clean up the head folioq.  If we clear an entire folioq, then
-		 * we can get rid of it provided it's not also the tail folioq
-		 * being filled by the issuer.
-		 */
-		folioq_clear(folioq, slot);
+		bvecq->bv[slot].bv_page = NULL;
 		slot++;
-		if (slot >= folioq_nr_slots(folioq)) {
-			folioq = rolling_buffer_delete_spent(&wreq->buffer);
-			if (!folioq)
-				goto done;
-			slot = 0;
-		}
-
 		if (fpos + fsize >= collected_to)
 			break;
 	}
 
-	wreq->buffer.tail = folioq;
-done:
-	wreq->buffer.first_tail_slot = slot;
+	wreq->collect_cursor.slot = slot;
 }
 
 /*
@@ -281,7 +276,8 @@ static void netfs_collect_write_results(struct netfs_io_request *wreq)
 	trace_netfs_rreq(wreq, netfs_rreq_trace_collect);
 
 reassess_streams:
-	issued_to = atomic64_read(&wreq->issued_to);
+	/* Order reading the issued_to point before reading the queue it refers to. */
+	issued_to = atomic64_read_acquire(&wreq->issued_to);
 	smp_rmb();
 	collected_to = ULLONG_MAX;
 	if (wreq->origin == NETFS_WRITEBACK ||
@@ -611,8 +607,12 @@ void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error)
 			 * data is tracked.
 			 */
 			netfs_stat(&netfs_n_wh_write_failed);
-			if (test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags))
-				break;
+			if (test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags)) {
+				/* We don't retry failed cache writes. */
+				__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
+				if (!subreq->error)
+					subreq->error = -ENOBUFS;
+			}
 
 			trace_netfs_failure(wreq, subreq, transferred_or_error, netfs_fail_write);
 			__set_bit(NETFS_SREQ_CANCELLED, &subreq->flags);

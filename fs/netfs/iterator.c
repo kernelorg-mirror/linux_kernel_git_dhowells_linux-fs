@@ -156,6 +156,7 @@ alloc_empty:
 }
 EXPORT_SYMBOL_GPL(netfs_extract_iter);
 
+#if 0
 /**
  * netfs_extract_user_iter - Extract the pages from a user iterator into a bvec
  * @orig: The original iterator
@@ -449,3 +450,4 @@ size_t netfs_limit_iter(const struct iov_iter *iter, size_t start_offset,
 	BUG();
 }
 EXPORT_SYMBOL(netfs_limit_iter);
+#endif
