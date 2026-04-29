@@ -70,6 +70,46 @@ void netfs_update_i_size(struct netfs_inode *ctx, struct inode *inode,
 	spin_unlock(&inode->i_lock);
 }
 
+/*
+ * Deal with sparse writes in situations where the filesystem doesn't support that.
+ */
+static ssize_t netfs_perform_sparse_write(struct kiocb *iocb, struct iov_iter *iter,
+					  struct netfs_group *netfs_group)
+{
+	struct bio_vec bv;
+	struct kiocb ziocb;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	unsigned long long i_size = i_size_read(inode);
+	unsigned long long pos = iocb->ki_pos;
+	ssize_t ret;
+
+	/* Allow the addition of up to 16MiB of zeroes, but after that, no.
+	 * Note that this is entirely arbitrary and should probably be tunable
+	 * and/or a filesystem choice.
+	 */
+	if (pos - i_size > 16 * 1024 * 1024)
+		return -EINVAL;
+
+	ziocb.ki_filp	= iocb->ki_filp;
+	ziocb.ki_pos	= i_size;
+	ziocb.ki_flags	= IOCB_WRITE;
+
+	bvec_set_page(&bv, ZERO_PAGE(0), PAGE_SIZE, 0);
+	do {
+		struct iov_iter ziter;
+
+		iov_iter_bvec(&ziter, ITER_SOURCE, &bv, 1, umin(pos - i_size, PAGE_SIZE));
+		ret = netfs_perform_write(&ziocb, &ziter, netfs_group);
+		if (ret < 0)
+			break;
+		if (ziocb.ki_pos <= i_size)
+			return -EIO;
+		i_size = ziocb.ki_pos;
+	} while (i_size < pos);
+
+	return netfs_perform_write(iocb, iter, netfs_group);
+}
+
 /**
  * netfs_perform_write - Copy data into the pagecache.
  * @iocb: The operation parameters
@@ -105,6 +145,13 @@ ssize_t netfs_perform_write(struct kiocb *iocb, struct iov_iter *iter,
 	loff_t pos = iocb->ki_pos;
 	size_t max_chunk = mapping_max_folio_size(mapping);
 	bool maybe_trouble = false;
+
+	/* If we're not allowed a sparse file, then we need to inject
+	 * zeroed pages.
+	 */
+	if (unlikely(pos > i_size_read(inode)) &&
+	    test_bit(NETFS_ICTX_NO_SPARSE, &ctx->flags))
+		return netfs_perform_sparse_write(iocb, iter, netfs_group);
 
 	if (unlikely(iocb->ki_flags & (IOCB_DSYNC | IOCB_SYNC))
 	    ) {

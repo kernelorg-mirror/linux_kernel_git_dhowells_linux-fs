@@ -76,6 +76,7 @@ struct netfs_inode {
 #define NETFS_ICTX_MODIFIED_ATTR 3		/* Indicate change in mtime/ctime */
 #define NETFS_ICTX_SINGLE_NO_UPLOAD 4		/* Monolithic payload, cache but no upload */
 #define NETFS_ICTX_ENCRYPTED	5		/* The file contents are encrypted */
+#define NETFS_ICTX_NO_SPARSE	6		/* The file cannot be sparse */
 };
 
 /*
