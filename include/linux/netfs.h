@@ -76,6 +76,7 @@ struct netfs_inode {
 #define NETFS_ICTX_WB_LOCK	2		/* Writeback serialisation lock */
 #define NETFS_ICTX_MODIFIED_ATTR 3		/* Indicate change in mtime/ctime */
 #define NETFS_ICTX_SINGLE_NO_UPLOAD 4		/* Monolithic payload, cache but no upload */
+#define NETFS_ICTX_ENCRYPTED	5		/* The file contents are encrypted */
 };
 
 /*
@@ -311,6 +312,8 @@ struct netfs_io_request {
 	unsigned int		nr_group_rel;	/* Number of refs to release on ->group */
 	spinlock_t		lock;		/* Lock for queuing subreqs */
 	enum netfs_io_origin	origin;		/* Origin of the request */
+	unsigned short		crypto_asize;	/* Content crypto algo block size */
+	unsigned short		crypto_bsize;	/* Content crypto key block size */
 	refcount_t		ref;
 	unsigned long		flags;
 #define NETFS_RREQ_IN_PROGRESS		0	/* Unlocked when the request completes (has ref) */
@@ -330,6 +333,7 @@ struct netfs_io_request {
 #define NETFS_RREQ_USE_IO_ITER		15	/* Use ->io_iter rather than ->i_pages */
 #define NETFS_RREQ_NEED_PUT_RA_REFS	17	/* Need to put the folio refs RA gave us */
 #define NETFS_RREQ_USE_BOUNCE_BUFFER	18	/* Use bounce buffer */
+#define NETFS_RREQ_CONTENT_ENCRYPTION	19	/* Content encryption is in use */
 #ifdef CONFIG_NETFS_PGPRIV2
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */
