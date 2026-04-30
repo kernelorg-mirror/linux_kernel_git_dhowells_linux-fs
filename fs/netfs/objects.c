@@ -69,6 +69,7 @@ struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 	if (rreq->netfs_ops->init_request) {
 		ret = rreq->netfs_ops->init_request(rreq, file);
 		if (ret < 0) {
+			bvecq_pos_unset(&rreq->bounce_alloc);
 			mempool_free(rreq, rreq->netfs_ops->request_pool ?: &netfs_request_pool);
 			return ERR_PTR(ret);
 		}
@@ -133,6 +134,8 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 		rreq->cache_resources.ops->end_operation(&rreq->cache_resources);
 	bvecq_pos_unset(&rreq->load_cursor);
 	bvecq_pos_unset(&rreq->collect_cursor);
+	bvecq_pos_unset(&rreq->bounce_alloc);
+	bvecq_pos_unset(&rreq->bounce_collect);
 	bvecq_pos_unset(&rreq->retry_cursor);
 	bvecq_put(rreq->spare);
 	for (int i = 0; i < NR_IO_STREAMS; i++)
@@ -251,4 +254,51 @@ void netfs_put_subrequest(struct netfs_io_subrequest *subreq,
 	trace_netfs_sreq_ref(debug_id, debug_index, r - 1, what);
 	if (dead)
 		netfs_free_subrequest(subreq);
+}
+
+/*
+ * Clean up the bounce buffer to the clean up point.  Note that this doesn't
+ * necessarily correspond on a folio-by-folio basis to the source buffer and we
+ * don't go ahead of the source buffer.
+ */
+void netfs_clean_up_bounce(struct netfs_io_request *rreq)
+{
+	struct bvecq *bq = rreq->bounce_collect.bvecq;
+	unsigned long long cleaned_to = rreq->bounce_cleaned_to;
+	unsigned long long clean_to = rreq->cleaned_to;
+	unsigned int slot = rreq->bounce_collect.slot;
+
+	for (;;) {
+		unsigned long long end;
+
+		/* Clean up the head of the chain if it's used up.  If we clear
+		 * an entire bvecq, then we can get rid of it provided it's not
+		 * also the tail bvecq being filled by the issuer.
+		 */
+		if (!bvecq_acquire_slot(bq, slot)) {
+			if (!bvecq_delete_spent(&rreq->bounce_collect, slot))
+				break;
+			bq   = rreq->bounce_collect.bvecq;
+			slot = rreq->bounce_collect.slot;
+			cleaned_to = bq->fpos;
+		}
+
+		if (slot >= bq->nr_slots)
+			break;
+
+		end = cleaned_to + bq->bv[slot].bv_len;
+		if (clean_to < end)
+			break;
+
+		trace_netfs_bounce(rreq, cleaned_to, &bq->bv[slot],
+				   netfs_folio_trace_put);
+
+		mempool_free(bq->bv[slot].bv_page, &netfs_page_pool);
+		bq->bv[slot].bv_page = NULL;
+		slot++;
+		cleaned_to = end;
+	}
+
+	rreq->bounce_collect.slot = slot;
+	rreq->bounce_cleaned_to = cleaned_to;
 }

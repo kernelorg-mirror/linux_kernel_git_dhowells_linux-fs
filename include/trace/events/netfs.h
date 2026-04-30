@@ -533,6 +533,34 @@ TRACE_EVENT(netfs_folio,
 		      __print_symbolic(__entry->why, netfs_folio_traces))
 	    );
 
+TRACE_EVENT(netfs_bounce,
+	    TP_PROTO(const struct netfs_io_request *rreq, unsigned long long fpos,
+		     const struct bio_vec *bv, enum netfs_folio_trace why),
+
+	    TP_ARGS(rreq, fpos, bv, why),
+
+	    TP_STRUCT__entry(
+		    __field(u64,			ino)
+		    __field(pgoff_t,			index)
+		    __field(unsigned long,		pfn)
+		    __field(unsigned int,		nr)
+		    __field(enum netfs_folio_trace,	why)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->ino = rreq->inode->i_ino;
+		    __entry->why = why;
+		    __entry->index = fpos / PAGE_SIZE;
+		    __entry->nr = bv->bv_len / PAGE_SIZE;
+		    __entry->pfn = page_to_pfn(bv->bv_page);
+			   ),
+
+	    TP_printk("p=%lx i=%05llx ix=%05lx-%05lx %s",
+		      __entry->pfn,
+		      __entry->ino, __entry->index, __entry->index + __entry->nr - 1,
+		      __print_symbolic(__entry->why, netfs_folio_traces))
+	    );
+
 TRACE_EVENT(netfs_wback,
 	    TP_PROTO(struct netfs_io_request *wreq, struct folio *folio, unsigned int notes),
 

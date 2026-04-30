@@ -259,6 +259,8 @@ struct netfs_io_request {
 	struct bvecq		*spare;		/* Advance allocation of bvecq */
 	struct bvecq_pos	load_cursor;	/* Point at which new folios are loaded in */
 	struct bvecq_pos	collect_cursor;	/* Clear-up point of I/O buffer */
+	struct bvecq_pos	bounce_alloc;	/* Bounce buffer allocation point */
+	struct bvecq_pos	bounce_collect;	/* Bounce buffer cleanup point */
 	struct bvecq_pos	retry_cursor;	/* Point from which retries are dispatched */
 	wait_queue_head_t	waitq;		/* Processor waiter */
 	void			*netfs_priv;	/* Private data for the netfs */
@@ -269,9 +271,11 @@ struct netfs_io_request {
 	long			error;		/* 0 or error that occurred */
 	unsigned long long	i_size;		/* Size of the file */
 	unsigned long long	start;		/* Start position */
+	unsigned long long	bounce_alloc_to; /* Bounce buffer allocated to */
 	unsigned long long	collected_to;	/* Point we've collected to */
 	unsigned long long	cache_coll_to;	/* Point the cache has collected to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
+	unsigned long long	bounce_cleaned_to; /* Position we've cleaned the bounce buffer to */
 	unsigned long long	abandon_to;	/* Position to abandon folios to */
 #ifdef CONFIG_NETFS_PGPRIV2
 	unsigned long long	last_end;	/* End of last folio added */
@@ -304,6 +308,7 @@ struct netfs_io_request {
 #define NETFS_RREQ_UPLOAD_TO_SERVER	15	/* Need to write to the server */
 #define NETFS_RREQ_USE_IO_ITER		16	/* Use ->io_iter rather than ->i_pages */
 #define NETFS_RREQ_NEED_PUT_RA_REFS	17	/* Need to put the folio refs RA gave us */
+#define NETFS_RREQ_USE_BOUNCE_BUFFER	18	/* Use bounce buffer */
 #ifdef CONFIG_NETFS_PGPRIV2
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */

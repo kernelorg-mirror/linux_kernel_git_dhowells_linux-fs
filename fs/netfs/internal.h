@@ -109,6 +109,7 @@ void netfs_put_request(struct netfs_io_request *rreq, enum netfs_rreq_ref_trace 
 void netfs_put_failed_request(struct netfs_io_request *rreq);
 struct netfs_io_subrequest *netfs_alloc_subrequest(struct netfs_io_request *rreq,
 						   enum netfs_io_source source);
+void netfs_clean_up_bounce(struct netfs_io_request *rreq);
 
 static inline void netfs_see_request(struct netfs_io_request *rreq,
 				     enum netfs_rreq_ref_trace what)
