@@ -180,7 +180,7 @@ void afs_issue_write(struct netfs_io_subrequest *subreq)
 
 	if (subreq->len > 256 * 1024 * 1024)
 		subreq->len = 256 * 1024 * 1024;
-	ret = netfs_prepare_write_buffer(subreq, INT_MAX);
+	ret = netfs_prepare_write_buffer(subreq, INT_MAX, false);
 	if (ret < 0)
 		return netfs_write_subrequest_terminated(subreq, ret);
 

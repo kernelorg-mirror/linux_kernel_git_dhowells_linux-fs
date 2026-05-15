@@ -764,7 +764,7 @@ static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 			goto failed;
 	}
 
-	ret = netfs_prepare_write_buffer(subreq, BIO_MAX_VECS);
+	ret = netfs_prepare_write_buffer(subreq, BIO_MAX_VECS, false);
 	if (ret < 0)
 		goto failed;
 

@@ -20,15 +20,24 @@
  * refer to the source material being broken up into original subrequests.
  */
 int netfs_prepare_write_retry_buffer(struct netfs_io_subrequest *subreq,
-				     unsigned int max_segs)
+				     unsigned int max_segs, bool copy)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
 	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
 	size_t len;
 
 	bvecq_pos_set(&subreq->dispatch_pos, &wreq->retry_cursor);
-	bvecq_pos_set(&subreq->content, &wreq->retry_cursor);
-	len = bvecq_slice(&wreq->retry_cursor, subreq->len, max_segs, &subreq->nr_segs);
+
+	if (copy) {
+		len = bvecq_extract(&wreq->retry_cursor, subreq->len, max_segs,
+				    &subreq->content.bvecq);
+		if (len < 0)
+			return -ENOMEM;
+	} else {
+		bvecq_pos_set(&subreq->content, &wreq->retry_cursor);
+		len = bvecq_slice(&wreq->retry_cursor, subreq->len, max_segs,
+				  &subreq->nr_segs);
+	}
 
 	if (len < subreq->len) {
 		subreq->len = len;

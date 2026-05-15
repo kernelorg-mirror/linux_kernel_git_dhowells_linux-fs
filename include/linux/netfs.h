@@ -472,7 +472,8 @@ ssize_t netfs_extract_iter(struct iov_iter *orig, size_t max_len, size_t max_pag
 			   unsigned long long fpos, struct bvecq **_bvecq_head,
 			   iov_iter_extraction_t extraction_flags);
 int netfs_prepare_read_buffer(struct netfs_io_subrequest *subreq, unsigned int max_segs);
-int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq, unsigned int max_segs);
+int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq,
+			       unsigned int max_segs, bool copy);
 void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error);
 
 int netfs_start_io_read(struct inode *inode);

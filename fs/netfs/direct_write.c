@@ -13,15 +13,24 @@
  * Prepare the buffer for an unbuffered/DIO write.
  */
 int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
-					  unsigned int max_segs)
+					  unsigned int max_segs, bool copy)
 {
 	struct netfs_io_stream *stream = &subreq->rreq->io_streams[subreq->stream_nr];
+	ssize_t got;
 	size_t len;
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
-	bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
-	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
-			  &subreq->nr_segs);
+	if (copy) {
+		got = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
+				    &subreq->content.bvecq);
+		if (got < 0)
+			return -ENOMEM;
+		len = got;
+	} else {
+		bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
+		len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
+				  &subreq->nr_segs);
+	}
 
 	if (len < subreq->len) {
 		subreq->len = len;

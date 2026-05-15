@@ -47,7 +47,7 @@ int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
  * direct_write.c
  */
 int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
-					  unsigned int max_segs);
+					  unsigned int max_segs, bool copy);
 
 /*
  * main.c
@@ -136,7 +136,7 @@ void netfs_cache_read_terminated(void *priv, ssize_t transferred_or_error);
  */
 #ifdef CONFIG_NETFS_PGPRIV2
 int netfs_prepare_pgpriv2_write_buffer(struct netfs_io_subrequest *subreq,
-				       unsigned int max_segs);
+				       unsigned int max_segs, bool copy);
 void netfs_pgpriv2_copy_to_cache(struct netfs_io_request *rreq, struct folio *folio);
 void netfs_pgpriv2_end_copy_to_cache(struct netfs_io_request *rreq);
 bool netfs_pgpriv2_unlock_copied_folios(struct netfs_io_request *wreq);
@@ -146,7 +146,7 @@ static inline bool netfs_using_pgpriv2(const struct netfs_io_request *rreq)
 }
 #else
 static inline int netfs_prepare_pgpriv2_write_buffer(struct netfs_io_subrequest *subreq,
-						     unsigned int max_segs)
+						     unsigned int max_segs, bool copy)
 {
 	return -EIO;
 }
@@ -270,7 +270,7 @@ ssize_t netfs_end_writethrough(struct netfs_writethrough *wthru,
  * write_retry.c
  */
 int netfs_prepare_write_retry_buffer(struct netfs_io_subrequest *subreq,
-				     unsigned int max_segs);
+				     unsigned int max_segs, bool copy);
 void netfs_retry_writes(struct netfs_io_request *wreq);
 
 /*

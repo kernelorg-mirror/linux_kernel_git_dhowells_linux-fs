@@ -75,7 +75,7 @@ static void v9fs_issue_write(struct netfs_io_subrequest *subreq)
 
 	subreq->len = umin(subreq->len, fid->clnt->msize - P9_IOHDRSZ);
 
-	err = netfs_prepare_write_buffer(subreq, INT_MAX);
+	err = netfs_prepare_write_buffer(subreq, INT_MAX, false);
 	if (err < 0)
 		goto term;
 

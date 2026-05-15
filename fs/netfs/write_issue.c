@@ -67,7 +67,7 @@ struct netfs_writethrough {
 };
 
 static int netfs_prepare_write_single_buffer(struct netfs_io_subrequest *subreq,
-					     unsigned int max_segs);
+					     unsigned int max_segs, bool copy);
 
 /*
  * Kill all dirty folios in the event of an unrecoverable error, starting with
@@ -219,31 +219,37 @@ struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wr
  * Prepare the buffer for a buffered write.
  */
 static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subreq,
-					       unsigned int max_segs)
+					       unsigned int max_segs, bool copy)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
 	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
-	ssize_t len;
+	ssize_t got;
+	size_t len, bsize = 1;
 
 	_enter("%zx,{,%u,%u},%u",
 	       subreq->len, stream->dispatch_cursor.slot, stream->dispatch_cursor.offset, max_segs);
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
 
+	if (subreq->source == NETFS_WRITE_TO_CACHE) {
+		bsize = umax(bsize, wreq->cache_resources.dio_size);
+		copy = true;
+	}
+
 	/* If we have a write to the cache, we need to round out the first and
 	 * last entries (only those as the data will be on virtually contiguous
 	 * folios) to cache DIO boundaries.
 	 */
-	if (subreq->source == NETFS_WRITE_TO_CACHE) {
+	if (copy) {
 		struct bio_vec *bv;
 		struct bvecq *bq;
-		size_t dio_size = wreq->cache_resources.dio_size;
 		size_t disp, dlen;
 
-		len = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
+		got = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
 				    &subreq->content.bvecq);
-		if (len < 0)
+		if (got < 0)
 			return -ENOMEM;
+		len = got;
 
 		_debug("extract %zx/%zx", len, subreq->len);
 		subreq->len = len;
@@ -252,8 +258,8 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 		 * with this as this path only happens for buffered reads and
 		 * writes.  As such, a bio_vec must always point to a whole
 		 * folio (or part thereof) in the pagecache with writeback set,
-		 * so presuming that dio_size < folio size, we should be able
-		 * to round out bv_offset and bv_len.
+		 * so presuming that block size <= folio size, we should be
+		 * able to round out bv_offset and bv_len.
 		 *
 		 * Further, streaming-write pages don't get sent to the cache
 		 * (and aren't normally generated if there is a cache), so we
@@ -261,7 +267,7 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 		 */
 		bq = subreq->content.bvecq;
 		bv = &bq->bv[0];
-		disp = bv->bv_offset & (dio_size - 1);
+		disp = bv->bv_offset & (bsize - 1);
 		if (disp) {
 			bv->bv_offset -= disp;
 			bv->bv_len += disp;
@@ -274,7 +280,7 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 		while (bq->next)
 			bq = bq->next;
 		bv = &bq->bv[bq->nr_slots - 1];
-		dlen = round_up(bv->bv_len, dio_size);
+		dlen = round_up(bv->bv_len, bsize);
 		if (dlen > bv->bv_len) {
 			subreq->len += dlen - bv->bv_len;
 			bv->bv_len = dlen;
@@ -305,13 +311,14 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
  * netfs_prepare_write_buffer - Get the buffer for a subrequest
  * @subreq: The subrequest to get the buffer for
  * @max_segs: Maximum number of segments in buffer (or INT_MAX)
+ * @copy: Copy the bvecq to @subreq->content if true
  *
  * Extract a slice of buffer from the stream and attach it to the subrequest as
  * a bio_vec queue.  The maximum amount of data attached is set by
  * @subreq->len, but this may be shortened if @max_segs would be exceeded.
  */
 int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq,
-			       unsigned int max_segs)
+			       unsigned int max_segs, bool copy)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
 
@@ -319,18 +326,18 @@ int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq,
 	case NETFS_WRITEBACK:
 	case NETFS_WRITETHROUGH:
 		if (test_bit(NETFS_RREQ_RETRYING, &rreq->flags))
-			return netfs_prepare_write_retry_buffer(subreq, max_segs);
-		return netfs_prepare_buffered_write_buffer(subreq, max_segs);
+			return netfs_prepare_write_retry_buffer(subreq, max_segs, copy);
+		return netfs_prepare_buffered_write_buffer(subreq, max_segs, copy);
 
 	case NETFS_UNBUFFERED_WRITE:
 	case NETFS_DIO_WRITE:
-		return netfs_prepare_unbuffered_write_buffer(subreq, max_segs);
+		return netfs_prepare_unbuffered_write_buffer(subreq, max_segs, copy);
 
 	case NETFS_WRITEBACK_SINGLE:
-		return netfs_prepare_write_single_buffer(subreq, max_segs);
+		return netfs_prepare_write_single_buffer(subreq, max_segs, copy);
 
 	case NETFS_PGPRIV2_COPY_TO_CACHE:
-		return netfs_prepare_pgpriv2_write_buffer(subreq, max_segs);
+		return netfs_prepare_pgpriv2_write_buffer(subreq, max_segs, copy);
 
 	default:
 		WARN_ON_ONCE(1);
@@ -981,17 +988,26 @@ ssize_t netfs_end_writethrough(struct netfs_writethrough *wthru,
  * Prepare a buffer for a single monolithic write.
  */
 static int netfs_prepare_write_single_buffer(struct netfs_io_subrequest *subreq,
-					     unsigned int max_segs)
+					     unsigned int max_segs, bool copy)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
 	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
 	struct bio_vec *bv;
 	struct bvecq *bq;
+	ssize_t len;
 	size_t dio_size = wreq->cache_resources.dio_size;
 	size_t dlen;
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
-	bvecq_pos_set(&subreq->content, &subreq->dispatch_pos);
+
+	if (copy) {
+		len = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
+				    &subreq->content.bvecq);
+		if (len < 0)
+			return -ENOMEM;
+	} else {
+		bvecq_pos_set(&subreq->content, &subreq->dispatch_pos);
+	}
 
 	/* Round the end of the last entry up. */
 	bq = subreq->content.bvecq;
