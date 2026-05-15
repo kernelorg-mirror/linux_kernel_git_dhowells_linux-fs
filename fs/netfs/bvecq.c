@@ -645,8 +645,10 @@ ssize_t bvecq_extract(struct bvecq_pos *pos, size_t max_size,
 	bvecq_pos_set(&tmp_pos, pos);
 	amount = bvecq_slice(&tmp_pos, max_size, max_slots, &nslots);
 	bvecq_pos_unset(&tmp_pos);
-	if (nslots == 0)
+	if (nslots == 0) {
+		kleave(" = -EIO [nslots]");
 		return -EIO;
+	}
 
 	dst = bvecq_alloc_chain(nslots, GFP_KERNEL);
 	if (!dst)

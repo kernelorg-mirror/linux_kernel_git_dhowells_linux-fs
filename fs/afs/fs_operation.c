@@ -58,7 +58,7 @@ struct afs_io_locker {
 /*
  * Unlock the I/O lock on a vnode.
  */
-static void afs_unlock_for_io(struct afs_vnode *vnode)
+void afs_unlock_for_io(struct afs_vnode *vnode)
 {
 	struct afs_io_locker *locker;
 
@@ -80,7 +80,7 @@ static void afs_unlock_for_io(struct afs_vnode *vnode)
  * Lock the I/O lock on a vnode uninterruptibly.  We can't use an ordinary
  * mutex as lockdep will complain if we unlock it in the wrong thread.
  */
-static void afs_lock_for_io(struct afs_vnode *vnode)
+void afs_lock_for_io(struct afs_vnode *vnode)
 {
 	struct afs_io_locker myself = { .task = current, };
 
@@ -107,7 +107,7 @@ static void afs_lock_for_io(struct afs_vnode *vnode)
  * Lock the I/O lock on a vnode interruptibly.  We can't use an ordinary mutex
  * as lockdep will complain if we unlock it in the wrong thread.
  */
-static int afs_lock_for_io_interruptible(struct afs_vnode *vnode)
+int afs_lock_for_io_interruptible(struct afs_vnode *vnode)
 {
 	struct afs_io_locker myself = { .task = current, };
 	int ret = 0;

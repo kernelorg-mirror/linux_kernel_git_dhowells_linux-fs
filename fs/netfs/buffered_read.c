@@ -157,6 +157,7 @@ int netfs_prepare_read_buffer(struct netfs_io_subrequest *subreq,
 	case NETFS_UNBUFFERED_READ:
 	case NETFS_DIO_READ:
 	case NETFS_READ_GAPS:
+	case NETFS_RMW_READ:
 		return netfs_prepare_unbuffered_read_buffer(subreq, max_segs);
 	case NETFS_READ_SINGLE:
 		return netfs_prepare_read_single_buffer(subreq, max_segs);

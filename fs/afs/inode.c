@@ -22,6 +22,7 @@
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/iversion.h>
+#include <crypto/skcipher.h>
 #include "internal.h"
 #include "afs_fs.h"
 
@@ -54,7 +55,13 @@ static noinline void dump_vnode(struct afs_vnode *vnode, struct afs_vnode *paren
  */
 static void afs_set_netfs_context(struct afs_vnode *vnode)
 {
+	struct netfs_inode *ictx = &vnode->netfs;
+
 	netfs_inode_init(&vnode->netfs, &afs_req_ops, true);
+	if (vnode->status.type == AFS_FTYPE_FILE && IS_ENCRYPTED(&vnode->netfs.inode)) {
+		__set_bit(NETFS_ICTX_ENCRYPTED, &ictx->flags);
+		__set_bit(NETFS_ICTX_NO_SPARSE, &ictx->flags);
+	}
 }
 
 /*
@@ -66,7 +73,9 @@ static int afs_inode_init_from_status(struct afs_operation *op,
 {
 	struct afs_file_status *status = &vp->scb.status;
 	struct inode *inode = AFS_VNODE_TO_I(vnode);
+	struct afs_super_info *as = AFS_FS_S(inode->i_sb);
 	struct timespec64 t;
+	unsigned long long size = status->size;
 
 	_enter("{%llx:%llu.%u} %s",
 	       vp->fid.vid, vp->fid.vnode, vp->fid.unique,
@@ -78,6 +87,23 @@ static int afs_inode_init_from_status(struct afs_operation *op,
 	       (unsigned long long) status->size,
 	       status->data_version,
 	       status->mode);
+
+	if (as->fscrypt &&
+	    status->type == AFS_FTYPE_FILE) {
+		/* There must be a trailer of exactly crypt_asize bytes unless
+		 * the file is zero-length, in which case the file size should
+		 * be zero.
+		 */
+		if (size > 0) {
+			if (size <= as->crypto_asize) {
+				pr_err("Bad fscrypt size %llx (%llx:%llx.%x)\n",
+				       size, vp->fid.vid, vp->fid.vnode, vp->fid.unique);
+				return -EIO;
+			}
+			size -= as->crypto_asize;
+		}
+		inode->i_flags |= S_ENCRYPTED;
+	}
 
 	write_seqlock(&vnode->cb_lock);
 
@@ -134,8 +160,8 @@ static int afs_inode_init_from_status(struct afs_operation *op,
 		return afs_protocol_error(NULL, afs_eproto_file_type);
 	}
 
-	i_size_write(inode, status->size);
-	inode_set_bytes(inode, status->size);
+	i_size_write(inode, size);
+	inode_set_bytes(inode, size);
 	afs_set_netfs_context(vnode);
 
 	vnode->invalid_before	= status->data_version;
@@ -166,7 +192,9 @@ static void afs_apply_status(struct afs_operation *op,
 	struct afs_vnode *vnode = vp->vnode;
 	struct netfs_inode *ictx = &vnode->netfs;
 	struct inode *inode = &ictx->inode;
+	struct afs_super_info *as = AFS_FS_S(inode->i_sb);
 	struct timespec64 t;
+	unsigned long long size = status->size;
 	umode_t mode;
 	bool unexpected_jump = false;
 	bool data_changed = false;
@@ -177,6 +205,19 @@ static void afs_apply_status(struct afs_operation *op,
 	       op->type ? op->type->name : "???");
 
 	BUG_ON(test_bit(AFS_VNODE_UNSET, &vnode->flags));
+
+	if (test_bit(NETFS_ICTX_ENCRYPTED, &vnode->netfs.flags)) {
+		if (size == 0) {
+			size = 0;
+		} else if (size <= as->crypto_asize) {
+			pr_err("Bad fscrypt size %llx (%llx:%llx.%x)\n",
+			       size, vp->fid.vid, vp->fid.vnode, vp->fid.unique);
+			size = 0;
+		} else {
+			size -= as->crypto_asize;
+		}
+		kdebug("apply enc size %llx -> %llx", status->size, size);
+	}
 
 	if (status->type != vnode->status.type) {
 		pr_warn("Vnode %llx:%llx:%x changed type %u to %u\n",
@@ -687,6 +728,9 @@ void afs_evict_inode(struct inode *inode)
 	bvecq_put(vnode->directory);
 	if (vnode->symlink)
 		afs_evict_symlink(vnode);
+
+	if (vnode->content_ci)
+		crypto_free_skcipher(vnode->content_ci);
 
 	afs_set_cache_aux(vnode, &aux);
 	netfs_clear_inode_writeback(inode, &aux);

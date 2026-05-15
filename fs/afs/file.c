@@ -144,6 +144,12 @@ int afs_open(struct inode *inode, struct file *file)
 	if (ret < 0)
 		goto error_af;
 
+	if (test_bit(NETFS_ICTX_ENCRYPTED, &vnode->netfs.flags) && !vnode->content_ci) {
+		ret = afs_open_crypto(vnode);
+		if (ret < 0)
+			goto error_af;
+	}
+
 	if (file->f_mode & FMODE_WRITE) {
 		ret = afs_cache_wb_key(vnode, af);
 		if (ret < 0)
@@ -387,12 +393,21 @@ failed:
 
 static int afs_init_request(struct netfs_io_request *rreq, struct file *file)
 {
+	struct afs_super_info *as = AFS_FS_S(rreq->inode->i_sb);
 	struct afs_vnode *vnode = AFS_FS_I(rreq->inode);
 
 	if (file)
 		rreq->netfs_priv = key_get(afs_file_key(file));
-	rreq->rsize = 256 * 1024;
-	rreq->wsize = 256 * 1024 * 1024;
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags) &&
+	    S_ISREG(rreq->inode->i_mode)) {
+		rreq->rsize = 64 * 1024;
+		rreq->wsize = 64 * 1024;
+		rreq->crypto_asize = as->crypto_asize;
+		rreq->crypto_bsize = as->crypto_bsize;
+	} else {
+		rreq->rsize = 256 * 1024;
+		rreq->wsize = 256 * 1024 * 1024;
+	}
 
 	switch (rreq->origin) {
 	case NETFS_READ_SINGLE:
@@ -478,6 +493,8 @@ const struct netfs_request_ops afs_req_ops = {
 	.estimate_write		= afs_estimate_write,
 	.issue_write		= afs_issue_write,
 	.retry_request		= afs_retry_request,
+	.encrypt_block		= afs_encrypt_block,
+	.decrypt_block		= afs_decrypt_block,
 };
 
 static void afs_add_open_mmap(struct afs_vnode *vnode)

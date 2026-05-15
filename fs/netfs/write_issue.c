@@ -251,8 +251,10 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 
 		got = bvecq_extract(&stream->dispatch_cursor, subreq->len, max_segs,
 				    &subreq->content.bvecq);
-		if (got < 0)
+		if (got < 0) {
+			kleave(" = %zd [ex]", len);
 			return -ENOMEM;
+		}
 		len = got;
 
 		_debug("extract %zx/%zx", len, subreq->len);
@@ -737,6 +739,8 @@ static int netfs_queue_wb_folio(struct netfs_io_request *wreq,
 					     GFP_NOFS);
 		if (ret < 0)
 			return ret;
+		kdebug("-- add --");
+		bvecq_dump(wreq->bounce_collect.bvecq);
 	}
 
 	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &wreq->flags))) {

@@ -71,6 +71,7 @@ enum afs_param {
 	Opt_autocell,
 	Opt_dyn,
 	Opt_flock,
+	Opt_fscrypt,
 	Opt_source,
 };
 
@@ -86,6 +87,7 @@ static const struct fs_parameter_spec afs_fs_parameters[] = {
 	fsparam_flag  ("autocell",	Opt_autocell),
 	fsparam_flag  ("dyn",		Opt_dyn),
 	fsparam_enum  ("flock",		Opt_flock, afs_param_flock),
+	fsparam_flag  ("fscrypt",	Opt_fscrypt),
 	fsparam_string("source",	Opt_source),
 	{}
 };
@@ -194,6 +196,8 @@ static int afs_show_options(struct seq_file *m, struct dentry *root)
 
 	if (as->dyn_root)
 		seq_puts(m, ",dyn");
+	if (as->fscrypt)
+		seq_puts(m, ",fscrypt");
 	switch (as->flock_mode) {
 	case afs_flock_mode_unset:	break;
 	case afs_flock_mode_local:	p = "local";	break;
@@ -339,6 +343,10 @@ static int afs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 
 	case Opt_flock:
 		ctx->flock_mode = result.uint_32;
+		break;
+
+	case Opt_fscrypt:
+		ctx->fscrypt = true;
 		break;
 
 	default:
@@ -512,6 +520,14 @@ static struct afs_super_info *afs_alloc_sbi(struct fs_context *fc)
 			as->cell = afs_use_cell(ctx->cell, afs_cell_trace_use_sbi);
 			as->volume = afs_get_volume(ctx->volume,
 						    afs_volume_trace_get_alloc_sbi);
+			if (ctx->fscrypt) {
+				as->fscrypt = true;
+				as->crypto_asize = 16;
+				as->crypto_bsize = 4096;
+			} else {
+				as->crypto_asize = 1;
+				as->crypto_bsize = 1;
+			}
 		}
 	}
 	return as;
@@ -687,6 +703,7 @@ static struct inode *afs_alloc_inode(struct super_block *sb)
 	vnode->permit_cache	= NULL;
 	vnode->directory	= NULL;
 	vnode->directory_size	= 0;
+	vnode->content_ci	= NULL;
 
 	vnode->flags		= 1 << AFS_VNODE_UNSET;
 	vnode->lock_state	= AFS_VNODE_LOCK_NONE;

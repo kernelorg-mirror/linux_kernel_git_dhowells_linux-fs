@@ -52,6 +52,7 @@ struct afs_fs_context {
 	bool			autocell;	/* T if set auto mount operation */
 	bool			dyn_root;	/* T if dynamic root */
 	bool			no_cell;	/* T if the source is "none" (for dynroot) */
+	bool			fscrypt;	/* T if content encryption is engaged */
 	enum afs_flock_mode	flock_mode;	/* Partial file-locking emulation mode */
 	afs_voltype_t		type;		/* type of volume requested */
 	unsigned int		volnamesz;	/* size of volume name */
@@ -251,6 +252,9 @@ struct afs_super_info {
 	struct afs_volume	*volume;	/* volume record */
 	enum afs_flock_mode	flock_mode:8;	/* File locking emulation mode */
 	bool			dyn_root;	/* True if dynamic root */
+	bool			fscrypt;	/* T if content encryption is engaged */
+	u8			crypto_asize;	/* Crypto algo blocksize for fscrypt */
+	u16			crypto_bsize;	/* Crypto blocksize for fscrypt */
 };
 
 static inline struct afs_super_info *AFS_FS_S(struct super_block *sb)
@@ -694,6 +698,7 @@ struct afs_vnode {
 	struct rw_semaphore	validate_lock;	/* lock for validating this vnode */
 	struct rw_semaphore	rmdir_lock;	/* Lock for rmdir vs sillyrename */
 	struct key		*silly_key;	/* Silly rename key */
+	struct crypto_skcipher	*content_ci;	/* Content crypto cipher */
 	spinlock_t		wb_lock;	/* lock for wb_keys */
 	spinlock_t		lock;		/* waitqueue/flags lock */
 	unsigned long		flags;
@@ -1213,6 +1218,9 @@ extern void afs_fs_store_acl(struct afs_operation *);
 /*
  * fs_operation.c
  */
+void afs_unlock_for_io(struct afs_vnode *vnode);
+void afs_lock_for_io(struct afs_vnode *vnode);
+int afs_lock_for_io_interruptible(struct afs_vnode *vnode);
 extern struct afs_operation *afs_alloc_operation(struct key *, struct afs_volume *);
 extern int afs_put_operation(struct afs_operation *);
 extern bool afs_begin_vnode_operation(struct afs_operation *);
@@ -1708,6 +1716,16 @@ extern int afs_writepages(struct address_space *, struct writeback_control *);
 extern int afs_fsync(struct file *, loff_t, loff_t, int);
 extern vm_fault_t afs_page_mkwrite(struct vm_fault *vmf);
 extern void afs_prune_wb_keys(struct afs_vnode *);
+int afs_open_crypto(struct afs_vnode *vnode);
+int afs_encrypt_block(struct netfs_io_request *wreq,
+		      unsigned long long start,
+		      struct scatterlist *src_sg,
+		      struct scatterlist *dst_sg,
+		      gfp_t gfp);
+int afs_decrypt_block(struct netfs_io_request *rreq,
+		      unsigned long long start, size_t len,
+		      struct scatterlist *src_sg, unsigned int n_src,
+		      struct scatterlist *dst_sg, unsigned int n_dst);
 
 /*
  * xattr.c

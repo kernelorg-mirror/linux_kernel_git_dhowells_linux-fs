@@ -4,7 +4,7 @@
  * Copyright (C) 2026 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  */
-
+#define __KDEBUG
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
@@ -113,6 +113,12 @@ int netfs_encrypt(struct netfs_io_request *wreq, unsigned long long to, gfp_t gf
 
 	while (start < to) {
 		struct scatterlist sg;
+
+		_debug("ENCRYPT %llx-%llx", start, to);
+		_debug("enc %u/%u %x",
+		       wreq->encrypt_cursor.slot,
+		       wreq->encrypt_cursor.bvecq->nr_slots,
+		       wreq->encrypt_cursor.offset);
 
 		sg_init_table(&sg, 1);
 

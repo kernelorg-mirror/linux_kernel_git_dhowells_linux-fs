@@ -540,6 +540,8 @@ void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error)
 
 	_enter("%x[%x] %zd", wreq->debug_id, subreq->debug_index, transferred_or_error);
 
+	WARN_ON_ONCE(transferred_or_error == -ENOMEM);
+
 	switch (subreq->source) {
 	case NETFS_UPLOAD_TO_SERVER:
 		netfs_stat(&netfs_n_wh_upload_done);

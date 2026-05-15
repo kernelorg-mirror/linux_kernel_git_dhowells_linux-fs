@@ -186,6 +186,8 @@ static int netfs_unbuffered_load_bounce(struct netfs_io_subrequest *subreq)
 	size_t amount = subreq->len;
 	int ret;
 
+	kenter("");
+
 	/* Expand the bounce buffer as needed. */
 	to = round_up(subreq->start + subreq->len, wreq->crypto_bsize);
 	end = round_up(wreq->start + wreq->len, wreq->crypto_bsize);
@@ -212,12 +214,21 @@ static int netfs_unbuffered_load_bounce(struct netfs_io_subrequest *subreq)
 	if (amount > wreq->len - wreq->submitted)
 		amount = wreq->len - wreq->submitted;
 
+	kdebug("from:");
+	bvecq_dump(wreq->copy_cursor.bvecq);
+	kdebug("to:");
+	bvecq_dump(wreq->bounce_copy.bvecq);
+
 	got = bvecq_copy_to_bvecq(&wreq->copy_cursor, &wreq->bounce_copy, amount);
-	if (got != amount)
+	if (got != amount) {
+		kleave(" = -EFAULT [got %zx != %zx]", got, amount);
 		return -EFAULT;
+	}
 
 	/* And then encrypt the data in-place. */
-	return netfs_encrypt(wreq, to, GFP_KERNEL);
+	ret = netfs_encrypt(wreq, to, GFP_KERNEL);
+	kleave(" = %d", ret);
+	return ret;
 }
 
 /*
@@ -248,13 +259,18 @@ int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
 	if (copy) {
 		got = bvecq_extract(&stream->dispatch_cursor, len, max_segs,
 				    &subreq->content.bvecq);
-		if (got < 0)
+		if (got < 0) {
+			kleave(" = %zd [ex]", len);
 			return -ENOMEM;
+		}
 		len = got;
+
+		_debug("extract %zx/%zx", len, subreq->len);
 	} else {
 		bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
 
 		len = bvecq_slice(&stream->dispatch_cursor, len, max_segs, &subreq->nr_segs);
+		kdebug("slice %zx/%zx", len, subreq->len);
 	}
 
 	if (len < subreq->len) {
@@ -268,6 +284,7 @@ int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
 	stream->buffered   -= subreq->len;
 	if (stream->buffered == 0)
 		netfs_all_subreqs_queued(subreq->rreq);
+	kleave(" = 0");
 	return 0;
 }
 
@@ -372,6 +389,15 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 	if (wreq->origin == NETFS_DIO_WRITE)
 		inode_dio_begin(wreq->inode);
 
+	if (wreq->copy_cursor.bvecq)
+		kdebug("copy %u/%u %x",
+		       wreq->copy_cursor.slot, wreq->copy_cursor.bvecq->nr_slots,
+		       wreq->copy_cursor.offset);
+
+	if (wreq->bounce_copy.bvecq)
+		kdebug("bounce %u/%u %x",
+		       wreq->bounce_copy.slot, wreq->bounce_copy.bvecq->nr_slots,
+		       wreq->bounce_copy.offset);
 
 	for (;;) {
 		bool retry = false;
@@ -518,6 +544,9 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 	_debug("dio-write %zx/%zx %u/%u",
 	       n, len, wreq->load_cursor.bvecq->nr_slots,
 	       wreq->load_cursor.bvecq->max_slots);
+
+	kdebug("load %u/%u %x",
+	       wreq->load_cursor.slot, wreq->load_cursor.bvecq->nr_slots, wreq->load_cursor.offset);
 
 	/* Set up the bounce buffer if we need it.  Allow for padding the
 	 * request out to the crypo block size and allocate at least one bvecq
