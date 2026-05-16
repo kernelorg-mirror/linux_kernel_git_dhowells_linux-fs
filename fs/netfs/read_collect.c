@@ -437,6 +437,7 @@ bool netfs_read_collection(struct netfs_io_request *rreq)
 	case NETFS_UNBUFFERED_READ:
 	case NETFS_DIO_READ:
 	case NETFS_READ_GAPS:
+	case NETFS_RMW_READ:
 		netfs_rreq_assess_dio(rreq);
 		break;
 	case NETFS_READ_SINGLE:
