@@ -351,6 +351,29 @@ static void netfs_rreq_assess_dio(struct netfs_io_request *rreq)
 {
 	unsigned int i;
 
+	if (unlikely(test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags))) {
+		size_t bsize = rreq->crypto_bsize;
+		size_t skip_before = rreq->start & (bsize - 1);
+
+		/* Shorten the data read if it was padded out for crypto purposes. */
+		if (rreq->transferred < bsize) {
+			if (rreq->transferred) {
+				__set_bit(NETFS_RREQ_FAILED, &rreq->flags);
+				rreq->error = -EIO;
+			}
+			rreq->transferred = 0;
+			goto done;
+		}
+		rreq->transferred = round_down(rreq->transferred, bsize);
+
+		netfs_decrypt_dio(rreq);
+		if (test_bit(NETFS_RREQ_FAILED, &rreq->flags))
+			goto done;
+
+		rreq->transferred -= skip_before;
+		rreq->transferred = umin(rreq->transferred, rreq->len);
+	}
+
 	if (rreq->origin == NETFS_UNBUFFERED_READ ||
 	    rreq->origin == NETFS_DIO_READ) {
 		for (struct bvecq *bq = rreq->collect_cursor.bvecq; bq; bq = bq->next) {
@@ -367,6 +390,7 @@ static void netfs_rreq_assess_dio(struct netfs_io_request *rreq)
 		}
 	}
 
+done:
 	if (rreq->iocb) {
 		rreq->iocb->ki_pos += rreq->transferred;
 		if (rreq->iocb->ki_complete) {

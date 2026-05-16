@@ -16,16 +16,94 @@
 #include <linux/netfs.h>
 #include "internal.h"
 
+/*
+ * If we did a direct read to a bounce buffer (say we needed to decrypt it),
+ * copy the data obtained to the destination iterator if we need to (if we can,
+ * we encrypt between buffers, but that requires correct alignment of the
+ * output buffer).
+ */
+int netfs_dio_copy_bounce_to_dest(struct netfs_io_request *rreq, struct kiocb *iocb)
+{
+	unsigned long long dec_to = atomic64_read(&rreq->encrypted_to);
+	unsigned long long end = rreq->start + rreq->len;
+
+	_enter("%zx/%llx @%llx", rreq->transferred, rreq->len, rreq->copied_to);
+
+	if (!iocb)
+		iocb = rreq->iocb;
+
+	if (!test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags) ||
+	    !test_bit(NETFS_RREQ_CRYPT_IN_PLACE, &rreq->flags))
+		return 0;
+
+	/* Skip over any rounding to get to the data of interest. */
+	if (dec_to < rreq->start)
+		return 0;
+	if (rreq->copied_to < rreq->start) {
+		bvecq_pos_advance(&rreq->collect_cursor, rreq->start - rreq->copied_to);
+		rreq->copied_to = rreq->start;
+	}
+
+	/* Now we can copy any data of interest we've just received. */
+	if (rreq->copied_to >= dec_to)
+		return 0;
+	if (rreq->copied_to < end) {
+		ssize_t copy;
+		size_t part = umin(dec_to, end) - rreq->copied_to;
+
+		copy = bvecq_copy_to_bvecq(&rreq->bounce_copy, &rreq->collect_cursor, part);
+		if (copy < part) {
+			if (!copy && rreq->copied_to == rreq->start) {
+				trace_netfs_failure(rreq, NULL, -EFAULT, netfs_fail_dio_read_zero);
+				return -EIO;
+			}
+			trace_netfs_failure(rreq, NULL, -EFAULT, netfs_fail_dio_read_short);
+		}
+	}
+
+	_debug("xfer %zx/%llx @%llx", rreq->transferred, rreq->len, iocb->ki_pos);
+	return 0;
+}
+
+/*
+ * Prepare the buffer for the read RPC.  Limits are applied and the buffer may
+ * be rounded down.  Bounce bufferage will be added if necessary.
+ */
 int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
 					 unsigned int max_segs)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
 	struct netfs_io_stream *stream = &rreq->io_streams[0];
-	size_t len;
+	size_t len = subreq->len;
+	int ret;
 
 	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
 	bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
-	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
+
+	/* Limit encrypted reads so that we don't split an encryption block
+	 * across two subrequests unless the filesystem doesn't support blocks
+	 * that big.
+	 */
+	if (len > rreq->crypto_bsize &&
+	    test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags)) {
+		len = round_down(len, rreq->crypto_bsize);
+		if (WARN_ON_ONCE(len == 0))
+			return -EIO;
+	}
+
+	/* Expand the bounce buffer so that we've got something to read into. */
+	if (test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags)) {
+		ret = bvecq_buffer_add_space(&rreq->bounce_alloc,
+					     &rreq->bounce_alloc_to,
+					     subreq->start + len,
+					     round_up(rreq->start + rreq->len,
+						      rreq->crypto_bsize),
+					     false, GFP_KERNEL);
+		if (ret < 0)
+			return ret;
+	}
+
+	len = bvecq_slice(&stream->dispatch_cursor, len, max_segs,
 			  &subreq->nr_segs);
 
 	if (len < subreq->len) {
@@ -49,8 +127,14 @@ int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
 static void netfs_dispatch_unbuffered_reads(struct netfs_io_request *rreq)
 {
 	struct netfs_io_stream *stream = &rreq->io_streams[0];
+	unsigned long long start = rreq->start;
+	ssize_t size = rreq->len;
+	size_t bsize = rreq->crypto_bsize;
 
-	bvecq_pos_transfer(&stream->dispatch_cursor, &rreq->load_cursor);
+	/* Pad out an encrypted transfer to the block size. */
+	start = round_down(start, bsize);
+	size += rreq->start - start;
+	size = round_up(size, bsize);
 
 	do {
 		struct netfs_io_subrequest *subreq;
@@ -171,15 +255,64 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	 * may end up truncated if ENOMEM is encountered.
 	 */
 	ret = netfs_extract_iter(iter, rreq->len, INT_MAX, iocb->ki_pos,
-				 &rreq->load_cursor.bvecq, 0);
+				 &rreq->collect_cursor.bvecq, 0);
 	if (ret < 0)
 		goto error_put;
 
 	rreq->len = ret;
-	stream->buffered = ret;
-	stream->issue_from = rreq->start;
 
-	// TODO: Set up bounce buffer if needed
+	/* If we're going to do decryption or decompression, we're going to
+	 * need a bounce buffer.  If the output buffer is correctly aligned and
+	 * correctly sized for the crypto algorithm, we get a free copy between
+	 * buffers from the crypto; if misaligned, we decrypt in place in the
+	 * bounce buffer and then copy.
+	 */
+	if (test_bit(NETFS_RREQ_CONTENT_ENCRYPTION, &rreq->flags)) {
+		if (!netfs_is_crypto_aligned(rreq, iter))
+			__set_bit(NETFS_RREQ_CRYPT_IN_PLACE, &rreq->flags);
+		__set_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags);
+	}
+
+	/* Set up the bounce buffer if we need it.  Allow for padding the
+	 * request out to the crypo block size and allocate at least one bvecq
+	 * into it.
+	 */
+	if (test_bit(NETFS_RREQ_USE_BOUNCE_BUFFER, &rreq->flags)) {
+		size_t bsize = rreq->crypto_bsize;
+		size_t gap;
+
+		rreq->bounce_alloc_to = round_down(rreq->start, bsize);
+		gap = rreq->start - rreq->bounce_alloc_to;
+
+		stream->issue_from = rreq->bounce_alloc_to;
+		stream->buffered = round_up(rreq->len + gap, bsize);
+
+		ret = bvecq_buffer_init(&rreq->bounce_alloc, rreq->debug_id);
+		if (ret < 0)
+			goto out;
+
+		/*   0--->
+		 *  ~--+-------+-------+-------+-------+---~
+		 *     |       |       |       |       |
+		 *     |copied |decrypt|reading|alloced|
+		 *     |       |-ed    |       |       |
+		 *  ~--+-------+-------+-------+-------+---~
+		 *                                     ^bounce_alloc
+		 *                             ^dispatch_cursor
+		 *                     ^encrypt_cursor
+		 *             ^bounce_copy
+		 *     ^bounce_collect
+		 */
+		bvecq_pos_set(&stream->dispatch_cursor, &rreq->bounce_alloc);
+		bvecq_pos_set(&rreq->encrypt_cursor, &rreq->bounce_alloc);
+		bvecq_pos_set(&rreq->bounce_copy, &rreq->bounce_alloc);
+		bvecq_pos_set(&rreq->bounce_collect, &rreq->bounce_alloc);
+
+	} else {
+		stream->buffered = ret;
+		stream->issue_from = rreq->start;
+		bvecq_pos_transfer(&stream->dispatch_cursor, &rreq->collect_cursor);
+	}
 
 	if (!sync) {
 		rreq->iocb = iocb;
@@ -190,9 +323,11 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	if (ret < 0)
 		goto out; /* May be -EIOCBQUEUED */
 	if (sync) {
-		// TODO: Copy from bounce buffer
-		iocb->ki_pos += rreq->transferred;
-		ret = rreq->transferred;
+		ret = netfs_dio_copy_bounce_to_dest(rreq, iocb);
+		if (ret == 0) {
+			iocb->ki_pos += rreq->transferred;
+			ret = rreq->transferred;
+		}
 	}
 
 out:

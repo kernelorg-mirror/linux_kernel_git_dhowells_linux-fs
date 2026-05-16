@@ -263,6 +263,7 @@ struct netfs_io_request {
 	struct bvecq_pos	collect_cursor;	/* Clear-up point of I/O buffer */
 	struct bvecq_pos	bounce_alloc;	/* Bounce buffer allocation point */
 	struct bvecq_pos	encrypt_cursor;	/* Encrypt dispatch point */
+	struct bvecq_pos	bounce_copy;	/* Bounce buffer copy-out point */
 	struct bvecq_pos	bounce_collect;	/* Bounce buffer cleanup point */
 	struct bvecq_pos	retry_cursor;	/* Point from which retries are dispatched */
 	wait_queue_head_t	waitq;		/* Processor waiter */
@@ -278,6 +279,7 @@ struct netfs_io_request {
 	atomic64_t		encrypted_to;	/* Position encryption has reached */
 	unsigned long long	collected_to;	/* Point we've collected to */
 	unsigned long long	cache_coll_to;	/* Point the cache has collected to */
+	unsigned long long	copied_to;	/* Position we've copied from bounce buf to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
 	unsigned long long	bounce_cleaned_to; /* Position we've cleaned the bounce buffer to */
 	unsigned long long	abandon_to;	/* Position to abandon folios to */

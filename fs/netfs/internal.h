@@ -51,6 +51,7 @@ void netfs_decrypt_dio(struct netfs_io_request *rreq);
  */
 int netfs_prepare_unbuffered_read_buffer(struct netfs_io_subrequest *subreq,
 					 unsigned int max_segs);
+int netfs_dio_copy_bounce_to_dest(struct netfs_io_request *rreq, struct kiocb *iocb);
 
 /*
  * direct_write.c

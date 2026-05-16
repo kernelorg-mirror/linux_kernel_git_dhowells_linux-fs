@@ -141,6 +141,7 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 	bvecq_pos_unset(&rreq->collect_cursor);
 	bvecq_pos_unset(&rreq->bounce_alloc);
 	bvecq_pos_unset(&rreq->encrypt_cursor);
+	bvecq_pos_unset(&rreq->bounce_copy);
 	bvecq_pos_unset(&rreq->bounce_collect);
 	bvecq_pos_unset(&rreq->retry_cursor);
 	bvecq_put(rreq->spare);
