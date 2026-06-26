@@ -36,7 +36,7 @@ struct sockaddr_rxrpc {
 #define RXRPC_MIN_SECURITY_LEVEL	4	/* minimum security level */
 #define RXRPC_UPGRADEABLE_SERVICE	5	/* Upgrade service[0] -> service[1] */
 #define RXRPC_SUPPORTED_CMSG		6	/* Get highest supported control message type */
-#define RXRPC_MANAGE_RESPONSE		7	/* [clnt] Want to manage RESPONSE packets */
+/* RXRPC_MANAGE_RESPONSE was at 7 */
 
 /*
  * RxRPC control messages
@@ -58,11 +58,7 @@ enum rxrpc_cmsg_type {
 	RXRPC_TX_LENGTH		= 12,	/* -s-: Total length of Tx data */
 	RXRPC_SET_CALL_TIMEOUT	= 13,	/* -s-: Set one or more call timeouts */
 	RXRPC_CHARGE_ACCEPT	= 14,	/* Ss-: Charge the accept pool with a user call ID */
-	RXRPC_OOB_ID		= 15,	/* -sr: OOB message ID */
-	RXRPC_CHALLENGED	= 16,	/* C-r: Info on a received CHALLENGE */
-	RXRPC_RESPOND		= 17,	/* Cs-: Respond to a challenge */
-	RXRPC_RESPONDED		= 18,	/* S-r: Data received in RESPONSE */
-	RXRPC_RESP_RXGK_APPDATA	= 19,	/* Cs-: RESPONSE: RxGK app data to include */
+	/* OOB Challenge/Response was here. */
 	RXRPC_RESPONSE_APPDATA	= 20,	/* Cs-: User key holding app data for RESPONSE */
 	RXRPC__SUPPORTED
 };
@@ -156,20 +152,5 @@ enum rxrpc_cmsg_type {
 #define RXGK_UNSUPPORTED	1233242889	/* Endpoint does not support rxgk */
 #define RXGK_GSSERROR		1233242890	/* GSSAPI mechanism error */
 #endif
-
-/*
- * Challenge information in the RXRPC_CHALLENGED control message.
- */
-struct rxrpc_challenge {
-	__u16		service_id;	/* The service ID of the connection (may be upgraded) */
-	__u8		security_index;	/* The security index of the connection */
-	__u8		pad;		/* Round out to a multiple of 4 bytes. */
-	/* ... The security class gets to append extra information ... */
-};
-
-struct rxgk_challenge {
-	struct rxrpc_challenge	base;
-	__u32			enctype;	/* Krb5 encoding type */
-};
 
 #endif /* _UAPI_LINUX_RXRPC_H */

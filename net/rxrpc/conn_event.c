@@ -442,7 +442,7 @@ bool rxrpc_input_conn_packet(struct rxrpc_connection *conn, struct sk_buff *skb)
 		return true;
 
 	case RXRPC_PACKET_TYPE_CHALLENGE:
-		rxrpc_see_skb(skb, rxrpc_skb_see_oob_challenge);
+		rxrpc_see_skb(skb, rxrpc_skb_see_challenge);
 		if (rxrpc_is_conn_aborted(conn)) {
 			if (conn->completion == RXRPC_CALL_LOCALLY_ABORTED)
 				rxrpc_send_conn_abort(conn);

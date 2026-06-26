@@ -113,7 +113,6 @@
 	EM(rxrpc_abort_call_timeout,		"call-timeout")		\
 	EM(rxrpc_abort_no_service_key,		"no-serv-key")		\
 	EM(rxrpc_abort_nomem,			"nomem")		\
-	EM(rxrpc_abort_response_sendmsg,	"resp-sendmsg")		\
 	EM(rxrpc_abort_service_not_offered,	"serv-not-offered")	\
 	EM(rxrpc_abort_shut_down,		"shut-down")		\
 	EM(rxrpc_abort_unsupported_security,	"unsup-sec")		\
@@ -169,7 +168,6 @@
 	EM(rxrpc_skb_get_conn_secured,		"GET conn-secd") \
 	EM(rxrpc_skb_get_conn_work,		"GET conn-work") \
 	EM(rxrpc_skb_get_local_work,		"GET locl-work") \
-	EM(rxrpc_skb_get_post_oob,		"GET post-oob ") \
 	EM(rxrpc_skb_get_reject_work,		"GET rej-work ") \
 	EM(rxrpc_skb_get_to_recvmsg,		"GET to-recv  ") \
 	EM(rxrpc_skb_get_to_recvmsg_oos,	"GET to-recv-o") \
@@ -186,18 +184,15 @@
 	EM(rxrpc_skb_put_error_report,		"PUT error-rep") \
 	EM(rxrpc_skb_put_input,			"PUT input    ") \
 	EM(rxrpc_skb_put_jumbo_subpacket,	"PUT jumbo-sub") \
-	EM(rxrpc_skb_put_oob,			"PUT oob      ") \
 	EM(rxrpc_skb_put_old_response,		"PUT old-resp ") \
 	EM(rxrpc_skb_put_purge,			"PUT purge    ") \
-	EM(rxrpc_skb_put_purge_oob,		"PUT purge-oob") \
 	EM(rxrpc_skb_put_response,		"PUT response ") \
 	EM(rxrpc_skb_put_response_copy,		"PUT resp-cpy ") \
 	EM(rxrpc_skb_put_rotate,		"PUT rotate   ") \
 	EM(rxrpc_skb_put_unknown,		"PUT unknown  ") \
 	EM(rxrpc_skb_see_conn_work,		"SEE conn-work") \
-	EM(rxrpc_skb_see_oob_challenge,		"SEE oob-chall") \
+	EM(rxrpc_skb_see_challenge,		"SEE challenge") \
 	EM(rxrpc_skb_see_recvmsg,		"SEE recvmsg  ") \
-	EM(rxrpc_skb_see_recvmsg_oob,		"SEE recvm-oob") \
 	EM(rxrpc_skb_see_reject,		"SEE reject   ") \
 	EM(rxrpc_skb_see_rotate,		"SEE rotate   ") \
 	EM(rxrpc_skb_see_unshare_nomem,		"SEE unshar-nm") \
@@ -264,7 +259,6 @@
 	EM(rxrpc_conn_free,			"FREE        ") \
 	EM(rxrpc_conn_get_activate_call,	"GET act-call") \
 	EM(rxrpc_conn_get_call_input,		"GET inp-call") \
-	EM(rxrpc_conn_get_challenge_input,	"GET inp-chal") \
 	EM(rxrpc_conn_get_conn_input,		"GET inp-conn") \
 	EM(rxrpc_conn_get_idle,			"GET idle    ") \
 	EM(rxrpc_conn_get_poke_abort,		"GET pk-abort") \
@@ -276,12 +270,10 @@
 	EM(rxrpc_conn_new_service,		"NEW service ") \
 	EM(rxrpc_conn_put_call,			"PUT call    ") \
 	EM(rxrpc_conn_put_call_input,		"PUT inp-call") \
-	EM(rxrpc_conn_put_challenge_input,	"PUT inp-chal") \
 	EM(rxrpc_conn_put_conn_input,		"PUT inp-conn") \
 	EM(rxrpc_conn_put_discard_idle,		"PUT disc-idl") \
 	EM(rxrpc_conn_put_local_dead,		"PUT loc-dead") \
 	EM(rxrpc_conn_put_noreuse,		"PUT noreuse ") \
-	EM(rxrpc_conn_put_oob,			"PUT oob     ") \
 	EM(rxrpc_conn_put_poke,			"PUT poke    ") \
 	EM(rxrpc_conn_put_service_reaped,	"PUT svc-reap") \
 	EM(rxrpc_conn_put_unbundle,		"PUT unbundle") \
@@ -391,7 +383,6 @@
 	EM(rxrpc_recvmsg_full,			"FULL") \
 	EM(rxrpc_recvmsg_hole,			"HOLE") \
 	EM(rxrpc_recvmsg_next,			"NEXT") \
-	EM(rxrpc_recvmsg_oobq,			"OOBQ") \
 	EM(rxrpc_recvmsg_requeue,		"REQU") \
 	EM(rxrpc_recvmsg_return,		"RETN") \
 	EM(rxrpc_recvmsg_terminal,		"TERM") \
