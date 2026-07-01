@@ -453,9 +453,6 @@ reload:
 
 success:
 	ret = copied;
-	if (rxrpc_call_is_complete(call) &&
-	    call->error < 0)
-		ret = call->error;
 out:
 	call->tx_pending = txb;
 	_leave(" = %d", ret);
@@ -467,8 +464,14 @@ call_terminated:
 	return call->error;
 
 maybe_error:
-	if (copied)
+	if (copied) {
+		if (rxrpc_call_is_complete(call) &&
+		    call->error < 0) {
+			ret = call->error;
+			goto out;
+		}
 		goto success;
+	}
 	goto out;
 
 efault:
@@ -800,9 +803,16 @@ error_release_sock:
  * Allow a kernel service to send data on a call.  The call must be in an state
  * appropriate to sending data.  No control data should be supplied in @msg,
  * nor should an address be supplied.  MSG_MORE should be flagged if there's
- * more data to come, otherwise this data will end the transmission phase.
+ * more data to come, otherwise this data will end the transmission phase if
+ * all the data is buffered.
  *
- * Return: %0 if successful and a negative error code otherwise.
+ * Note that this function may return a short send, in which case it should be
+ * called again for the remainder of the data or to pick up an error that
+ * caused the short send.
+ *
+ * Return: The number of bytes buffered (could be %0 if @len is 0 or
+ * msg_iter holds 0 bytes) if successful and a negative error code
+ * otherwise.
  */
 int rxrpc_kernel_send_data(struct socket *sock, struct rxrpc_call *call,
 			   struct msghdr *msg, size_t len,

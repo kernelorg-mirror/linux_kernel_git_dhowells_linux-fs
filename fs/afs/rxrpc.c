@@ -873,7 +873,7 @@ void afs_send_empty_reply(struct afs_call *call)
 
 	switch (rxrpc_kernel_send_data(net->socket, call->rxcall, &msg, 0,
 				       afs_notify_end_reply_tx)) {
-	case 0:
+	case 0: /* Shouldn't buffer more than 0 bytes. */
 		_leave(" [replied]");
 		return;
 
