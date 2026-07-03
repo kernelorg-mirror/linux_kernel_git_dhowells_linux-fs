@@ -1426,6 +1426,8 @@ static struct rbd_obj_request *rbd_obj_request_create(void)
 {
 	struct rbd_obj_request *obj_request;
 
+	printk("%u: %s\n", current->pid, __func__);
+
 	obj_request = kmem_cache_zalloc(rbd_obj_request_cache, GFP_NOIO);
 	if (!obj_request)
 		return NULL;
@@ -2147,6 +2149,7 @@ static int rbd_osd_setup_copyup(struct ceph_osd_request *osd_req, int which,
 
 static int rbd_obj_init_read(struct rbd_obj_request *obj_req)
 {
+	printk("%u: %s\n", current->pid, __func__);
 	obj_req->read_state = RBD_OBJ_READ_START;
 	return 0;
 }
@@ -2349,6 +2352,8 @@ static struct ceph_object_extent *alloc_object_extent(void *arg)
 	struct rbd_img_request *img_req = arg;
 	struct rbd_obj_request *obj_req;
 
+	printk("%u: %s\n", current->pid, __func__);
+
 	obj_req = rbd_obj_request_create();
 	if (!obj_req)
 		return NULL;
@@ -2366,6 +2371,8 @@ static int __rbd_img_fill_request(struct rbd_img_request *img_req)
 {
 	struct rbd_obj_request *obj_req, *next_obj_req;
 	int ret;
+
+	printk("%d: __rbd_img_fill_request\n", current->pid);
 
 	for_each_obj_request_safe(img_req, obj_req, next_obj_req) {
 		switch (img_req->op_type) {
@@ -2503,13 +2510,18 @@ done:
 	iter->bio = bio;
 	iter->bvix = i;
 	iter->skip = skip;
+
+	printk("%u: %s %u %zx\n", current->pid, __func__, dbuf->nr_slots, obj_req->dbuf_len);
 }
 
 static int rbd_img_alloc_databufs(struct rbd_img_request *img_req)
 {
 	struct rbd_obj_request *obj_req;
 
+	printk("%u: %s\n", current->pid, __func__);
+
 	for_each_obj_request(img_req, obj_req) {
+		printk("%u: alloc %u\n", current->pid, obj_req->bvec_count);
 		obj_req->dbuf = bvecq_alloc_chain(obj_req->bvec_count, GFP_NOIO, false);
 		if (!obj_req->dbuf)
 			return -ENOMEM;
@@ -2624,6 +2636,8 @@ static int rbd_img_fill_from_bvecq(struct rbd_img_request *img_req,
 	unsigned int i;
 	int ret;
 
+	printk("%u: %s\n", current->pid, __func__);
+
 	/*
 	 * Create object requests and determine ->bvec_count for each object
 	 * request.  Note that ->bvec_count sum over all object requests may
@@ -2705,6 +2719,8 @@ static int rbd_obj_read_object(struct rbd_obj_request *obj_req)
 
 	osd_req_op_extent_init(osd_req, 0, CEPH_OSD_OP_READ,
 			       obj_req->ex.oe_off, obj_req->ex.oe_len, 0, 0);
+	printk("%d: read %zx\n", current->pid, obj_req->dbuf_len);
+	//bvecq_dump(obj_req->dbuf);
 	osd_req_op_extent_osd_bvecq(osd_req, 0, obj_req->dbuf, obj_req->dbuf_len);
 	rbd_osd_format_read(osd_req);
 
@@ -2728,6 +2744,8 @@ static int rbd_obj_read_from_parent(struct rbd_obj_request *obj_req,
 	struct rbd_device *parent = img_req->rbd_dev->parent;
 	struct rbd_img_request *child_img_req;
 	int ret;
+
+	printk("%d: %s\n", current->pid, __func__);
 
 	child_img_req = kmem_cache_alloc(rbd_img_request_cache, GFP_NOIO);
 	if (!child_img_req)
@@ -2764,6 +2782,8 @@ static bool rbd_obj_advance_read(struct rbd_obj_request *obj_req, int *result)
 	int ret;
 
 again:
+	printk("%d: rbd_obj_advance_read %zx\n", current->pid, obj_req->dbuf_len);
+
 	switch (obj_req->read_state) {
 	case RBD_OBJ_READ_START:
 		rbd_assert(!*result);
@@ -2993,6 +3013,8 @@ static int rbd_obj_copyup_read_parent(struct rbd_obj_request *obj_req)
 {
 	struct rbd_device *rbd_dev = obj_req->img_request->rbd_dev;
 	int ret;
+
+	printk("%d: %s\n", current->pid, __func__);
 
 	rbd_assert(obj_req->num_img_extents);
 	prune_extents(obj_req->img_extents, &obj_req->num_img_extents,
@@ -3274,6 +3296,8 @@ static bool __rbd_obj_handle_request(struct rbd_obj_request *obj_req,
 	struct rbd_device *rbd_dev = img_req->rbd_dev;
 	bool done;
 
+	printk("%d: __rbd_obj_handle_request\n", current->pid);
+
 	mutex_lock(&obj_req->state_mutex);
 	if (!rbd_img_is_write(img_req))
 		done = rbd_obj_advance_read(obj_req, result);
@@ -3377,17 +3401,22 @@ static void rbd_img_object_requests(struct rbd_img_request *img_req)
 	struct rbd_device *rbd_dev = img_req->rbd_dev;
 	struct rbd_obj_request *obj_req;
 
+	printk("%u: rbd_img_object_requests\n", current->pid);
+
 	rbd_assert(!img_req->pending.result && !img_req->pending.num_pending);
 	rbd_assert(!need_exclusive_lock(img_req) ||
 		   __rbd_is_lock_owner(rbd_dev));
 
 	if (test_bit(IMG_REQ_CHILD, &img_req->flags)) {
 		rbd_assert(!rbd_img_is_write(img_req));
+		printk("%u: IMG_REQ_CHILD\n", current->pid);
 	} else {
 		struct request *rq = blk_mq_rq_from_pdu(img_req);
 		u64 off = (u64)blk_rq_pos(rq) << SECTOR_SHIFT;
 		u64 len = blk_rq_bytes(rq);
 		u64 mapping_size;
+
+		printk("%u: !CHILD %llx-%llx\n", current->pid, off, off + len - 1);
 
 		down_read(&rbd_dev->header_rwsem);
 		mapping_size = rbd_dev->mapping.size;
@@ -3409,6 +3438,8 @@ static void rbd_img_object_requests(struct rbd_img_request *img_req)
 	for_each_obj_request(img_req, obj_req) {
 		int result = 0;
 
+		printk("%u: each\n", current->pid);
+
 		if (__rbd_obj_handle_request(obj_req, &result)) {
 			if (result) {
 				img_req->pending.result = result;
@@ -3425,6 +3456,9 @@ static bool rbd_img_advance(struct rbd_img_request *img_req, int *result)
 	int ret;
 
 again:
+	printk("%d: rbd_img_advance %zx\n",
+	       current->pid, img_req->obj_request ? img_req->obj_request->dbuf_len : 0x919191);
+
 	switch (img_req->state) {
 	case RBD_IMG_START:
 		rbd_assert(!*result);
@@ -3495,6 +3529,7 @@ static bool __rbd_img_handle_request(struct rbd_img_request *img_req,
 
 static void rbd_img_handle_request(struct rbd_img_request *img_req, int result)
 {
+	printk("%u: rbd_img_handle_request\n", current->pid);
 again:
 	if (!__rbd_img_handle_request(img_req, &result))
 		return;
@@ -4570,6 +4605,8 @@ static int rbd_obj_method_sync(struct rbd_device *rbd_dev,
 	size_t reply_len = inbound_size;
 	int ret;
 
+	printk("%u: %s\n", current->pid, __func__);
+
 	/*
 	 * Method calls are ultimately read operations.  The result
 	 * should placed into the inbound buffer provided.  They
@@ -4617,6 +4654,9 @@ static void rbd_queue_workfn(struct work_struct *work)
 	u64 offset = (u64)blk_rq_pos(rq) << SECTOR_SHIFT;
 	u64 length = blk_rq_bytes(rq);
 	int result;
+
+	printk("%u: >>> rbd_queue_workfn %u %llx-%llx %llx\n",
+	       current->pid, op_type, offset, offset + length - 1, length);
 
 	/* Ignore/skip any zero-length requests */
 	if (!length) {
@@ -4709,6 +4749,8 @@ static int rbd_obj_read_sync(struct rbd_device *rbd_dev,
 	struct ceph_osd_client *osdc = &rbd_dev->rbd_client->client->osdc;
 	struct ceph_osd_request *req;
 	int ret;
+
+	printk("%u: rbd_obj_read_sync %d\n", current->pid, len);
 
 	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_KERNEL);
 	if (!req)

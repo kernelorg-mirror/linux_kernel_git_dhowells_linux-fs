@@ -3212,8 +3212,11 @@ static void send_linger(struct ceph_osd_linger_request *lreq)
 			refcount_inc(&lreq->request_pl->refcnt);
 			osd_req_op_notify_init(req, 0, lreq->linger_id,
 					       lreq->request_pl);
+			printk("init %zu\n", lreq->notify_id_len);
 			ceph_osd_bvecq_init(resp, bvecq_get(lreq->notify_id_buf),
 					    lreq->notify_id_len);
+			printk("inited %zu\n", resp->bvecq_len);
+			bvecq_dump(resp->bvecq);
 		}
 		dout("lreq %p register\n", lreq);
 		req->r_callback = linger_commit_cb;
@@ -3227,6 +3230,7 @@ static void send_linger(struct ceph_osd_linger_request *lreq)
 	lreq->reg_req = req;
 	mutex_unlock(&lreq->lock);
 
+	printk("submit\n");
 	submit_request(req, true);
 }
 
