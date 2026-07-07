@@ -879,13 +879,20 @@ The kernel interface functions are as follows:
      exclusively to in-kernel virtual addresses.  msg.msg_flags may be given
      MSG_MORE if there will be subsequent data sends for this call.
 
-     The msg must not specify a destination address, control data or any flags
-     other than MSG_MORE.  len is the total amount of data to transmit.
+     msg must not specify a destination address, control data or any flags
+     other than MSG_MORE.  len is the amount of data to add to the
+     transmission.  The last-packet flag will only be set on the outgoing
+     packet if MSG_MORE is not set and len amount of bytes are buffered.
 
      notify_end_rx can be NULL or it can be used to specify a function to be
      called when the call changes state to end the Tx phase.  This function is
      called with a spinlock held to prevent the last DATA packet from being
      transmitted until the function returns.
+
+     The function returns the amount of data buffered or an error.  It will
+     return zero only if len is 0 or if msg->msg_iter is empty.  It may also
+     make a short write, buffering less than the amount of data provided or the
+     len specified, in which case it should be called again.
 
  (#) Receive data from a call::
 
