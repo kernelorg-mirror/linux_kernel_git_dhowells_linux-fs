@@ -339,6 +339,7 @@ calls, to invoke certain actions and to report certain conditions.  These are:
 	RXRPC_EXCLUSIVE_CALL	s-- n/a		Make an exclusive client call
 	RXRPC_UPGRADE_SERVICE	s-- n/a		Client call can be upgraded
 	RXRPC_TX_LENGTH		s-- data len	Total length of Tx data
+	RXRPC_RESPONSE_APPDATA	Cs- key serial	RESPONSE app data key
 	=======================	=== ===========	===============================
 
 	(SRT = usable in Sendmsg / delivered by Recvmsg / Terminal message)
@@ -431,6 +432,15 @@ calls, to invoke certain actions and to report certain conditions.  These are:
 
      This takes a parameter of __s64 type that indicates how much will be
      transmitted.  This may not be less than zero.
+
+ (#) RXRPC_RESPONSE_APPDATA
+
+     This is used to pass a key containing application data to be included in a
+     RESPONSE packet.  Currently, this only applies to RxGK keys.  This may be
+     used, for instance, by the AFS filesystem client to pass a token to the
+     fileserver for the fileserver to use to set up a secure connection to the
+     cache manager.  This is only used when setting up a client call and
+     ignored any other time it is seen.
 
 The symbol RXRPC__SUPPORTED is defined as one more than the highest control
 message type supported.  At run time this can be queried by means of the
@@ -800,6 +810,7 @@ The kernel interface functions are as follows:
 	rxrpc_kernel_begin_call(struct socket *sock,
 				struct sockaddr_rxrpc *srx,
 				struct key *key,
+				struct key *app_data,
 				unsigned long user_call_ID,
 				s64 tx_total_len,
 				gfp_t gfp,
@@ -817,6 +828,10 @@ The kernel interface functions are as follows:
      If a key is supplied then this will be used to secure the call instead of
      the key bound to the socket with the RXRPC_SECURITY_KEY sockopt.  Calls
      secured in this way will still share connections if at all possible.
+
+     If app_data is supplied, this needs to be a user-defined key and will
+     provide the contents of the application data field in a RESPONSE packet
+     generated in response to this call's connection.
 
      The user_call_ID is equivalent to that supplied to sendmsg() in the
      control data buffer.  It is entirely feasible to use this to point to a
