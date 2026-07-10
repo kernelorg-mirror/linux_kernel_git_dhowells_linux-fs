@@ -13,19 +13,22 @@
 
 #ifdef CONFIG_KEYS
 
-/*****************************************************************************/
 /*
  * the payload for a key of type "user" or "logon"
  * - once filled in and attached to a key:
  *   - the payload struct is invariant may not be changed, only replaced
- *   - the payload must be read with RCU procedures or with the key semaphore
- *     held
+ *   - To access the payload, the caller must be holding the key semaphore or
+ *     the RCU read lock or must have first taken a ref on the payload.
+ *   - a ref may be taken on the payload only if the RCU read lock or key
+ *     semaphore is held.  refcount_inc_not_zero() needs to be used to get the
+ *     ref under RCU.
  *   - the payload may only be replaced with the key semaphore write-locked
  * - the key's data length is the size of the actual data, not including the
  *   payload wrapper
  */
 struct user_key_payload {
 	struct rcu_head	rcu;		/* RCU destructor */
+	refcount_t	ref;		/* Reference count */
 	unsigned short	datalen;	/* length of this data */
 	char		data[] __aligned(__alignof__(u64)); /* actual data */
 };
@@ -37,6 +40,7 @@ struct key_preparsed_payload;
 
 extern int user_preparse(struct key_preparsed_payload *prep);
 extern void user_free_preparse(struct key_preparsed_payload *prep);
+void put_user_key_payload(struct user_key_payload *payload);
 extern int user_update(struct key *key, struct key_preparsed_payload *prep);
 extern void user_revoke(struct key *key);
 extern void user_destroy(struct key *key);
