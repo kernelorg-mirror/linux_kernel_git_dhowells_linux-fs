@@ -115,6 +115,7 @@ int afs_open_socket(struct afs_net *net)
 
 error_2:
 	sock_release(socket);
+	key_put(net->fs_cm_token_key);
 error_1:
 	_leave(" = %d", ret);
 	return ret;
