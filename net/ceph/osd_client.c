@@ -3204,15 +3204,16 @@ static void send_linger(struct ceph_osd_linger_request *lreq)
 			osd_req_op_watch_init(req, 0, CEPH_OSD_WATCH_OP_WATCH,
 					      lreq->linger_id, 0);
 		} else {
+			struct ceph_osd_data *resp =
+				osd_req_op_data(req, 0, notify, response_data);
+
 			lreq->notify_id = 0;
 
 			refcount_inc(&lreq->request_pl->refcnt);
 			osd_req_op_notify_init(req, 0, lreq->linger_id,
 					       lreq->request_pl);
-			ceph_osd_bvecq_init(
-				osd_req_op_data(req, 0, notify, response_data),
-				bvecq_get(lreq->notify_id_buf),
-				lreq->notify_id_len);
+			ceph_osd_bvecq_init(resp, bvecq_get(lreq->notify_id_buf),
+					    lreq->notify_id_len);
 		}
 		dout("lreq %p register\n", lreq);
 		req->r_callback = linger_commit_cb;
@@ -5005,7 +5006,8 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 	}
 
 	/* for notify_id */
-	lreq->notify_id_buf = bvecq_alloc_buffer(PAGE_SIZE, GFP_NOIO, false);
+	lreq->notify_id_len = PAGE_SIZE;
+	lreq->notify_id_buf = bvecq_alloc_buffer(lreq->notify_id_len, GFP_NOIO, false);
 	if (!lreq->notify_id_buf) {
 		ret = -ENOMEM;
 		goto out_put_lreq;
