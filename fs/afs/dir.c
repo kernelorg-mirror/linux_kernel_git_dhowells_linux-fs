@@ -251,7 +251,7 @@ static ssize_t afs_do_read_single(struct afs_vnode *dvnode, struct file *file)
 		size_t cur_size = dvnode->directory_size;
 
 		ret = bvecq_expand_buffer(&dvnode->directory, &cur_size,
-					  round_up(i_size, PAGE_SIZE), GFP_KERNEL);
+					  round_up(i_size, PAGE_SIZE), GFP_KERNEL, false);
 		dvnode->directory_size = cur_size;
 		if (ret < 0)
 			return ret;

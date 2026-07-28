@@ -119,7 +119,7 @@ static union afs_xdr_dir_block *afs_dir_get_block(struct afs_dir_iter *iter, siz
 		size_t cur_size = dvnode->directory_size;
 
 		ret = bvecq_expand_buffer(&dvnode->directory, &cur_size, blend,
-					  GFP_KERNEL);
+					  GFP_KERNEL, false);
 		dvnode->directory_size = cur_size;
 		if (ret < 0)
 			goto fail;

@@ -7,7 +7,6 @@
 
 #include <linux/module.h>
 #include <linux/export.h>
-#include <linux/mempool.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "internal.h"
@@ -31,6 +30,7 @@ mempool_t netfs_request_pool;
 mempool_t netfs_subrequest_pool;
 mempool_t netfs_writeback_pool;
 mempool_t netfs_bvecq_pool;
+mempool_t netfs_page_pool;
 
 #ifdef CONFIG_PROC_FS
 LIST_HEAD(netfs_io_requests);
@@ -106,6 +106,32 @@ static const struct seq_operations netfs_requests_seq_ops = {
 };
 #endif /* CONFIG_PROC_FS */
 
+/*
+ * A mempool_alloc_t and mempool_free_t for a page allocator that allocates
+ * pages of the order specified by pool_data.
+ */
+static void *netfs_mempool_alloc_page(gfp_t gfp_mask, void *pool_data)
+{
+	struct page *page;
+	unsigned int order = (unsigned long)pool_data;
+
+	page = alloc_pages(gfp_mask | __GFP_COMP, order);
+	if (page)
+		set_page_count(page, 1);
+	return page;
+}
+
+static void netfs_mempool_free_page(void *element, void *pool_data)
+{
+	put_page(element);
+}
+
+static int netfs_init_page_pool(mempool_t *pool, int min_nr, long order)
+{
+	return mempool_init(pool, min_nr, netfs_mempool_alloc_page,
+			    netfs_mempool_free_page, (void *)order);
+}
+
 static int __init netfs_init(void)
 {
 	int ret = -ENOMEM;
@@ -115,6 +141,8 @@ static int __init netfs_init(void)
 	if (mempool_init_kmalloc_pool(&netfs_writeback_pool, 100,
 				      sizeof(struct netfs_writeback)) < 0)
 		goto error_writeback_pool;
+	if (netfs_init_page_pool(&netfs_page_pool, 20, 0) < 0)
+		goto error_page_pool;
 
 	netfs_request_slab = kmem_cache_create("netfs_request",
 					       sizeof(struct netfs_io_request), 0,
@@ -168,6 +196,8 @@ error_subreq:
 error_reqpool:
 	kmem_cache_destroy(netfs_request_slab);
 error_req:
+	mempool_exit(&netfs_page_pool);
+error_page_pool:
 	mempool_exit(&netfs_writeback_pool);
 error_writeback_pool:
 	mempool_exit(&netfs_bvecq_pool);
@@ -184,6 +214,7 @@ static void __exit netfs_exit(void)
 	kmem_cache_destroy(netfs_subrequest_slab);
 	mempool_exit(&netfs_request_pool);
 	kmem_cache_destroy(netfs_request_slab);
+	mempool_exit(&netfs_page_pool);
 	mempool_exit(&netfs_writeback_pool);
 	mempool_exit(&netfs_bvecq_pool);
 }

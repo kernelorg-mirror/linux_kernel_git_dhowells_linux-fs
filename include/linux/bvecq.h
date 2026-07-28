@@ -76,7 +76,8 @@ struct bvecq *bvecq_alloc_chain(size_t nr_slots, gfp_t gfp, bool for_writeback);
 struct bvecq *bvecq_alloc_buffer2(size_t size, unsigned int pre_slots, gfp_t gfp,
 				  bool for_writeback);
 void bvecq_put(struct bvecq *bq);
-int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, gfp_t gfp);
+int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size,
+			gfp_t gfp, bool for_writeback);
 int bvecq_shorten_buffer(struct bvecq *bq, unsigned int slot, size_t size);
 int bvecq_buffer_init(struct bvecq_pos *pos, gfp_t gfp, bool for_writeback);
 void bvecq_buffer_append(struct bvecq_pos *pos, struct bvecq *bq);

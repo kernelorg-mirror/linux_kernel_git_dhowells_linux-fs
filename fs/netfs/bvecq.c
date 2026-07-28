@@ -229,6 +229,7 @@ EXPORT_SYMBOL(bvecq_alloc_buffer2);
 static void bvecq_free_slot(struct bvecq *bq, unsigned int slot)
 {
 	struct page *page = bq->bv[slot].bv_page;
+	int order;
 
 	if (!page)
 		return;
@@ -243,7 +244,15 @@ static void bvecq_free_slot(struct bvecq *bq, unsigned int slot)
 		unpin_user_page(page);
 		break;
 	case BVECQ_MEM_ALLOCED:
-		__free_pages(page, compound_order(page));
+		if (is_zero_page(page)) {
+			put_page(page);
+			break;
+		}
+		order = compound_order(page);
+		if (order > 0)
+			__free_pages(page, order);
+		else
+			mempool_free(page, &netfs_page_pool);
 		break;
 	default:
 		WARN_ON_ONCE(1);
@@ -283,13 +292,15 @@ EXPORT_SYMBOL(bvecq_put);
  * @_cur_size: Current size of the buffer (updated).
  * @size: Target size of the buffer.
  * @gfp: The allocation constraints.
+ * @for_writeback: True if allocating for writeback
  *
  * Append extra pages to a buffer to increase its capacity to the @size
  * specified.  If the current tail has space, but is not of the
  * BVECQ_MEM_ALLOCED memory type, a separate bvecq will be allocated to hold
  * the new memory.
  */
-int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, gfp_t gfp)
+int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size,
+			gfp_t gfp, bool for_writeback)
 {
 	struct bvecq *tail = *_buffer;
 
@@ -306,7 +317,7 @@ int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, 
 		if (!tail || bvecq_is_full(tail) || tail->mem_type != BVECQ_MEM_ALLOCED) {
 			struct bvecq *p;
 
-			p = bvecq_alloc_one(BVECQ_STD_SLOTS, gfp, false);
+			p = bvecq_alloc_one(BVECQ_STD_SLOTS, gfp, for_writeback);
 			if (!p)
 				return -ENOMEM;
 			if (tail)
@@ -322,8 +333,10 @@ int bvecq_expand_buffer(struct bvecq **_buffer, size_t *_cur_size, size_t size, 
 
 		page = alloc_pages(gfp | __GFP_COMP, order);
 		if (!page && order > 0) {
-			page = alloc_pages(gfp | __GFP_COMP, 0);
-			order = 0;
+			if (!for_writeback)
+				page = alloc_pages(gfp | __GFP_COMP, 0);
+			else
+				page = mempool_alloc(&netfs_page_pool, gfp | __GFP_COMP);
 		}
 		if (!page)
 			return -ENOMEM;
