@@ -85,11 +85,13 @@ enum cachefiles_prepare_read_trace {
 
 enum cachefiles_error_trace {
 	cachefiles_trace_alignment_error,
+	cachefiles_trace_create_nospace,
 	cachefiles_trace_fallocate_error,
 	cachefiles_trace_getxattr_error,
 	cachefiles_trace_link_error,
 	cachefiles_trace_lookup_error,
 	cachefiles_trace_mkdir_error,
+	cachefiles_trace_mkdir_nospace,
 	cachefiles_trace_notify_change_error,
 	cachefiles_trace_open_error,
 	cachefiles_trace_read_error,
@@ -102,6 +104,8 @@ enum cachefiles_error_trace {
 	cachefiles_trace_trunc_error,
 	cachefiles_trace_unlink_error,
 	cachefiles_trace_write_error,
+	cachefiles_trace_write_nospace,
+	cachefiles_trace_write_nospace_2,
 };
 
 #endif
@@ -171,11 +175,13 @@ enum cachefiles_error_trace {
 
 #define cachefiles_error_traces						\
 	EM(cachefiles_trace_alignment_error,	"align")		\
+	EM(cachefiles_trace_create_nospace,	"create-nospace")	\
 	EM(cachefiles_trace_fallocate_error,	"fallocate")		\
 	EM(cachefiles_trace_getxattr_error,	"getxattr")		\
 	EM(cachefiles_trace_link_error,		"link")			\
 	EM(cachefiles_trace_lookup_error,	"lookup")		\
 	EM(cachefiles_trace_mkdir_error,	"mkdir")		\
+	EM(cachefiles_trace_mkdir_nospace,	"mkdir-nospace")	\
 	EM(cachefiles_trace_notify_change_error, "notify_change")	\
 	EM(cachefiles_trace_open_error,		"open")			\
 	EM(cachefiles_trace_read_error,		"read")			\
@@ -187,7 +193,9 @@ enum cachefiles_error_trace {
 	EM(cachefiles_trace_tmpfile_error,	"tmpfile")		\
 	EM(cachefiles_trace_trunc_error,	"trunc")		\
 	EM(cachefiles_trace_unlink_error,	"unlink")		\
-	E_(cachefiles_trace_write_error,	"write")
+	EM(cachefiles_trace_write_error,	"write")		\
+	EM(cachefiles_trace_write_nospace,	"write-nospace")	\
+	E_(cachefiles_trace_write_nospace_2,	"write-nospace-2")
 
 
 /*
@@ -705,6 +713,26 @@ TRACE_EVENT(cachefiles_io_error,
 		      __entry->backer,
 		      __print_symbolic(__entry->where, cachefiles_error_traces),
 		      __entry->error)
+	    );
+
+TRACE_EVENT(cachefiles_no_space,
+	    TP_PROTO(struct cachefiles_object *obj, enum cachefiles_error_trace trace),
+
+	    TP_ARGS(obj, trace),
+
+	    TP_STRUCT__entry(
+		    __field(unsigned int,			obj)
+		    __field(enum cachefiles_error_trace,	trace)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->obj	= obj ? obj->debug_id : 0;
+		    __entry->trace	= trace;
+			   ),
+
+	    TP_printk("o=%08x %s",
+		      __entry->obj,
+		      __print_symbolic(__entry->trace, cachefiles_error_traces))
 	    );
 
 #endif /* _TRACE_CACHEFILES_H */

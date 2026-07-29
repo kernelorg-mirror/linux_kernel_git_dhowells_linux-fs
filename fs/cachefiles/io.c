@@ -672,9 +672,13 @@ int __cachefiles_prepare_write(struct cachefiles_object *object,
 	 * space, we need to see if it's fully allocated.  If it's not, we may
 	 * want to cull it.
 	 */
-	if (cachefiles_has_space(cache, 0, *_len / cache->bsize,
-				 cachefiles_has_space_check) == 0)
+	ret = cachefiles_has_space(cache, 0, *_len / cache->bsize,
+				   cachefiles_has_space_check);
+	if (ret == 0)
 		return 0; /* Enough space to simply overwrite the whole block */
+
+	if (ret == -ENOBUFS)
+		trace_cachefiles_no_space(object, cachefiles_trace_write_nospace_2);
 
 	pos = cachefiles_inject_read_error();
 	if (pos == 0)
@@ -704,8 +708,11 @@ int __cachefiles_prepare_write(struct cachefiles_object *object,
 	return ret;
 
 check_space:
-	return cachefiles_has_space(cache, 0, *_len / cache->bsize,
-				    cachefiles_has_space_for_write);
+	ret = cachefiles_has_space(cache, 0, *_len / cache->bsize,
+				   cachefiles_has_space_for_write);
+	if (ret == -ENOBUFS)
+		trace_cachefiles_no_space(object, cachefiles_trace_write_nospace);
+	return ret;
 }
 
 static int cachefiles_prepare_write_old(struct netfs_cache_resources *cres,
@@ -757,10 +764,14 @@ static int cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 	       wreq->debug_id, subreq->debug_index, start, start + len - 1);
 
 	if (!cachefiles_cres_file(cres)) {
-		if (!fscache_wait_for_operation(cres, FSCACHE_WANT_WRITE))
+		if (!fscache_wait_for_operation(cres, FSCACHE_WANT_WRITE)) {
+			trace_netfs_sreq(subreq, netfs_sreq_trace_cache_waitfail);
 			return -ENOBUFS;
-		if (!cachefiles_cres_file(cres))
+		}
+		if (!cachefiles_cres_file(cres)) {
+			trace_netfs_sreq(subreq, netfs_sreq_trace_cache_nofile);
 			return -ENOBUFS;
+		}
 	}
 
 	ret = netfs_prepare_write_buffer(subreq, BIO_MAX_VECS);
