@@ -95,7 +95,7 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 
 		creq->dispatch_cursor.offset = cache->submit_off;
 
-		atomic64_set(&creq->issued_to, fpos + cache->submit_off);
+		atomic64_set(&cache->issued_to, fpos + cache->submit_off);
 		part = netfs_advance_write(creq, cache, fpos + cache->submit_off,
 					   cache->submit_len, to_eof);
 		cache->submit_off += part;
@@ -106,7 +106,7 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	} while (cache->submit_len > 0);
 
 	bvecq_pos_step(&creq->dispatch_cursor);
-	atomic64_set(&creq->issued_to, fpos + fsize);
+	atomic64_set(&cache->issued_to, fpos + fsize);
 
 	if (flen < fsize)
 		netfs_issue_write(creq, cache);

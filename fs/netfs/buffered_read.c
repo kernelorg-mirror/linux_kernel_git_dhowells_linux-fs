@@ -532,6 +532,7 @@ static int netfs_create_singular_buffer(struct netfs_io_request *rreq, struct fo
 	bvecq_pos_set(&rreq->collect_cursor, &rreq->dispatch_cursor);
 	rreq->submitted = rreq->start + fsize;
 	rreq->progress_at = fsize;
+	bvecq_pos_set(&rreq->collect_cursor, &rreq->load_cursor);
 	return 0;
 }
 
