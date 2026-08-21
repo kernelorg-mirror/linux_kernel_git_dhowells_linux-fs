@@ -26,7 +26,10 @@ struct cachefiles_kiocb {
 	};
 	struct cachefiles_object *object;
 	netfs_io_terminated_t	term_func;
-	void			*term_func_priv;
+	union {
+		struct netfs_io_subrequest *subreq;
+		void			*term_func_priv;
+	};
 	bool			was_async;
 	unsigned int		inval_counter;	/* Copy of cookie->inval_counter */
 	u64			b_writing;
@@ -611,6 +614,15 @@ static int cachefiles_prepare_write(struct netfs_cache_resources *cres,
 	return ret;
 }
 
+static int cachefiles_estimate_write(struct netfs_io_request *wreq,
+				     struct netfs_io_stream *stream,
+				     struct netfs_write_estimate *estimate)
+{
+	estimate->issue_at = stream->issue_from + MAX_RW_COUNT;
+	estimate->max_segs = BIO_MAX_VECS;
+	return 0;
+}
+
 static void cachefiles_prepare_write_subreq(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
@@ -898,6 +910,7 @@ static const struct netfs_cache_ops cachefiles_netfs_cache_ops = {
 	.issue_write		= cachefiles_issue_write,
 	.prepare_write		= cachefiles_prepare_write,
 	.prepare_write_subreq	= cachefiles_prepare_write_subreq,
+	.estimate_write		= cachefiles_estimate_write,
 	.query_occupancy	= cachefiles_query_occupancy,
 	.collect_write		= cachefiles_collect_write,
 };

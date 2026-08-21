@@ -1698,6 +1698,9 @@ extern int afs_check_volume_status(struct afs_volume *, struct afs_operation *);
 /*
  * write.c
  */
+int afs_estimate_write(struct netfs_io_request *wreq,
+		       struct netfs_io_stream *stream,
+		       struct netfs_write_estimate *estimate);
 void afs_prepare_write(struct netfs_io_subrequest *subreq);
 void afs_issue_write(struct netfs_io_subrequest *subreq);
 void afs_begin_writeback(struct netfs_io_request *wreq);

@@ -145,6 +145,16 @@ struct netfs_writeback {
 };
 
 /*
+ * Estimate of maximum write subrequest for writeback.  The filesystem is
+ * responsible for filling this in when called from ->estimate_write(), though
+ * netfslib will preset infinite defaults.
+ */
+struct netfs_write_estimate {
+	uoff_t			issue_at;	/* Point at which we must submit */
+	int			max_segs;	/* Max number of segments in a single RPC */
+};
+
+/*
  * Stream of I/O subrequests going to a particular destination, such as the
  * server or the local cache.  This is mainly intended for writing where we may
  * have to write to multiple destinations concurrently.
@@ -152,10 +162,14 @@ struct netfs_writeback {
 struct netfs_io_stream {
 	/* Submission tracking */
 	struct netfs_io_subrequest *construct;	/* Op being constructed */
+	uoff_t			issue_from;	/* Current issue point */
 	size_t			sreq_max_len;	/* Maximum size of a subrequest */
 	unsigned int		sreq_max_segs;	/* 0 or max number of segments in an iterator */
 	unsigned int		submit_off;	/* Folio offset we're submitting from */
 	unsigned int		submit_len;	/* Amount of data left to submit */
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
 	void (*prepare_write)(struct netfs_io_subrequest *subreq);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	/* Collection tracking */
@@ -340,6 +354,9 @@ struct netfs_request_ops {
 
 	/* Write request handling */
 	void (*begin_writeback)(struct netfs_io_request *wreq);
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
 	void (*prepare_write)(struct netfs_io_subrequest *subreq);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	void (*retry_request)(struct netfs_io_request *wreq, struct netfs_io_stream *stream);
@@ -375,6 +392,11 @@ struct netfs_cache_ops {
 		     struct iov_iter *iter,
 		     netfs_io_terminated_t term_func,
 		     void *term_func_priv);
+
+	/* Estimate the amount of data that can be written in an op. */
+	int (*estimate_write)(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream,
+			      struct netfs_write_estimate *estimate);
 
 	/* Write data to the cache from a netfs subrequest. */
 	void (*issue_write)(struct netfs_io_subrequest *subreq);

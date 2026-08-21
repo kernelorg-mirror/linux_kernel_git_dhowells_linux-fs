@@ -83,6 +83,23 @@ static const struct afs_operation_ops afs_store_data_operation = {
 };
 
 /*
+ * Estimate the maximum size of a write we can send to the server.
+ */
+int afs_estimate_write(struct netfs_io_request *wreq,
+		       struct netfs_io_stream *stream,
+		       struct netfs_write_estimate *estimate)
+{
+	unsigned long long limit = ULLONG_MAX - stream->issue_from;
+	unsigned long long max_len = 256 * 1024 * 1024;
+
+	//if (test_bit(NETFS_SREQ_RETRYING, &subreq->flags))
+	//	max_len = 512 * 1024;
+
+	estimate->issue_at = stream->issue_from + umin(max_len, limit);
+	return 0;
+}
+
+/*
  * Prepare a subrequest to write to the server.  This sets the max_len
  * parameter.
  */

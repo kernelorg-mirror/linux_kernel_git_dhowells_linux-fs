@@ -49,6 +49,22 @@ static void v9fs_begin_writeback(struct netfs_io_request *wreq)
 }
 
 /*
+ * Estimate how much data should be accumulated before we start issuing
+ * write subrequests.
+ */
+static int v9fs_estimate_write(struct netfs_io_request *wreq,
+			       struct netfs_io_stream *stream,
+			       struct netfs_write_estimate *estimate)
+{
+	struct p9_fid *fid = wreq->netfs_priv;
+	unsigned long long limit = ULLONG_MAX - stream->issue_from;
+	unsigned long long max_len = fid->clnt->msize - P9_IOHDRSZ;
+
+	estimate->issue_at = stream->issue_from + umin(max_len, limit);
+	return 0;
+}
+
+/*
  * Issue a subrequest to write to the server.
  */
 static void v9fs_issue_write(struct netfs_io_subrequest *subreq)
@@ -185,6 +201,7 @@ const struct netfs_request_ops v9fs_req_ops = {
 	.free_request		= v9fs_free_request,
 	.issue_read		= v9fs_issue_read,
 	.begin_writeback	= v9fs_begin_writeback,
+	.estimate_write		= v9fs_estimate_write,
 	.issue_write		= v9fs_issue_write,
 };
 
