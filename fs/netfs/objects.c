@@ -66,6 +66,8 @@ struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 
 		INIT_LIST_HEAD(&stream->subrequests);
 		stream->collected_to = rreq->start;
+		stream->issue_from = rreq->start;
+		stream->alignment = 1;
 	}
 
 	if (origin == NETFS_READAHEAD ||
@@ -158,6 +160,9 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 		mempool_free(wback, &netfs_bvecq_pool);
 		
 	}
+
+	for (int i = 0; i < NR_IO_STREAMS; i++)
+		bvecq_pos_unset(&rreq->io_streams[i].dispatch_cursor);
 
 	if (atomic_dec_and_test(&ictx->io_count))
 		wake_up_var(&ictx->io_count);

@@ -654,6 +654,7 @@ TRACE_EVENT(netfs_collect_sreq,
 		    __field(unsigned int,	stream)
 		    __field(unsigned int,	len)
 		    __field(unsigned int,	transferred)
+		    __field(unsigned int,	post_gap)
 		    __field(uoff_t,		start)
 			     ),
 
@@ -663,12 +664,14 @@ TRACE_EVENT(netfs_collect_sreq,
 		    __entry->stream	= subreq->stream_nr;
 		    __entry->start	= subreq->start;
 		    __entry->len	= subreq->len;
+		    __entry->post_gap	= subreq->post_gap;
 		    __entry->transferred = subreq->transferred;
 			   ),
 
-	    TP_printk("R=%08x[%u:%02x] s=%llx t=%x/%x",
+	    TP_printk("R=%08x[%u:%02x] s=%llx t=%x/%x gap=%x",
 		      __entry->wreq, __entry->stream, __entry->subreq,
-		      __entry->start, __entry->transferred, __entry->len)
+		      __entry->start, __entry->transferred, __entry->len,
+		      __entry->post_gap)
 	    );
 
 TRACE_EVENT(netfs_collect_folio,
@@ -766,7 +769,7 @@ TRACE_EVENT(netfs_collect_stream,
 		    __entry->wreq	= wreq->debug_id;
 		    __entry->stream	= stream->stream_nr;
 		    __entry->collected_to = stream->collected_to;
-		    __entry->issued_to	= atomic64_read(&wreq->issued_to);
+		    __entry->issued_to	= atomic64_read(&stream->issued_to);
 			   ),
 
 	    TP_printk("R=%08x[%x:] cto=%llx ito=%llx",

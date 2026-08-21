@@ -233,6 +233,8 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 						struct file *file,
 						uoff_t start,
 						enum netfs_io_origin origin);
+struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wreq,
+						     struct netfs_io_stream *stream);
 void netfs_prepare_write(struct netfs_io_request *wreq,
 			 struct netfs_io_stream *stream,
 			 uoff_t start);

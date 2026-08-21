@@ -160,23 +160,32 @@ struct netfs_write_estimate {
  * have to write to multiple destinations concurrently.
  */
 struct netfs_io_stream {
-	/* Submission tracking */
+	/* Submission tracking (main dispatch only; not retry) */
+	struct bvecq_pos	dispatch_cursor; /* Point from which buffers are dispatched */
 	struct netfs_io_subrequest *construct;	/* Op being constructed */
 	uoff_t			issue_from;	/* Current issue point */
+	uoff_t			last_end;	/* End file pos of last folio added */
+	size_t			buffered;	/* Amount in buffer */
+	size_t			post_gap;	/* Length of partial folio tail */
 	size_t			sreq_max_len;	/* Maximum size of a subrequest */
 	unsigned int		sreq_max_segs;	/* 0 or max number of segments in an iterator */
 	unsigned int		submit_off;	/* Folio offset we're submitting from */
 	unsigned int		submit_len;	/* Amount of data left to submit */
+	unsigned int            alignment;      /* Required alignment */
+	u8			applicable;	/* What sources are applicable (NOTE_* mask) */
+	bool			buffering;	/* T if buffering on this stream */
 	int (*estimate_write)(struct netfs_io_request *wreq,
 			      struct netfs_io_stream *stream,
 			      struct netfs_write_estimate *estimate);
 	void (*prepare_write)(struct netfs_io_subrequest *subreq);
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
+	atomic64_t		issued_to;	/* Point to which can be considered issued */
+
 	/* Collection tracking */
 	struct list_head	subrequests;	/* Contributory I/O operations */
 	uoff_t			collected_to;	/* Position we've collected results to */
 	size_t			transferred;	/* The amount transferred from this stream */
-	unsigned short		error;		/* Aggregate error for the stream */
+	short			error;		/* Aggregate error for the stream */
 	enum netfs_io_source	source;		/* Where to read from/write to */
 	unsigned char		stream_nr;	/* Index of stream in parent table */
 	bool			avail;		/* T if stream is available */
@@ -217,11 +226,12 @@ struct netfs_io_subrequest {
 	struct iov_iter		io_iter;	/* Iterator for this subrequest */
 	uoff_t			start;		/* Where to start the I/O */
 	size_t			len;		/* Size of the I/O */
+	size_t			post_gap;	/* Length of partial folio tail */
 	size_t			transferred;	/* Amount of data transferred */
 	refcount_t		ref;
 	short			error;		/* 0 or error that occurred */
 	unsigned short		debug_index;	/* Index in list (for debugging output) */
-	unsigned int		nr_segs;	/* Number of segs in io_iter */
+	unsigned int		nr_segs;	/* Number of segments in content */
 	u8			retry_count;	/* The number of retries (0 on initial pass) */
 	enum netfs_io_source	source;		/* Where to read from/write to */
 	unsigned char		stream_nr;	/* I/O stream this belongs to */
@@ -291,7 +301,6 @@ struct netfs_io_request {
 	long			error;		/* 0 or error that occurred */
 	uoff_t			i_size;		/* Size of the file */
 	uoff_t			start;		/* Start position */
-	atomic64_t		issued_to;	/* Write issuer folio cursor */
 	uoff_t			collected_to;	/* Point we've collected to */
 	uoff_t			cache_coll_to;	/* Point the cache has collected to */
 	uoff_t			cleaned_to;	/* Position we've cleaned folios to */
