@@ -40,6 +40,19 @@
 static int cifs_reopen_file(struct cifsFileInfo *cfile, bool can_flush);
 
 /*
+ * Estimate the amount of data that can be written in one RPC op.
+ */
+static int cifs_estimate_write(struct netfs_io_request *wreq,
+			       struct netfs_io_stream *stream,
+			       struct netfs_write_estimate *estimate)
+{
+	struct cifs_sb_info *cifs_sb = CIFS_SB(wreq->inode->i_sb);
+
+	estimate->issue_at = stream->issue_from + cifs_sb->ctx->wsize;
+	return 0;
+}
+
+/*
  * Prepare a subrequest to upload to the server.  We need to allocate credits
  * so that we know the maximum amount of data that we can include in it.
  */
@@ -362,6 +375,7 @@ const struct netfs_request_ops cifs_req_ops = {
 	.issue_read		= cifs_issue_read,
 	.done			= cifs_rreq_done,
 	.begin_writeback	= cifs_begin_writeback,
+	.estimate_write		= cifs_estimate_write,
 	.prepare_write		= cifs_prepare_write,
 	.issue_write		= cifs_issue_write,
 	.invalidate_cache	= cifs_netfs_invalidate_cache,
