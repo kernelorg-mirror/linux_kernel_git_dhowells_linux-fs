@@ -773,6 +773,36 @@ TRACE_EVENT(netfs_collect_stream,
 		      __entry->collected_to, __entry->issued_to)
 	    );
 
+TRACE_EVENT(netfs_collect_folios,
+	    TP_PROTO(const struct netfs_io_request *wreq,
+		     uoff_t range_start, size_t range_len),
+
+	    TP_ARGS(wreq, range_start, range_len),
+
+	    TP_STRUCT__entry(
+		    __field(unsigned int,	wreq)
+		    __field(size_t,		range_len)
+		    __field(uoff_t,		range_start)
+		    __field(uoff_t,		cleaned_to)
+		    __field(uoff_t,		collected_to)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->wreq		= wreq->debug_id;
+		    __entry->range_len		= range_len;
+		    __entry->range_start	= range_start;
+		    __entry->cleaned_to		= wreq->cleaned_to;
+		    __entry->collected_to	= wreq->collected_to;
+			   ),
+
+	    TP_printk("R=%08x r=%llx-%llx cln=%llx col=%llx",
+		      __entry->wreq,
+		      __entry->range_start,
+		      __entry->range_start + __entry->range_len,
+		      __entry->cleaned_to,
+		      __entry->collected_to)
+	    );
+
 TRACE_EVENT(netfs_bvecq,
 	    TP_PROTO(const struct bvecq *bq,
 		     enum netfs_bvecq_trace trace),

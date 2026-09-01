@@ -369,7 +369,7 @@ static int netfs_write_folio(struct netfs_io_request *wreq,
 		_debug("beyond eof");
 		folio_start_writeback(folio);
 		folio_unlock(folio);
-		wreq->nr_group_rel += netfs_folio_written_back(folio);
+		netfs_folio_written_back(wreq, folio);
 		netfs_put_group_many(wreq->group, wreq->nr_group_rel);
 		wreq->nr_group_rel = 0;
 		return 0;
@@ -457,13 +457,13 @@ static int netfs_write_folio(struct netfs_io_request *wreq,
 		if (!cache->avail) {
 			trace_netfs_folio(folio, netfs_folio_trace_cancel_copy);
 			netfs_issue_write(wreq, upload);
-			netfs_folio_written_back(folio);
+			netfs_folio_written_back(wreq, folio);
 			return 0;
 		}
 		trace_netfs_folio(folio, netfs_folio_trace_store_copy);
 	} else if (!upload->avail && !cache->avail) {
 		trace_netfs_folio(folio, netfs_folio_trace_cancel_store);
-		netfs_folio_written_back(folio);
+		netfs_folio_written_back(wreq, folio);
 		return 0;
 	} else if (!upload->construct) {
 		trace_netfs_folio(folio, netfs_folio_trace_store);

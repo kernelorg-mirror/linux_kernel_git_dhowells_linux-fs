@@ -21,57 +21,6 @@
 #define NEED_RETRY		0x10	/* A front op requests retrying */
 #define SAW_FAILURE		0x20	/* One stream or hit a permanent failure */
 
-struct end_writeback_ctrl {
-	struct xa_state xas;
-	uoff_t fend;
-};
-
-/**
- * end_writeback_iter - End writeback for the folios within the range
- * @mapping: The pagecache to modify
- * @from: Pointer to the starting position
- * @to: The end position (exclusive)
- * @ctrl: Iterator state
- * @folio: The last return from this function or NULL if first call
- *
- * Remove the writeback mark on folios that are entirely within in the given
- * range, where @from is included in the range, but @to is excluded from the
- * range.
- *
- * Return: The folio to end writeback upon or NULL if the next folio isn't
- * wholly within the range.  Note that this does not necessarily imply that the
- * ending is complete.  @ctrl->fend is updated to point directly beyond the
- * folio that was considered and may be negative if cast to loff_t.
- */
-static
-struct folio *end_writeback_iter(struct address_space *mapping,
-				 uoff_t from, uoff_t to,
-				 struct end_writeback_ctrl *ctrl,
-				 struct folio *folio)
-{
-	if (!folio) {
-		lockdep_assert_in_rcu_read_lock();
-		ctrl->xas = (struct xa_state)
-			__XA_STATE(&mapping->i_pages, from / PAGE_SIZE, 0, 0);
-		folio = xas_find(&ctrl->xas, (to - 1) / PAGE_SIZE);
-	} else {
-		folio_end_writeback(folio);
-	retry:
-		folio = xas_next_entry(&ctrl->xas, (to - 1) / PAGE_SIZE);
-	}
-
-	if (xas_retry(&ctrl->xas, folio))
-		goto retry;
-
-	if (!folio)
-		return NULL;
-
-	ctrl->fend = folio_next_pos(folio);
-	if (ctrl->fend > to)
-		folio = NULL;
-	return folio;
-}
-
 static void netfs_dump_request(const struct netfs_io_request *rreq)
 {
 	pr_err("Request R=%08x r=%d fl=%lx or=%x e=%ld\n",
@@ -105,14 +54,22 @@ static void netfs_dump_request(const struct netfs_io_request *rreq)
  * that we are not allowed to lock the folio here on pain of deadlocking with
  * truncate.
  */
-int netfs_folio_written_back(struct folio *folio)
+void netfs_folio_written_back(struct netfs_io_request *wreq, struct folio *folio)
 {
 	enum netfs_folio_trace why = netfs_folio_trace_endwb;
 	struct inode *inode = folio_inode(folio);
 	struct netfs_inode *ictx = netfs_inode(inode);
 	struct netfs_folio *finfo;
 	struct netfs_group *group = NULL;
-	int gcount = 0;
+
+	if (WARN_ONCE(!folio_test_writeback(folio),
+		      "R=%08x: folio %lx is not under writeback\n",
+		      wreq->debug_id, folio->index)) {
+		trace_netfs_folio(folio, netfs_folio_trace_not_under_wback);
+		netfs_dump_request(wreq);
+	}
+
+	trace_netfs_collect_folio(wreq, folio);
 
 	if ((finfo = netfs_folio_info(folio))) {
 		/* Streaming writes cannot be redirtied whilst under writeback,
@@ -128,7 +85,7 @@ int netfs_folio_written_back(struct folio *folio)
 
 		folio_detach_private(folio);
 		group = finfo->netfs_group;
-		gcount++;
+		wreq->nr_group_rel++;
 		kfree(finfo);
 		why = netfs_folio_trace_endwb_s;
 		goto end_wb;
@@ -148,15 +105,34 @@ int netfs_folio_written_back(struct folio *folio)
 		why = netfs_folio_trace_redirtied;
 		if (!folio_test_dirty(folio)) {
 			folio_detach_private(folio);
-			gcount++;
+			wreq->nr_group_rel++;
 			why = netfs_folio_trace_endwb_g;
 		}
 	}
 
 end_wb:
 	trace_netfs_folio(folio, why);
-	folio_end_writeback(folio);
-	return gcount;
+}
+
+static bool netfs_writeback_unlock_range(struct netfs_io_request *wreq, uoff_t stop_at)
+{
+	struct end_writeback_ctrl ctrl = {};
+	struct folio *folio = NULL;
+	bool progress = false;
+
+	rcu_read_lock();
+	for (;;) {
+		folio = end_writeback_iter(wreq->mapping, &ctrl,
+					   wreq->cleaned_to, stop_at, folio);
+		if (!folio)
+			break;
+		netfs_folio_written_back(wreq, folio);
+		wreq->cleaned_to = ctrl.fend;
+		progress = true;
+	}
+	rcu_read_unlock();
+
+	return progress;
 }
 
 /*
@@ -165,15 +141,7 @@ end_wb:
 static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 					  unsigned int *notes)
 {
-	struct bvecq *bvecq = wreq->collect_cursor.bvecq;
-	unsigned int slot = wreq->collect_cursor.slot;
-	uoff_t collected_to = wreq->collected_to;
-
-	if (WARN_ON_ONCE(!bvecq)) {
-		pr_err("[!] Writeback unlock found empty buffer!\n");
-		netfs_dump_request(wreq);
-		return;
-	}
+	struct netfs_writeback *wback, *next;
 
 	if (wreq->origin == NETFS_PGPRIV2_COPY_TO_CACHE) {
 		if (netfs_pgpriv2_unlock_copied_folios(wreq))
@@ -181,57 +149,45 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		return;
 	}
 
-	for (;;) {
-		struct folio *folio;
-		struct netfs_folio *finfo;
-		uoff_t fpos, fend;
-		size_t fsize, flen;
+	wback = wreq->writebacks;
 
-		/* Try to clean up the head of the queue if it appears to be
-		 * used up, but we need to be very careful - the cleanup can
-		 * catch the dispatcher, which could lead to us having nothing
-		 * left in the queue, causing the front and back pointers to
-		 * end up on different tracks.  To avoid this, we must always
-		 * keep at least one segment in the queue.
-		 */
-		if (!bvecq_acquire_slot(bvecq, slot)) {
-			wreq->collect_cursor.slot = slot;
-			if (!bvecq_delete_spent(&wreq->collect_cursor))
-				return;
-			bvecq = wreq->collect_cursor.bvecq;
-			slot  = wreq->collect_cursor.slot;
+	for (;;) {
+		uoff_t stop_at;
+		size_t len;
+
+		/* Jump over discontiguities. */
+		if (wreq->cleaned_to < wback->start)
+			wreq->cleaned_to = wback->start;
+
+		if (wreq->collected_to <= wreq->cleaned_to)
+			break;
+
+		/* Order read of region length before reading folios. */
+		len = smp_load_acquire(&wback->len);
+
+		if (wreq->cleaned_to >= wback->start + len) {
+			/* Order read of next before recheck length. */
+			next = smp_load_acquire(&wback->next);
+			if (!next)
+				break; /* We don't remove the tail writeback. */
+
+			/* Order read of region length before reading folios. */
+			if (len != smp_load_acquire(&wback->len))
+				continue; /* len/next update race. */
+
+			mempool_free(wback, &netfs_bvecq_pool);
+			wreq->writebacks = next;
+			wback = next;
+			continue;
 		}
 
-		folio = page_folio(bvecq->bv[slot].bv_page);
-		if (WARN_ONCE(!folio_test_writeback(folio),
-			      "R=%08x: folio %lx is not under writeback\n",
-			      wreq->debug_id, folio->index))
-			trace_netfs_folio(folio, netfs_folio_trace_not_under_wback);
+		stop_at = min(wreq->collected_to, wback->start + len);
 
-		fpos = folio_pos(folio);
-		fsize = folio_size(folio);
-		finfo = netfs_folio_info(folio);
-		flen = finfo ? finfo->dirty_offset + finfo->dirty_len : fsize;
-
-		fend = min_t(uoff_t, fpos + flen, wreq->i_size);
-
-		trace_netfs_collect_folio(wreq, folio);
-
-		/* Unlock any folio we've transferred all of. */
-		if (collected_to < fend)
+		trace_netfs_collect_folios(wreq, wback->start, len);
+		if (!netfs_writeback_unlock_range(wreq, stop_at))
 			break;
-
-		wreq->nr_group_rel += netfs_folio_written_back(folio);
-		wreq->cleaned_to = fpos + fsize;
 		*notes |= MADE_PROGRESS;
-
-		bvecq->bv[slot].bv_page = NULL;
-		slot++;
-		if (fpos + fsize >= collected_to)
-			break;
 	}
-
-	wreq->collect_cursor.slot = slot;
 }
 
 /*

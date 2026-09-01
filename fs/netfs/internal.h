@@ -222,7 +222,7 @@ static inline void netfs_stat_d(atomic_t *stat)
 /*
  * write_collect.c
  */
-int netfs_folio_written_back(struct folio *folio);
+void netfs_folio_written_back(struct netfs_io_request *wreq, struct folio *folio);
 bool netfs_write_collection(struct netfs_io_request *wreq);
 void netfs_write_collection_worker(struct work_struct *work);
 
