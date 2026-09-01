@@ -135,6 +135,16 @@ enum netfs_cache_collect {
 };
 
 /*
+ * Record of a contiguous region undergoing writeback.  The tail region (ie. if
+ * next is NULL) may be extended dynamically.
+ */
+struct netfs_writeback {
+	struct netfs_writeback	*next;		/* Next extent in list */
+	uoff_t			start;		/* Start position */
+	size_t			len;		/* Total size (can increase) */
+};
+
+/*
  * Stream of I/O subrequests going to a particular destination, such as the
  * server or the local cache.  This is mainly intended for writing where we may
  * have to write to multiple destinations concurrently.
@@ -249,6 +259,8 @@ struct netfs_io_request {
 #endif
 	struct netfs_io_stream	io_streams[2];	/* Streams of parallel I/O operations */
 #define NR_IO_STREAMS 2 //wreq->nr_io_streams
+	struct netfs_writeback	*writebacks;	/* List of regions undergoing writeback */
+	struct netfs_writeback	*writebacks_tail; /* Tail of region list */
 	struct netfs_group	*group;		/* Writeback group being written back */
 	struct bvecq		*spare;		/* Advance allocation of bvecq */
 	struct bvecq_pos	load_cursor;	/* Point at which new folios are loaded in */

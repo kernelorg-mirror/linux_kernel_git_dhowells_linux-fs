@@ -335,6 +335,7 @@ static int netfs_write_folio(struct netfs_io_request *wreq,
 	struct netfs_io_stream *upload = &wreq->io_streams[0];
 	struct netfs_io_stream *cache  = &wreq->io_streams[1];
 	struct netfs_io_stream *stream;
+	struct netfs_writeback *wback;
 	struct netfs_group *fgroup; /* TODO: Use this with ceph */
 	struct netfs_folio *finfo;
 	struct bvecq *queue = wreq->load_cursor.bvecq;
@@ -433,6 +434,25 @@ static int netfs_write_folio(struct netfs_io_request *wreq,
 	folio_start_writeback(folio);
 	folio_unlock(folio);
 
+	/* Keep track of what we will need to unlock. */
+	wback = wreq->writebacks_tail;
+	if (!wback || fpos != wback->start + wback->len || wback->len > LONG_MAX) {
+		wback = mempool_alloc(&netfs_writeback_pool, wreq->gfp);
+		wback->next = NULL;
+		wback->start = fpos;
+		wback->len = fsize;
+
+		if (wreq->writebacks)
+			/* Order write of next after last write of len in old tail. */
+			smp_store_release(&wreq->writebacks_tail->next, wback);
+		else
+			wreq->writebacks = wback;
+		wreq->writebacks_tail = wback;
+	} else {
+		/* Order update of len after setting pointer. */
+		smp_store_release(&wback->len, wback->len + fsize);
+	}
+ 
 	if (fgroup == NETFS_FOLIO_COPY_TO_CACHE) {
 		if (!cache->avail) {
 			trace_netfs_folio(folio, netfs_folio_trace_cancel_copy);

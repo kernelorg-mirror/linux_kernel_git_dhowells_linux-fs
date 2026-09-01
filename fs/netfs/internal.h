@@ -44,6 +44,7 @@ extern struct list_head netfs_io_requests;
 extern spinlock_t netfs_proc_lock;
 extern mempool_t netfs_request_pool;
 extern mempool_t netfs_subrequest_pool;
+extern mempool_t netfs_writeback_pool;
 extern mempool_t netfs_bvecq_pool;
 
 #ifdef CONFIG_PROC_FS
