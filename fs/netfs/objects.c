@@ -151,6 +151,13 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 	bvecq_pos_unset(&rreq->dispatch_cursor);
 	bvecq_pos_unset(&rreq->collect_cursor);
 	bvecq_put(rreq->spare);
+	while (rreq->writebacks) {
+		struct netfs_writeback *wback = rreq->writebacks;
+
+		rreq->writebacks = wback->next;
+		mempool_free(wback, &netfs_bvecq_pool);
+		
+	}
 
 	if (atomic_dec_and_test(&ictx->io_count))
 		wake_up_var(&ictx->io_count);
