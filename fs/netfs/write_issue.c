@@ -68,6 +68,9 @@ struct netfs_wb_params {
 	struct netfs_write_estimate estimates[NR_IO_STREAMS];
 };
 
+static int netfs_prepare_write_single_buffer(struct netfs_io_subrequest *subreq,
+					     unsigned int max_segs);
+
 /*
  * Kill all dirty folios in the event of an unrecoverable error, starting with
  * a locked folio we've already obtained from writeback_iter().
@@ -148,7 +151,6 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 	wreq->io_streams[0].source		= NETFS_UPLOAD_TO_SERVER;
 	wreq->io_streams[0].applicable		= NOTE_UPLOAD;
 	wreq->io_streams[0].estimate_write	= ictx->ops->estimate_write;
-	wreq->io_streams[0].prepare_write	= ictx->ops->prepare_write;
 	wreq->io_streams[0].issue_write		= ictx->ops->issue_write;
 	wreq->io_streams[0].collected_to	= start;
 	wreq->io_streams[0].transferred		= 0;
@@ -162,26 +164,12 @@ struct netfs_io_request *netfs_create_write_req(struct address_space *mapping,
 		wreq->io_streams[1].avail	= true;
 		wreq->io_streams[1].active	= true;
 		wreq->io_streams[1].estimate_write = wreq->cache_resources.ops->estimate_write;
-		wreq->io_streams[1].prepare_write = wreq->cache_resources.ops->prepare_write_subreq;
 		wreq->io_streams[1].issue_write = wreq->cache_resources.ops->issue_write;
 		wreq->io_streams[1].alignment	= wreq->cache_resources.dio_size;
 	}
 
 	return wreq;
 }
-
-/**
- * netfs_prepare_write_failed - Note write preparation failed
- * @subreq: The subrequest to mark
- *
- * Mark a subrequest to note that preparation for write failed.
- */
-void netfs_prepare_write_failed(struct netfs_io_subrequest *subreq)
-{
-	__set_bit(NETFS_SREQ_FAILED, &subreq->flags);
-	trace_netfs_sreq(subreq, netfs_sreq_trace_prep_failed);
-}
-EXPORT_SYMBOL(netfs_prepare_write_failed);
 
 /*
  * Allocate and prepare a write subrequest.  Will only return NULL if not
@@ -234,6 +222,7 @@ struct netfs_io_subrequest *netfs_alloc_write_subreq(struct netfs_io_request *wr
 	return subreq;
 }
 
+#if 0 // TODO: Remove old stuff
 /*
  * Prepare a write subrequest.  We need to allocate a new subrequest
  * if we don't have one.
@@ -295,6 +284,7 @@ void netfs_prepare_write(struct netfs_io_request *wreq,
 
 	stream->construct = subreq;
 }
+#endif
 
 /*
  * Advance the state of the amount of data buffered on a stream.
@@ -341,6 +331,44 @@ static int netfs_prepare_buffered_write_buffer(struct netfs_io_subrequest *subre
 	return 0;
 }
 
+/**
+ * netfs_prepare_write_buffer - Get the buffer for a subrequest
+ * @subreq: The subrequest to get the buffer for
+ * @max_segs: Maximum number of segments in buffer (or INT_MAX)
+ *
+ * Extract a slice of buffer from the stream and attach it to the subrequest as
+ * a bio_vec queue.  The maximum amount of data attached is set by
+ * @subreq->len, but this may be shortened if @max_segs would be exceeded.
+ */
+int netfs_prepare_write_buffer(struct netfs_io_subrequest *subreq,
+			       unsigned int max_segs)
+{
+	struct netfs_io_request *rreq = subreq->rreq;
+
+	switch (rreq->origin) {
+	case NETFS_WRITEBACK:
+		if (test_bit(NETFS_RREQ_RETRYING, &rreq->flags))
+			return netfs_prepare_write_retry_buffer(subreq, max_segs);
+		return netfs_prepare_buffered_write_buffer(subreq, max_segs);
+
+	case NETFS_UNBUFFERED_WRITE:
+	case NETFS_DIO_WRITE:
+		return netfs_prepare_unbuffered_write_buffer(subreq, max_segs);
+
+	case NETFS_WRITEBACK_SINGLE:
+		return netfs_prepare_write_single_buffer(subreq, max_segs);
+
+	case NETFS_PGPRIV2_COPY_TO_CACHE:
+		return netfs_prepare_pgpriv2_write_buffer(subreq, max_segs);
+
+	default:
+		WARN_ON_ONCE(1);
+		return -EIO;
+	}
+}
+EXPORT_SYMBOL(netfs_prepare_write_buffer);
+
+#if 0 // TODO: Remove old stuff
 /*
  * Set the I/O iterator for the filesystem/cache to use and dispatch the I/O
  * operation.  The operation may be asynchronous and should call
@@ -395,8 +423,8 @@ void netfs_reissue_write(struct netfs_io_stream *stream,
 	netfs_do_issue_write(stream, subreq);
 }
 
-void netfs_issue_write(struct netfs_io_request *wreq,
-		       struct netfs_io_stream *stream)
+static void netfs_issue_write(struct netfs_io_request *wreq,
+			      struct netfs_io_stream *stream)
 {
 	struct netfs_io_subrequest *subreq = stream->construct;
 
@@ -491,6 +519,7 @@ static int netfs_prep_and_issue_subreq(struct netfs_io_request *wreq,
 	stream->issue_write(subreq);
 	return 0;
 }
+#endif
 
 /*
  * Issue writes for a stream.
@@ -523,7 +552,7 @@ static void netfs_writeback_flush(struct netfs_io_request *wreq,
 			return;
 		}
 
-		ret = netfs_prep_and_issue_subreq(wreq, stream, subreq);
+		ret = stream->issue_write(subreq);
 		if (ret < 0) {
 			/* Ownership of subreq was returned to us. */
 			trace_netfs_sreq(subreq, netfs_sreq_trace_fail);
@@ -651,6 +680,7 @@ static void netfs_writeback_add_folio_to_stream(struct netfs_io_request *wreq,
 	wreq->load_cursor.slot--;
 
 	trace_netfs_bv_slot(wreq->load_cursor.bvecq, wreq->load_cursor.slot - 1);
+	trace_netfs_wback(wreq, folio, params->notes);
 
 	for (int s = 0; s < NR_IO_STREAMS; s++) {
 		struct netfs_io_stream *stream = &wreq->io_streams[s];
@@ -846,31 +876,6 @@ cancel_folio:
 	goto out;
 }
 
-#if 0 // TODO: Remove
-/*
- * End the issuing of writes, letting the collector know we're done.
- */
-static void netfs_end_issue_write(struct netfs_io_request *wreq)
-{
-	bool needs_poke = true;
-
-	netfs_all_subreqs_queued(wreq);
-
-	for (int s = 0; s < NR_IO_STREAMS; s++) {
-		struct netfs_io_stream *stream = &wreq->io_streams[s];
-
-		if (!stream->active)
-			continue;
-		if (!list_empty(&stream->subrequests))
-			needs_poke = false;
-		netfs_issue_write(wreq, stream);
-	}
-
-	if (needs_poke)
-		netfs_wake_collector(wreq);
-}
-#endif
-
 /*
  * Write some of the pending data back to the server
  */
@@ -957,6 +962,25 @@ out:
 }
 EXPORT_SYMBOL(netfs_writepages);
 
+/*
+ * Prepare a buffer for a single monolithic write.
+ */
+static int netfs_prepare_write_single_buffer(struct netfs_io_subrequest *subreq,
+					     unsigned int max_segs)
+{
+	struct netfs_io_request *wreq = subreq->rreq;
+	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
+
+	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
+	bvecq_pos_set(&subreq->content, &subreq->dispatch_pos);
+
+	stream->buffered   = 0;
+	stream->issue_from = subreq->len;
+	wreq->submitted    = subreq->len;
+	netfs_all_subreqs_queued(wreq);
+	return 0;
+}
+
 /**
  * netfs_writeback_single - Write back a monolithic payload
  * @mapping: The mapping to write from
@@ -967,6 +991,11 @@ EXPORT_SYMBOL(netfs_writepages);
  * Write a monolithic, non-pagecache object back to the server and/or the
  * cache.  There's a maximum of one subrequest per stream.  The buffer should
  * be rounded out sufficiently that it can accommodate cache DIO rounding.
+ *
+ * This is normally only used to write to the cache (for AFS directories and
+ * symlinks); it doesn't normally write to the server as well.  The filesystem
+ * can override that by setting NETFS_RREQ_UPLOAD_TO_SERVER when the request is
+ * initialised.
  *
  * Return: 0 if successful; 1 if skipped due to lock conflict and WB_SYNC_NONE;
  * or a negative error code.
@@ -981,6 +1010,11 @@ int netfs_writeback_single(struct address_space *mapping,
 	size_t clen;
 	int ret;
 
+	_enter("%zx,%zx", iov_iter_count(iter), len);
+
+	if (!len)
+		return 0;
+
 	if (!netfs_wb_begin(ictx, wbc->sync_mode == WB_SYNC_NONE)) {
 		/* The VFS will have undirtied the inode. */
 		netfs_single_mark_inode_dirty(&ictx->inode);
@@ -992,9 +1026,9 @@ int netfs_writeback_single(struct address_space *mapping,
 		ret = PTR_ERR(wreq);
 		goto couldnt_start;
 	}
+
 	wreq->len = len;
 	clen = len;
-
 	if (wreq->cache_resources.dio_size > 1) {
 		clen = round_up(len, wreq->cache_resources.dio_size);
 		if (clen > iov_iter_count(iter)) {
@@ -1003,7 +1037,7 @@ int netfs_writeback_single(struct address_space *mapping,
 		}
 	}
 
-	ret = netfs_extract_iter(iter, clen, INT_MAX, &wreq->dispatch_cursor.bvecq,
+	ret = netfs_extract_iter(iter, clen, INT_MAX, &wreq->load_cursor.bvecq,
 				 0, wreq->gfp);
 	if (ret < 0)
 		goto cleanup_free;
@@ -1012,12 +1046,14 @@ int netfs_writeback_single(struct address_space *mapping,
 		goto cleanup_free;
 	}
 
-	bvecq_pos_set(&wreq->collect_cursor, &wreq->dispatch_cursor);
-
 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &wreq->flags);
 	trace_netfs_write(wreq, netfs_write_trace_writeback_single);
 	netfs_stat(&netfs_n_wh_writepages);
 
+	/* This normally just writes to the cache; if the filesystem wants to
+	 * write to the server too, it must set UPLOAD_TO_SERVER in
+	 * ->init_request().
+	 */
 	if (test_bit(NETFS_RREQ_UPLOAD_TO_SERVER, &wreq->flags))
 		wreq->netfs_ops->begin_writeback(wreq);
 
@@ -1028,14 +1064,29 @@ int netfs_writeback_single(struct address_space *mapping,
 		if (!stream->avail)
 			continue;
 
-		netfs_prepare_write(wreq, stream, 0);
-
-		subreq = stream->construct;
-		subreq->len = wreq->len;
+		stream->issue_from = 0;
+		stream->buffered   = len;
 		if (stream->source == NETFS_WRITE_TO_CACHE)
-			subreq->len = clen;
+			stream->buffered = clen;
 
-		netfs_issue_write(wreq, stream);
+		subreq = netfs_alloc_write_subreq(wreq, stream);
+		if (!subreq) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		bvecq_pos_set(&stream->dispatch_cursor, &wreq->load_cursor);
+
+		ret = stream->issue_write(subreq);
+		if (ret < 0) {
+			/* Ownership of subreq was returned to us. */
+			trace_netfs_sreq(subreq, netfs_sreq_trace_fail);
+			stream->buffered -= subreq->len;
+			netfs_write_subrequest_terminated(subreq, ret);
+			/* Punt the error to the collector. */
+		}
+
+		bvecq_pos_unset(&stream->dispatch_cursor);
 	}
 
 	wreq->submitted = wreq->len;

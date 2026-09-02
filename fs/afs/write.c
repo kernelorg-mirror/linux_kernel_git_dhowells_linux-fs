@@ -100,20 +100,6 @@ int afs_estimate_write(struct netfs_io_request *wreq,
 }
 
 /*
- * Prepare a subrequest to write to the server.  This sets the max_len
- * parameter.
- */
-void afs_prepare_write(struct netfs_io_subrequest *subreq)
-{
-	struct netfs_io_stream *stream = &subreq->rreq->io_streams[subreq->stream_nr];
-
-	//if (test_bit(NETFS_SREQ_RETRYING, &subreq->flags))
-	//	subreq->max_len = 512 * 1024;
-	//else
-	stream->sreq_max_len = 256 * 1024 * 1024;
-}
-
-/*
  * Issue a subrequest to write to the server.
  */
 static void afs_issue_write_worker(struct work_struct *work)
@@ -156,11 +142,14 @@ static void afs_issue_write_worker(struct work_struct *work)
 	op->flags		|= AFS_OPERATION_UNINTR;
 	op->ops			= &afs_store_data_operation;
 
+	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 	afs_begin_vnode_operation(op);
 
-	op->store.write_iter	= &subreq->io_iter;
 	op->store.i_size	= umax(pos + len, netfs_read_remote_i_size(&vnode->netfs.inode));
 	op->mtime		= inode_get_mtime(&vnode->netfs.inode);
+
+	iov_iter_bvec_queue(&op->store.write_iter, ITER_SOURCE, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
 
 	afs_wait_for_operation(op);
 	ret = afs_put_operation(op);
@@ -185,11 +174,21 @@ static void afs_issue_write_worker(struct work_struct *work)
 	netfs_write_subrequest_terminated(subreq, ret < 0 ? ret : subreq->len);
 }
 
-void afs_issue_write(struct netfs_io_subrequest *subreq)
+int afs_issue_write(struct netfs_io_subrequest *subreq)
 {
+	int ret;
+
+	if (subreq->len > 256 * 1024 * 1024)
+		subreq->len = 256 * 1024 * 1024;
+	ret = netfs_prepare_write_buffer(subreq, INT_MAX);
+	if (ret < 0)
+		return ret;
+	/* After this point, must fail by termination. */
+
 	subreq->work.func = afs_issue_write_worker;
 	if (!queue_work(system_dfl_wq, &subreq->work))
 		WARN_ON_ONCE(1);
+	return 0;
 }
 
 /*
@@ -200,6 +199,8 @@ void afs_begin_writeback(struct netfs_io_request *wreq)
 {
 	if (S_ISREG(wreq->inode->i_mode))
 		afs_get_writeback_key(wreq);
+
+	wreq->io_streams[0].avail = true;
 }
 
 /*

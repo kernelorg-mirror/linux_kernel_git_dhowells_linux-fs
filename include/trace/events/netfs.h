@@ -49,6 +49,7 @@
 #define netfs_rreq_traces					\
 	EM(netfs_rreq_trace_all_queued,		"ALL-Q  ")	\
 	EM(netfs_rreq_trace_assess,		"ASSESS ")	\
+	EM(netfs_rreq_trace_cache_align_error,	"CA-ALN!")	\
 	EM(netfs_rreq_trace_cache_cancelled,	"CA-CNCL")	\
 	EM(netfs_rreq_trace_cache_failed,	"CA-FAIL")	\
 	EM(netfs_rreq_trace_cache_fail_collect,	"CA-F-CO")	\
@@ -85,7 +86,8 @@
 	EM(netfs_rreq_trace_waited_quiesce,	"DONE-QUIESCE")	\
 	EM(netfs_rreq_trace_wake_ip,		"WAKE-IP")	\
 	EM(netfs_rreq_trace_wake_queue,		"WAKE-Q ")	\
-	E_(netfs_rreq_trace_write_done,		"WR-DONE")
+	EM(netfs_rreq_trace_write_done,		"WR-DONE")	\
+	E_(netfs_rreq_trace_zero_unread,	"ZERO-UR")
 
 #define netfs_sreq_sources					\
 	EM(NETFS_SOURCE_UNKNOWN,		"----")		\
@@ -134,6 +136,7 @@
 	EM(netfs_sreq_trace_superfluous,	"SPRFL")	\
 	EM(netfs_sreq_trace_terminated,		"TERM ")	\
 	EM(netfs_sreq_trace_too_much,		"!TOOM")	\
+	EM(netfs_sreq_trace_too_many_retries,	"!RETR")	\
 	EM(netfs_sreq_trace_wait_for,		"_WAIT")	\
 	EM(netfs_sreq_trace_write,		"WRITE")	\
 	EM(netfs_sreq_trace_write_skip,		"SKIP ")	\
@@ -528,6 +531,31 @@ TRACE_EVENT(netfs_folio,
 		      __entry->pfn,
 		      __entry->ino, __entry->index, __entry->index + __entry->nr - 1,
 		      __print_symbolic(__entry->why, netfs_folio_traces))
+	    );
+
+TRACE_EVENT(netfs_wback,
+	    TP_PROTO(struct netfs_io_request *wreq, struct folio *folio, unsigned int notes),
+
+	    TP_ARGS(wreq, folio, notes),
+
+	    TP_STRUCT__entry(
+		    __field(pgoff_t,			index)
+		    __field(unsigned int,		wreq)
+		    __field(unsigned int,		nr)
+		    __field(unsigned int,		notes)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->wreq = wreq->debug_id;
+		    __entry->notes = notes;
+		    __entry->index = folio->index;
+		    __entry->nr = folio_nr_pages(folio);
+			   ),
+
+	    TP_printk("R=%08x ix=%05lx-%05lx n=%02x",
+		      __entry->wreq,
+		      __entry->index, __entry->index + __entry->nr - 1,
+		      __entry->notes)
 	    );
 
 TRACE_EVENT(netfs_write_iter,
