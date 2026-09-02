@@ -285,10 +285,13 @@ static void netfs_mark_copy_to_cache(struct netfs_io_request *rreq,
 		if (overlap > 0 && copy) {
 			struct folio *folio = bvec_folio(&bq->bv[slot]);
 
+#ifdef CONFIG_NETFS_PGPRIV2
 			if (unlikely(test_bit(NETFS_RREQ_USE_PGPRIV2, &rreq->flags))) {
 				if (!folio_test_private_2(folio))
 					folio_start_private_2(folio);
-			} else {
+			} else
+#endif
+			{
 				if (!folio_get_private(folio))
 					folio_attach_private(folio, NETFS_FOLIO_COPY_TO_CACHE);
 			}
