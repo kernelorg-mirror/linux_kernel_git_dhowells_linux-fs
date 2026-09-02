@@ -55,8 +55,6 @@ struct netfs_io_request *netfs_alloc_request(struct address_space *mapping,
 	rreq->i_size		= i_size_read(inode);
 	rreq->debug_id		= atomic_inc_return(&debug_ids);
 	rreq->wsize		= INT_MAX;
-	rreq->io_streams[0].sreq_max_len = ULONG_MAX;
-	rreq->io_streams[0].sreq_max_segs = 0;
 	spin_lock_init(&rreq->lock);
 	init_waitqueue_head(&rreq->waitq);
 	refcount_set(&rreq->ref, 2);
@@ -150,8 +148,8 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 	if (rreq->cache_resources.ops)
 		rreq->cache_resources.ops->end_operation(&rreq->cache_resources);
 	bvecq_pos_unset(&rreq->load_cursor);
-	bvecq_pos_unset(&rreq->dispatch_cursor);
 	bvecq_pos_unset(&rreq->collect_cursor);
+	bvecq_pos_unset(&rreq->retry_cursor);
 	bvecq_put(rreq->spare);
 	while (rreq->writebacks) {
 		struct netfs_writeback *wback = rreq->writebacks;

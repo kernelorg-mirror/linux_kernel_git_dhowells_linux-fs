@@ -10,6 +10,33 @@
 #include "internal.h"
 
 /*
+ * Prepare the buffer for an unbuffered/DIO write.
+ */
+int netfs_prepare_unbuffered_write_buffer(struct netfs_io_subrequest *subreq,
+					  unsigned int max_segs)
+{
+	struct netfs_io_stream *stream = &subreq->rreq->io_streams[subreq->stream_nr];
+	size_t len;
+
+	bvecq_pos_set(&subreq->io_buffer, &stream->dispatch_cursor);
+	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
+			  &subreq->nr_segs);
+
+	if (len < subreq->len) {
+		subreq->len = len;
+		trace_netfs_sreq(subreq, netfs_sreq_trace_limited);
+	}
+
+	// TODO: Wait here for completion of prev subreq
+
+	stream->issue_from += subreq->len;
+	stream->buffered   -= subreq->len;
+	if (stream->buffered == 0)
+		netfs_all_subreqs_queued(subreq->rreq);
+	return 0;
+}
+
+/*
  * Perform the cleanup rituals after an unbuffered write is complete.
  */
 static void netfs_unbuffered_write_done(struct netfs_io_request *wreq)
@@ -74,9 +101,9 @@ static void netfs_unbuffered_write_collect(struct netfs_io_request *wreq,
 
 	wreq->transferred += subreq->transferred;
 	if (subreq->transferred < subreq->len) {
-		bvecq_pos_unset(&wreq->dispatch_cursor);
-		bvecq_pos_transfer(&wreq->dispatch_cursor, &subreq->io_buffer);
-		bvecq_pos_advance(&wreq->dispatch_cursor, subreq->transferred);
+		bvecq_pos_unset(&stream->dispatch_cursor);
+		bvecq_pos_transfer(&stream->dispatch_cursor, &subreq->io_buffer);
+		bvecq_pos_advance(&stream->dispatch_cursor, subreq->transferred);
 	}
 
 	stream->collected_to = subreq->start + subreq->transferred;
@@ -85,6 +112,7 @@ static void netfs_unbuffered_write_collect(struct netfs_io_request *wreq,
 
 	trace_netfs_collect_stream(wreq, stream);
 	trace_netfs_collect_state(wreq, wreq->collected_to, 0);
+	/* TODO: Progressively clean up wreq->direct_bq */
 }
 
 /*
@@ -103,66 +131,48 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 
 	_enter("%llx", wreq->len);
 
-	bvecq_pos_set(&wreq->collect_cursor, &wreq->dispatch_cursor);
+	stream->issue_from = wreq->start;
+	stream->buffered = wreq->len;
 
 	if (wreq->origin == NETFS_DIO_WRITE)
 		inode_dio_begin(wreq->inode);
-
-	stream->collected_to = wreq->start;
 
 	for (;;) {
 		bool retry = false;
 
 		if (!subreq) {
-			netfs_prepare_write(wreq, stream, wreq->start + wreq->transferred);
-			subreq = stream->construct;
+			subreq = netfs_alloc_write_subreq(wreq, stream);
 			if (!subreq) {
-				wreq->error = -ENOMEM;
 				ret = -ENOMEM;
-				break;
+				goto failed;
 			}
-			stream->construct = NULL;
-		} else {
-			bvecq_pos_set(&subreq->io_buffer, &wreq->dispatch_cursor);
 		}
 
-		/* Check if (re-)preparation failed. */
-		if (unlikely(test_bit(NETFS_SREQ_FAILED, &subreq->flags))) {
-			netfs_write_subrequest_terminated(subreq, subreq->error);
-			wreq->error = subreq->error;
-			break;
-		}
-
-		subreq->len = bvecq_slice(&wreq->dispatch_cursor, stream->sreq_max_len,
-					  stream->sreq_max_segs, &subreq->nr_segs);
-
-		iov_iter_bvec_queue(&subreq->io_iter, ITER_SOURCE,
-				    subreq->io_buffer.bvecq, subreq->io_buffer.slot,
-				    subreq->io_buffer.offset,
-				    subreq->len);
-
-		if (!iov_iter_count(&subreq->io_iter)) {
-			pr_warn("netfs: Unexpected zero-length slice R=%08x\n",
-				wreq->debug_id);
-			__set_bit(NETFS_SREQ_FAILED, &subreq->flags);
-			netfs_write_subrequest_terminated(subreq, -EIO);
-			wreq->error = -EIO;
-			break;
-		}
-
-		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
-		stream->issue_write(subreq);
-
-		/* Async, need to wait. */
-		netfs_wait_for_in_progress_stream(wreq, stream);
-
-		if (test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags)) {
-			retry = true;
-		} else if (test_bit(NETFS_SREQ_FAILED, &subreq->flags)) {
-			wreq->error = subreq->error;
-			netfs_see_subrequest(subreq, netfs_sreq_trace_see_failed);
+		ret = stream->issue_write(subreq);
+		if (ret < 0) {
+			/* Ownership of subreq was returned to us.  Note that
+			 * ->dispatch_pos may or may not be initialised.
+			 */
+			trace_netfs_sreq(subreq, netfs_sreq_trace_fail);
+			netfs_write_subrequest_terminated(subreq, ret);
+			list_del_init(&subreq->rreq_link);
+			netfs_put_subrequest(subreq, netfs_sreq_trace_put_failed);
 			subreq = NULL;
-			break;
+			goto failed;
+		}
+
+		ret = netfs_wait_for_in_progress_subreq(wreq, subreq);
+		if (ret < 0) {
+			if (ret != -EAGAIN) {
+				/* Don't need to lock here as the collection is
+				 * done in this thread.
+				 */
+				list_del_init(&subreq->rreq_link);
+				netfs_put_subrequest(subreq, netfs_sreq_trace_put_failed);
+				subreq = NULL;
+				goto failed;
+			}
+			retry = true;
 		}
 
 		if (!retry) {
@@ -178,19 +188,20 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 			continue;
 		}
 
-		/* We need to retry the last subrequest, so first reset the
-		 * iterator, taking into account what, if anything, we managed
-		 * to transfer.
+		/* We need to retry the last subrequest, so first wind back the
+		 * buffer position.
 		 */
 		subreq->error = -EAGAIN;
 		trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 
-		bvecq_pos_unset(&wreq->dispatch_cursor);
-		bvecq_pos_transfer(&wreq->dispatch_cursor, &subreq->io_buffer);
+		bvecq_pos_unset(&stream->dispatch_cursor);
+		bvecq_pos_transfer(&stream->dispatch_cursor, &subreq->io_buffer);
 
+		stream->issue_from -= subreq->len - subreq->transferred;
+		stream->buffered   += subreq->len - subreq->transferred;
 		if (subreq->transferred > 0) {
-			wreq->transferred += subreq->transferred;
-			bvecq_pos_advance(&wreq->dispatch_cursor, subreq->transferred);
+			wreq->transferred  += subreq->transferred;
+			bvecq_pos_advance(&stream->dispatch_cursor, subreq->transferred);
 		}
 
 		if (stream->source == NETFS_UPLOAD_TO_SERVER &&
@@ -199,24 +210,21 @@ static int netfs_unbuffered_write(struct netfs_io_request *wreq)
 
 		__clear_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
 		__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
-		__clear_bit(NETFS_SREQ_BOUNDARY, &subreq->flags);
 		__clear_bit(NETFS_SREQ_FAILED, &subreq->flags);
-		subreq->start		= wreq->start + wreq->transferred;
-		subreq->len		= wreq->len   - wreq->transferred;
+		__clear_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
+		subreq->start		= stream->issue_from;
+		subreq->len		= stream->buffered;
 		subreq->transferred	= 0;
 		subreq->retry_count	+= 1;
-		stream->sreq_max_len	= UINT_MAX;
-		stream->sreq_max_segs	= INT_MAX;
 
 		netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
 
-		if (stream->prepare_write)
-			stream->prepare_write(subreq);
 		__set_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
 		netfs_stat(&netfs_n_wh_retry_write_subreq);
 	}
 
-	bvecq_pos_unset(&wreq->dispatch_cursor);
+failed:
+	bvecq_pos_unset(&stream->dispatch_cursor);
 	netfs_unbuffered_write_done(wreq);
 	_leave(" = %d", ret);
 	return ret;
@@ -238,6 +246,7 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 					   struct netfs_group *netfs_group)
 {
 	struct netfs_io_request *wreq;
+	struct netfs_io_stream *stream;
 	ssize_t ret;
 	uoff_t start = iocb->ki_pos;
 	uoff_t end = start + iov_iter_count(iter);
@@ -260,7 +269,9 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 	if (IS_ERR(wreq))
 		return PTR_ERR(wreq);
 
-	wreq->io_streams[0].avail = true;
+	stream = &wreq->io_streams[0];
+	wreq->len = iov_iter_count(iter);
+	stream->avail = true;
 	trace_netfs_write(wreq, (iocb->ki_flags & IOCB_DIRECT ?
 				 netfs_write_trace_dio_write :
 				 netfs_write_trace_unbuffered_write));
@@ -270,12 +281,10 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 		 * we have to save the source buffer as the iterator is only
 		 * good until we return.  In such a case, extract an iterator
 		 * to represent as much of the the output buffer as we can
-		 * manage.  Note that the extraction might not be able to
-		 * allocate a sufficiently large bvec array and may shorten the
-		 * request.
+		 * manage.  Note that the extraction may shorten the request.
 		 */
 		ssize_t n = netfs_extract_iter(iter, len, INT_MAX,
-					       &wreq->dispatch_cursor.bvecq, 0, wreq->gfp);
+					       &stream->dispatch_cursor.bvecq, 0, wreq->gfp);
 
 		if (n < 0) {
 			ret = n;
@@ -283,11 +292,9 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 		}
 		wreq->len = n;
 		_debug("dio-write %zx/%zx %u/%u",
-		       n, len, wreq->dispatch_cursor.bvecq->nr_slots,
-		       wreq->dispatch_cursor.bvecq->max_slots);
+		       n, len, stream->dispatch_cursor.bvecq->nr_slots,
+		       stream->dispatch_cursor.bvecq->max_slots);
 	}
-
-	__set_bit(NETFS_RREQ_USE_IO_ITER, &wreq->flags);
 
 	/* Copy the data into the bounce buffer and encrypt it. */
 	// TODO

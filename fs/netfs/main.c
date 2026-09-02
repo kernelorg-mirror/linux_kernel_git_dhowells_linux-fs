@@ -18,6 +18,7 @@ MODULE_DESCRIPTION("Network fs support");
 MODULE_AUTHOR("Red Hat, Inc.");
 MODULE_LICENSE("GPL");
 
+EXPORT_TRACEPOINT_SYMBOL(netfs_rreq);
 EXPORT_TRACEPOINT_SYMBOL(netfs_sreq);
 
 unsigned netfs_debug;

@@ -1473,8 +1473,7 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	struct cifs_tcon *tcon = tlink_tcon(rdata->req->cfile->tlink);
 	struct inode *inode = &ictx->inode;
 	struct smb_rqst rqst = { .rq_iov = rdata->iov,
-				 .rq_nvec = 1,
-				 .rq_iter = rdata->subreq.io_iter };
+				 .rq_nvec = 1};
 	struct cifs_credits credits = {
 		.value = 1,
 		.instance = 0,
@@ -1487,6 +1486,13 @@ cifs_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	cifs_dbg(FYI, "%s: mid=%llu state=%d result=%d bytes=%zu\n",
 		 __func__, mid->mid, mid->mid_state, rdata->result,
 		 rdata->subreq.len);
+
+	if (rdata->got_bytes)
+		iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
+				    rdata->subreq.io_buffer.bvecq,
+				    rdata->subreq.io_buffer.slot,
+				    rdata->subreq.io_buffer.offset,
+				    rdata->subreq.len);
 
 	switch (mid->mid_state) {
 	case MID_RESPONSE_RECEIVED:
@@ -2029,7 +2035,12 @@ cifs_async_writev(struct cifs_io_subrequest *wdata)
 
 	rqst.rq_iov = iov;
 	rqst.rq_nvec = 1;
-	rqst.rq_iter = wdata->subreq.io_iter;
+
+	iov_iter_bvec_queue(&rqst.rq_iter, ITER_SOURCE,
+			    wdata->subreq.io_buffer.bvecq,
+			    wdata->subreq.io_buffer.slot,
+			    wdata->subreq.io_buffer.offset,
+			    wdata->subreq.len);
 
 	cifs_dbg(FYI, "async write at %llu %zu bytes\n",
 		 wdata->subreq.start, wdata->subreq.len);

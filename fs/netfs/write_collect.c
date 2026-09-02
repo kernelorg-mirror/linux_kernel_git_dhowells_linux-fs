@@ -566,6 +566,8 @@ void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error)
 
 	if (IS_ERR_VALUE(transferred_or_error)) {
 		subreq->error = transferred_or_error;
+		if (transferred_or_error == -ENOMEM)
+			set_bit(NETFS_RREQ_SAW_ENOMEM, &wreq->flags);
 
 		switch (subreq->source) {
 		case NETFS_WRITE_TO_CACHE:

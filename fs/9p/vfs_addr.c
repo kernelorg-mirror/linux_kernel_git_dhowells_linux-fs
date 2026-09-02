@@ -67,14 +67,26 @@ static int v9fs_estimate_write(struct netfs_io_request *wreq,
 /*
  * Issue a subrequest to write to the server.
  */
-static void v9fs_issue_write(struct netfs_io_subrequest *subreq)
+static int v9fs_issue_write(struct netfs_io_subrequest *subreq)
 {
+	struct iov_iter iter;
 	struct p9_fid *fid = subreq->rreq->netfs_priv;
 	struct inode *inode = subreq->rreq->inode;
 	struct netfs_inode *ictx = netfs_inode(inode);
 	int err, len;
 
-	len = p9_client_write(fid, subreq->start, &subreq->io_iter, &err);
+	subreq->len = umin(subreq->len, fid->clnt->msize - P9_IOHDRSZ);
+
+	err = netfs_prepare_write_buffer(subreq, INT_MAX);
+	if (err < 0)
+		return err;
+	/* After this point, must fail by termination. */
+
+	iov_iter_bvec_queue(&iter, ITER_SOURCE, subreq->io_buffer.bvecq,
+			    subreq->io_buffer.slot, subreq->io_buffer.offset,
+			    subreq->len);
+
+	len = p9_client_write(fid, subreq->start, &iter, &err);
 	if (len > 0) {
 		uoff_t end = subreq->start + len, i_size, remote, zp;
 		bool set = false;
@@ -102,19 +114,31 @@ static void v9fs_issue_write(struct netfs_io_subrequest *subreq)
 		__set_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
 	}
 	netfs_write_subrequest_terminated(subreq, len ?: err);
+	return 0;
 }
 
 /**
  * v9fs_issue_read - Issue a read from 9P
  * @subreq: The read to make
  */
-static void v9fs_issue_read(struct netfs_io_subrequest *subreq)
+static int v9fs_issue_read(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
+	struct iov_iter iter;
 	struct p9_fid *fid = rreq->netfs_priv;
 	char *target;
 	unsigned long long pos = subreq->start + subreq->transferred;
-	int total = 0, err, len, n;
+	size_t len;
+	int total = 0, err;
+
+	err = netfs_prepare_read_buffer(subreq, INT_MAX);
+	if (err < 0)
+		return err;
+	/* After this point, must fail by termination. */
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->io_buffer.bvecq,
+			    subreq->io_buffer.slot, subreq->io_buffer.offset,
+			    subreq->len);
 
 	if (S_ISLNK(rreq->inode->i_mode)) {
 		/* p9_client_readlink() must not be called for legacy protocols
@@ -131,12 +155,13 @@ static void v9fs_issue_read(struct netfs_io_subrequest *subreq)
 		err = p9_client_readlink(fid, &target);
 		if (err != 0)
 			goto fill_subreq;
-		len = strlen(target);
-		n = copy_to_iter(target, len, &subreq->io_iter);
+		len = min(strlen(target), subreq->len);
+		total = copy_to_iter(target, len, &iter);
 		kfree(target);
-		total = n;
 	} else {
-		total = p9_client_read(fid, pos, &subreq->io_iter, &err);
+		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
+
+		total = p9_client_read(fid, pos, &iter, &err);
 	}
 
 fill_subreq:
@@ -154,6 +179,7 @@ fill_subreq:
 
 	subreq->error = err;
 	netfs_read_subreq_terminated(subreq);
+	return 0;
 }
 
 /**
