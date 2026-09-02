@@ -21,6 +21,57 @@
 #define NEED_RETRY		0x10	/* A front op requests retrying */
 #define SAW_FAILURE		0x20	/* One stream or hit a permanent failure */
 
+struct end_writeback_ctrl {
+	struct xa_state xas;
+	uoff_t fend;
+};
+
+/**
+ * end_writeback_iter - End writeback for the folios within the range
+ * @mapping: The pagecache to modify
+ * @from: Pointer to the starting position
+ * @to: The end position (exclusive)
+ * @ctrl: Iterator state
+ * @folio: The last return from this function or NULL if first call
+ *
+ * Remove the writeback mark on folios that are entirely within in the given
+ * range, where @from is included in the range, but @to is excluded from the
+ * range.
+ *
+ * Return: The folio to end writeback upon or NULL if the next folio isn't
+ * wholly within the range.  Note that this does not necessarily imply that the
+ * ending is complete.  @ctrl->fend is updated to point directly beyond the
+ * folio that was considered and may be negative if cast to loff_t.
+ */
+static
+struct folio *end_writeback_iter(struct address_space *mapping,
+				 uoff_t from, uoff_t to,
+				 struct end_writeback_ctrl *ctrl,
+				 struct folio *folio)
+{
+	if (!folio) {
+		lockdep_assert_in_rcu_read_lock();
+		ctrl->xas = (struct xa_state)
+			__XA_STATE(&mapping->i_pages, from / PAGE_SIZE, 0, 0);
+		folio = xas_find(&ctrl->xas, (to - 1) / PAGE_SIZE);
+	} else {
+		folio_end_writeback(folio);
+	retry:
+		folio = xas_next_entry(&ctrl->xas, (to - 1) / PAGE_SIZE);
+	}
+
+	if (xas_retry(&ctrl->xas, folio))
+		goto retry;
+
+	if (!folio)
+		return NULL;
+
+	ctrl->fend = folio_next_pos(folio);
+	if (ctrl->fend > to)
+		folio = NULL;
+	return folio;
+}
+
 static void netfs_dump_request(const struct netfs_io_request *rreq)
 {
 	pr_err("Request R=%08x r=%d fl=%lx or=%x e=%ld\n",
