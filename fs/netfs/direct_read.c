@@ -177,25 +177,20 @@ ssize_t netfs_unbuffered_read_iter_locked(struct kiocb *iocb, struct iov_iter *i
 	 * buffer for ourselves as the caller's iterator will be trashed when
 	 * we return.
 	 *
-	 * In such a case, extract an iterator to represent as much of the the
-	 * output buffer as we can manage.  Note that the extraction might not
-	 * be able to allocate a sufficiently large bvec array and may shorten
-	 * the request.
+	 * Extract a buffer queue to represent as much of the output buffer as
+	 * we can manage.  The fragments are extracted into a bvecq which will
+	 * have sufficient nodes allocated to hold all the data, though this
+	 * may end up truncated if ENOMEM is encountered.
 	 */
-	if (user_backed_iter(iter)) {
-		ret = netfs_extract_user_iter(iter, rreq->len, &rreq->buffer.iter, 0);
-		if (ret < 0)
-			goto error_put;
-		rreq->direct_bv = (struct bio_vec *)rreq->buffer.iter.bvec;
-		rreq->direct_bv_count = ret;
-		rreq->direct_bv_unpin = iov_iter_extract_will_pin(iter);
-		rreq->len = iov_iter_count(&rreq->buffer.iter);
-	} else {
-		rreq->buffer.iter = *iter;
-		rreq->len = orig_count;
-		rreq->direct_bv_unpin = false;
-		iov_iter_advance(iter, orig_count);
-	}
+	ret = netfs_extract_iter(iter, rreq->len, INT_MAX,
+				 &rreq->direct_bq, 0, rreq->gfp);
+	if (ret < 0)
+		goto error_put;
+
+	rreq->len = ret;
+
+	iov_iter_bvec_queue(&rreq->buffer.iter, ITER_DEST, rreq->direct_bq,
+			    0, 0, rreq->len);
 
 	// TODO: Set up bounce buffer if needed
 
