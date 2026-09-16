@@ -397,12 +397,15 @@ static void netfs_rreq_assess_dio(struct netfs_io_request *rreq)
 
 	if (rreq->origin == NETFS_UNBUFFERED_READ ||
 	    rreq->origin == NETFS_DIO_READ) {
-		for (i = 0; i < rreq->direct_bv_count; i++) {
-			flush_dcache_page(rreq->direct_bv[i].bv_page);
-			// TODO: cifs marks pages in the destination buffer
-			// dirty under some circumstances after a read.  Do we
-			// need to do that too?
-			set_page_dirty(rreq->direct_bv[i].bv_page);
+		for (struct bvecq *bq = rreq->direct_bq; bq; bq = bvecq_next(bq)) {
+			unsigned int nr_slots = bvecq_nr_slots_acquire(bq);
+			/* Read the slot count before the slots. */
+
+			/* Mark the target buffers dirty. */
+			for (i = 0; i < nr_slots; i++) {
+				flush_dcache_page(bq->bv[i].bv_page);
+				set_page_dirty(bq->bv[i].bv_page);
+			}
 		}
 	}
 

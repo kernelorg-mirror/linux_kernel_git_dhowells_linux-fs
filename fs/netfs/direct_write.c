@@ -222,10 +222,10 @@ static void netfs_unbuffered_write_async(struct work_struct *work)
  * encrypted file.  This can also be used for direct I/O writes.
  */
 ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *iter,
-						  struct netfs_group *netfs_group)
+					   struct netfs_group *netfs_group)
 {
 	struct netfs_io_request *wreq;
-	ssize_t ret, n;
+	ssize_t ret;
 	uoff_t start = iocb->ki_pos;
 	uoff_t end = start + iov_iter_count(iter);
 	size_t len = iov_iter_count(iter);
@@ -261,25 +261,20 @@ ssize_t netfs_unbuffered_write_iter_locked(struct kiocb *iocb, struct iov_iter *
 		 * allocate a sufficiently large bvec array and may shorten the
 		 * request.
 		 */
-		if (user_backed_iter(iter)) {
-			n = netfs_extract_user_iter(iter, len, &wreq->buffer.iter, 0);
-			if (n < 0) {
-				ret = n;
-				goto error_put;
-			}
-			wreq->direct_bv = (struct bio_vec *)wreq->buffer.iter.bvec;
-			wreq->direct_bv_count = n;
-			wreq->direct_bv_unpin = iov_iter_extract_will_pin(iter);
-		} else {
-			/* If this is a kernel-generated async DIO request,
-			 * assume that any resources the iterator points to
-			 * (eg. a bio_vec array) will persist till the end of
-			 * the op.
-			 */
-			wreq->buffer.iter = *iter;
-		}
+		ssize_t n = netfs_extract_iter(iter, len, INT_MAX,
+					       &wreq->direct_bq, 0, wreq->gfp);
 
-		wreq->len = iov_iter_count(&wreq->buffer.iter);
+		if (n < 0) {
+			ret = n;
+			goto error_put;
+		}
+		wreq->len = n;
+		_debug("dio-write %zx/%zx %u/%u",
+		       n, len, wreq->direct_bq->nr_slots,
+		       wreq->direct_bq->max_slots);
+
+		iov_iter_bvec_queue(&wreq->buffer.iter, ITER_SOURCE,
+				    wreq->direct_bq, 0, 0, wreq->len);
 	}
 
 	__set_bit(NETFS_RREQ_USE_IO_ITER, &wreq->flags);

@@ -133,7 +133,6 @@ static void netfs_free_request_rcu(struct rcu_head *rcu)
 static void netfs_deinit_request(struct netfs_io_request *rreq)
 {
 	struct netfs_inode *ictx = netfs_inode(rreq->inode);
-	unsigned int i;
 
 	trace_netfs_rreq(rreq, netfs_rreq_trace_free);
 
@@ -148,15 +147,7 @@ static void netfs_deinit_request(struct netfs_io_request *rreq)
 		rreq->netfs_ops->free_request(rreq);
 	if (rreq->cache_resources.ops)
 		rreq->cache_resources.ops->end_operation(&rreq->cache_resources);
-	if (rreq->direct_bv) {
-		for (i = 0; i < rreq->direct_bv_count; i++) {
-			if (rreq->direct_bv[i].bv_page) {
-				if (rreq->direct_bv_unpin)
-					unpin_user_page(rreq->direct_bv[i].bv_page);
-			}
-		}
-		kvfree(rreq->direct_bv);
-	}
+	bvecq_put(rreq->direct_bq);
 	rolling_buffer_clear(&rreq->buffer);
 
 	if (atomic_dec_and_test(&ictx->io_count))
